@@ -17,9 +17,9 @@ documentation = "https://docs.rs/ebpf-isa"
 version = "0.1.0"
 
 [workspace.dependencies]
-ebpf-isa = { path = "crates/ebpf-isa" }
-ebpf-elf = { path = "crates/ebpf-elf" }
-ebpf-disasm = { path = "crates/ebpf-disasm" }
+ebpf-isa = { version = "0.1.0", path = "crates/ebpf-isa" }
+ebpf-elf = { version = "0.1.0", path = "crates/ebpf-elf" }
+ebpf-disasm = { version = "0.1.0", path = "crates/ebpf-disasm" }
 object = "0.40.0"
 thiserror = "2.0.20"
 anyhow = "1.0.104"
