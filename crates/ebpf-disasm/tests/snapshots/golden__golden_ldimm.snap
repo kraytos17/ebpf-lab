@@ -1,0 +1,6 @@
+---
+source: crates/ebpf-disasm/tests/golden.rs
+expression: "disasm_fixture(\"ldimm.bin\")"
+---
+0   r2 = 0x5566778811223344
+2   exit

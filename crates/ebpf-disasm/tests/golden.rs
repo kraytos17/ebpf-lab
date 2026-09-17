@@ -1,0 +1,38 @@
+//! Golden-file tests: fixture `.bin` → disassembly snapshots.
+//!
+//! Run `cargo insta review` to accept updated snapshots after intentional
+//! disassembler changes.
+
+#![allow(clippy::unwrap_used)]
+
+use std::path::PathBuf;
+
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures").join(name)
+}
+
+fn disasm_fixture(name: &str) -> String {
+    let bytes = std::fs::read(fixture(name)).unwrap();
+    let insns = ebpf_isa::decode_program(&bytes).unwrap();
+    ebpf_disasm::disassemble(&insns)
+}
+
+#[test]
+fn golden_mov_exit() {
+    insta::assert_snapshot!(disasm_fixture("mov_exit.bin"));
+}
+
+#[test]
+fn golden_arith() {
+    insta::assert_snapshot!(disasm_fixture("arith.bin"));
+}
+
+#[test]
+fn golden_branch() {
+    insta::assert_snapshot!(disasm_fixture("branch.bin"));
+}
+
+#[test]
+fn golden_ldimm() {
+    insta::assert_snapshot!(disasm_fixture("ldimm.bin"));
+}

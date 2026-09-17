@@ -1,0 +1,3 @@
+* text=auto eol=lf
+tests/fixtures/** linguist-vendored
+*.snap linguist-generated

@@ -1,0 +1,16 @@
+[package]
+name = "ebpf-elf"
+description = "ELF object loading for eBPF programs (sections, relocations)"
+keywords = ["ebpf", "bpf", "elf"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ebpf-isa.workspace = true
+object.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

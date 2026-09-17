@@ -1,0 +1,17 @@
+[package]
+name = "ebpf-isa"
+description = "eBPF instruction encoding and decoding (RawInsn -> Insn)"
+keywords = ["ebpf", "bpf", "decoder"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+insta = "1.48.0"
+
+[lints]
+workspace = true

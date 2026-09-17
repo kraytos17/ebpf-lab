@@ -1,0 +1,12 @@
+/target
+**/target
+.snap.new
+*.snap.new
+.DS_Store
+*.orig
+.env
+/dist
+*.profraw
+*.swp
+*.swo
+.idea/

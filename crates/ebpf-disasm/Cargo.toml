@@ -1,0 +1,17 @@
+[package]
+name = "ebpf-disasm"
+description = "eBPF bytecode disassembler (Insn -> human-readable text)"
+keywords = ["ebpf", "bpf", "disassembler"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ebpf-isa.workspace = true
+
+[dev-dependencies]
+insta = "1.48.0"
+
+[lints]
+workspace = true

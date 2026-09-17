@@ -1,0 +1,6 @@
+---
+source: crates/ebpf-disasm/tests/golden.rs
+expression: "disasm_fixture(\"mov_exit.bin\")"
+---
+0   mov r0, 1
+1   exit

@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ebpf-isa",
+    "crates/ebpf-elf",
+    "crates/ebpf-disasm",
+    "crates/ebpf-lab-cli",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/kraytos17/ebpf-lab"
+homepage = "https://github.com/kraytos17/ebpf-lab"
+documentation = "https://docs.rs/ebpf-isa"
+version = "0.1.0"
+
+[workspace.dependencies]
+ebpf-isa = { path = "crates/ebpf-isa" }
+ebpf-elf = { path = "crates/ebpf-elf" }
+ebpf-disasm = { path = "crates/ebpf-disasm" }
+object = "0.40.0"
+thiserror = "2.0.20"
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "warn", priority = 0 }
+unwrap_used = { level = "warn", priority = 1 }
+
+[profile.dev]
+debug = "line-tables-only"

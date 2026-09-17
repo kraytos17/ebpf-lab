@@ -1,0 +1,24 @@
+[package]
+name = "ebpf-lab-cli"
+description = "ebpf-lab command-line interface (inspect, disasm, cfg, verify, run)"
+keywords = ["ebpf", "bpf", "cli"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ebpf-lab"
+path = "src/main.rs"
+
+[dependencies]
+ebpf-isa.workspace = true
+ebpf-elf.workspace = true
+ebpf-disasm.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
