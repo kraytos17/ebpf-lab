@@ -85,6 +85,7 @@ mod tests {
             0xb7u8, 0x00, 0, 0, 1, 0, 0, 0, // mov64 r0, 1
             0x95, 0, 0, 0, 0, 0, 0, 0, // exit
         ];
+
         let insns = decode_program(&bytes).unwrap();
         let text = disassemble(&insns);
         assert!(text.contains("0   mov r0, 1"));

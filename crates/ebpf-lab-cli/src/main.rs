@@ -5,7 +5,7 @@
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 /// An eBPF laboratory: inspect, verify, execute, optimize.
@@ -38,7 +38,7 @@ enum Command {
 ///
 /// `.bin` is tried implicitly when ELF parsing yields "no programs" and the
 /// extension is `.bin`, or when ELF parsing fails outright on a `.bin` file.
-fn load_programs(path: &std::path::Path) -> anyhow::Result<Vec<ebpf_elf::ElfProgram>> {
+fn load_programs(path: &Path) -> anyhow::Result<Vec<ebpf_elf::ElfProgram>> {
     let is_bin = path.extension().is_some_and(|e| e == "bin");
     match ebpf_elf::load_object(path) {
         Ok(programs) => Ok(programs),
@@ -51,11 +51,12 @@ fn load_programs(path: &std::path::Path) -> anyhow::Result<Vec<ebpf_elf::ElfProg
     }
 }
 
-fn cmd_inspect(path: &std::path::Path) -> anyhow::Result<()> {
+fn cmd_inspect(path: &Path) -> anyhow::Result<()> {
     let programs = load_programs(path)?;
     for prog in &programs {
         let insns = ebpf_isa::decode_program(&prog.bytes)
             .with_context(|| format!("decoding program `{}`", prog.name))?;
+
         println!("Program: {}", prog.name);
         println!("Type: {}", prog.prog_type);
         println!("Instructions: {}", insns.len());
@@ -66,7 +67,7 @@ fn cmd_inspect(path: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_disasm(path: &std::path::Path) -> anyhow::Result<()> {
+fn cmd_disasm(path: &Path) -> anyhow::Result<()> {
     let programs = load_programs(path)?;
     for prog in &programs {
         let insns = ebpf_isa::decode_program(&prog.bytes)
@@ -83,6 +84,7 @@ fn main() -> anyhow::Result<()> {
         1 => "info",
         _ => "debug",
     };
+
     tracing_subscriber::fmt()
         .with_env_filter(format!("ebpf_lab={filter}"))
         .with_writer(std::io::stderr)

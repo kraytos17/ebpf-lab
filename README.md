@@ -44,7 +44,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --locked
 
 ## Milestones
 
-- v0.1 ELF + disassembler (this commit)
+- v0.1 ELF + disassembler
 - v0.2 CFG (`petgraph`, DOT export)
 - v0.3 VM interpreter (+ `rbpf` differential oracle in tests)
 - v0.4 memory model, v0.5 verifier, v0.6 abstract interpretation

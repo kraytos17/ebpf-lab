@@ -39,6 +39,7 @@ pub fn decode_program(bytes: &[u8]) -> Result<Vec<Insn>, DecodeError> {
         if remaining.len() < RawInsn::SIZE {
             return Err(DecodeError::Truncated { remaining: remaining.len() });
         }
+
         let raw = RawInsn::from_bytes(remaining[..8].try_into().expect("len checked"));
         let (insn, consumed) = decode_one(raw, remaining)?;
         out.push(insn);
@@ -59,6 +60,7 @@ fn decode_one(raw: RawInsn, rest: &[u8]) -> Result<(Insn, usize), DecodeError> {
         if rest.len() < 16 {
             return Err(DecodeError::TruncatedWide);
         }
+
         let next = RawInsn::from_bytes(rest[8..16].try_into().expect("len checked"));
         let imm = i64::from(raw.imm.cast_unsigned()) | (i64::from(next.imm.cast_unsigned()) << 32);
         return Ok((Insn::LoadImm64 { dst: Reg::new(raw.dst())?, imm }, 16));
@@ -143,6 +145,7 @@ mod tests {
         let exit = word(0x95, 0x00, 0, 0);
         let call = word(0x85, 0x00, 0, 1);
         let mut bytes = Vec::new();
+
         bytes.extend_from_slice(&call);
         bytes.extend_from_slice(&exit);
         let insns = decode_program(&bytes).unwrap();
@@ -155,6 +158,7 @@ mod tests {
         let lo = word(0x18, 0x02, 0, 0x1122_3344u32.cast_signed());
         let hi = word(0x00, 0x00, 0, 0x5566_7788u32.cast_signed());
         let mut bytes = Vec::new();
+
         bytes.extend_from_slice(&lo);
         bytes.extend_from_slice(&hi);
         let insns = decode_program(&bytes).unwrap();
@@ -180,6 +184,7 @@ mod tests {
         let load = word(0x79, 0x21, -8, 0); // ldxdw r1, [r2-8]
         let store = word(0x7b, 0x31, 8, 0); // stxdw [r1+8], r3
         let mut bytes = Vec::new();
+
         bytes.extend_from_slice(&load);
         bytes.extend_from_slice(&store);
         let insns = decode_program(&bytes).unwrap();
