@@ -16,6 +16,7 @@ ebpf-isa.workspace = true
 ebpf-elf.workspace = true
 ebpf-disasm.workspace = true
 ebpf-cfg.workspace = true
+ebpf-vm.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

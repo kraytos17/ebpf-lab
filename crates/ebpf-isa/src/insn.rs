@@ -130,11 +130,17 @@ pub enum AluOp {
     /// `>>=` (arithmetic).
     Arsh,
     /// Byte swap (`to_le`/`to_be` 16/32/64).
-    End,
+    End {
+        /// `true` for big-endian output (`BPF_TO_BE`), `false` for little (`BPF_TO_LE`).
+        to_be: bool,
+    },
 }
 
 impl AluOp {
     /// Decode from a full ALU/ALU64 opcode byte.
+    ///
+    /// The `BPF_END` direction (`BPF_TO_LE` vs `BPF_TO_BE`) rides on the
+    /// source bit (bit 3), which doubles as the LE/BE selector for this op.
     ///
     /// # Errors
     ///
@@ -154,7 +160,7 @@ impl AluOp {
             0xa => Ok(Self::Xor),
             0xb => Ok(Self::Mov),
             0xc => Ok(Self::Arsh),
-            0xd => Ok(Self::End),
+            0xd => Ok(Self::End { to_be: opcode & 0x08 != 0 }),
             v => Err(DecodeError::UnknownAluOp(v)),
         }
     }
@@ -176,7 +182,7 @@ impl AluOp {
             Self::Xor => "xor",
             Self::Mov => "mov",
             Self::Arsh => "arsh",
-            Self::End => "end",
+            Self::End { .. } => "end",
         }
     }
 }
@@ -192,7 +198,7 @@ pub enum JumpOp {
     Gt,
     /// `>=`.
     Ge,
-    /// Set-map / bitwise set test (legacy `BPF_SET`).
+    /// Bitwise set test: jump taken iff `(dst & src) != 0` (`BPF_JSET`).
     Set,
     /// `!=`.
     Ne,
@@ -200,15 +206,13 @@ pub enum JumpOp {
     Sgt,
     /// Signed `>=`.
     Sge,
-    /// Bitwise AND (`dst & src` as condition).
-    And,
-    /// `<`.
+    /// `<` (`BPF_JLT`).
     Lt,
-    /// `<=`.
+    /// `<=` (`BPF_JLE`).
     Le,
-    /// Signed `<`.
+    /// Signed `<` (`BPF_JSLT`).
     Slt,
-    /// Signed `<=`.
+    /// Signed `<=` (`BPF_JSLE`).
     Sle,
     /// Function call (`BPF_CALL`, handled as [`Insn::Call`] instead).
     Call,
@@ -234,11 +238,10 @@ impl JumpOp {
             0x7 => Ok(Self::Sge),
             0x8 => Ok(Self::Call),
             0x9 => Ok(Self::Exit),
-            0xa => Ok(Self::And),
-            0xb => Ok(Self::Lt),
-            0xc => Ok(Self::Le),
-            0xd => Ok(Self::Slt),
-            0xe => Ok(Self::Sle),
+            0xa => Ok(Self::Lt),
+            0xb => Ok(Self::Le),
+            0xc => Ok(Self::Slt),
+            0xd => Ok(Self::Sle),
             v => Err(DecodeError::UnknownJumpOp(v)),
         }
     }
@@ -255,7 +258,6 @@ impl JumpOp {
             Self::Ne => "jne",
             Self::Sgt => "jsgt",
             Self::Sge => "jsge",
-            Self::And => "jand",
             Self::Lt => "jlt",
             Self::Le => "jle",
             Self::Slt => "jslt",
@@ -363,6 +365,8 @@ pub enum Insn {
     },
     /// Conditional or unconditional jump.
     Jump {
+        /// `true` for 64-bit comparisons (`BPF_JMP`), `false` for 32-bit (`BPF_JMP32`).
+        is64: bool,
         /// Condition.
         op: JumpOp,
         /// Compared register.
@@ -394,7 +398,7 @@ impl fmt::Display for Insn {
                 let suffix = if *is64 { "" } else { "32" };
                 match (op, src) {
                     (AluOp::Neg, _) => write!(f, "neg{suffix} {dst}"),
-                    (AluOp::End, Operand::Imm(v)) => write!(f, "end{suffix} {dst}, {v}"),
+                    (AluOp::End { .. }, Operand::Imm(v)) => write!(f, "end{suffix} {dst}, {v}"),
                     _ => write!(f, "{}{suffix} {dst}, {src}", op.mnemonic()),
                 }
             }
@@ -410,7 +414,7 @@ impl fmt::Display for Insn {
                 }
             },
             Self::LoadImm64 { dst, imm } => write!(f, "{dst} = {imm:#x}"),
-            Self::Jump { op, dst, src, offset } => match op {
+            Self::Jump { op, dst, src, offset, .. } => match op {
                 JumpOp::Always => write!(f, "ja +{offset}"),
                 _ => write!(f, "{} {dst}, {src}, +{offset}", op.mnemonic()),
             },

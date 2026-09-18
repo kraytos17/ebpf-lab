@@ -5,6 +5,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-18
+
+### Added
+
+- `ebpf-vm`: concrete interpreter (`Vm`, `step`/`run`, `HelperRegistry`,
+  `memory::MemoryView` stack stub). Kernel-faithful ALU (zero-extension,
+  shift masking, div-by-zero yields zero), full jump semantics incl.
+  32-bit `JMP32`, `BPF_END` byte swaps, `r10` frame pointer.
+- CLI: `ebpf-lab run [--trace]` (exit code or per-step reg-diff trace).
+- Fixtures `loop.bin`, `stack.bin`; 13 VM unit tests + 2 memory tests.
+- Criterion benches `decode`, `cfg`, `vm` (baselines: decode ~1.1 GiB/s,
+  CFG ~35–50 Melem/s, VM ~180 Melem/s; observation mode, no gates yet).
+
+### Fixed
+
+- `JumpOp` nibbles `0xa`–`0xd` now decode to `Lt`/`Le`/`Slt`/`Sle`
+  (were shifted by a phantom `And` variant); `0xe`–`0xf` correctly rejected.
+- `BPF_END` (`0xdc`) no longer mis-decoded as register-source; direction
+  rides in `AluOp::End { to_be }`.
+- `Insn::Jump` carries `is64` for `JMP` vs `JMP32` semantics.
+
 ## [0.2.0] - 2026-09-18
 
 ### Added
@@ -44,3 +65,4 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 [0.1.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.1.0
 [0.2.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.2.0
+[0.3.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.3.0

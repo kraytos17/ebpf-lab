@@ -1,7 +1,7 @@
 [package]
-name = "ebpf-cfg"
-description = "eBPF control-flow graph construction (leaders, blocks, DOT export)"
-keywords = ["ebpf", "bpf", "cfg", "graph"]
+name = "ebpf-vm"
+description = "Concrete eBPF interpreter (registers, memory stub, helpers, tracing)"
+keywords = ["ebpf", "bpf", "vm", "interpreter"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,6 @@ license.workspace = true
 
 [dependencies]
 ebpf-isa.workspace = true
-ebpf-disasm.workspace = true
-petgraph.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
@@ -18,7 +16,7 @@ criterion.workspace = true
 insta = "1.48.0"
 
 [[bench]]
-name = "cfg"
+name = "vm"
 harness = false
 
 [lints]

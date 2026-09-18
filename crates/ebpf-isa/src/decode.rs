@@ -69,14 +69,21 @@ fn decode_one(raw: RawInsn, rest: &[u8]) -> Result<(Insn, usize), DecodeError> {
         class::ALU64 | class::ALU => {
             let is64 = klass == class::ALU64;
             let op = AluOp::from_opcode(raw.opcode)?;
-            let src = decode_operand(raw)?;
+            // BPF_END reuses the source bit as the LE/BE selector, so its
+            // operand is always the immediate width (16/32/64).
+            let src = if matches!(op, AluOp::End { .. }) {
+                Operand::Imm(raw.imm)
+            } else {
+                decode_operand(raw)?
+            };
             Ok((Insn::Alu { is64, op, dst: Reg::new(raw.dst())?, src }, RawInsn::SIZE))
         }
         class::JMP | class::JMP32 => {
+            let is64 = klass == class::JMP;
             let op = JumpOp::from_opcode(raw.opcode)?;
             let src = decode_operand(raw)?;
             Ok((
-                Insn::Jump { op, dst: Reg::new(raw.dst())?, src, offset: raw.offset },
+                Insn::Jump { is64, op, dst: Reg::new(raw.dst())?, src, offset: raw.offset },
                 RawInsn::SIZE,
             ))
         }
@@ -174,7 +181,13 @@ mod tests {
         let insns = decode_program(&bytes).unwrap();
         assert_eq!(
             insns[0],
-            Insn::Jump { op: JumpOp::Eq, dst: Reg(1), src: Operand::Imm(10), offset: 3 }
+            Insn::Jump {
+                is64: true,
+                op: JumpOp::Eq,
+                dst: Reg(1),
+                src: Operand::Imm(10),
+                offset: 3
+            }
         );
     }
 

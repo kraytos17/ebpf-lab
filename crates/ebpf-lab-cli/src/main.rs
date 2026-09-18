@@ -1,7 +1,7 @@
 //! `ebpf-lab` — inspect, verify, execute, and optimize eBPF programs.
 //!
-//! v0.2 surface: `inspect`, `disasm`, and `cfg`. Later milestones add
-//! `verify`, `run`, `trace`, `optimize`, `xdp`, and `map`.
+//! v0.3 surface: `inspect`, `disasm`, `cfg`, and `run`. Later milestones add
+//! `verify`, `trace`, `optimize`, `xdp`, and `map`.
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -39,6 +39,14 @@ enum Command {
         /// Emit Graphviz DOT instead of the block listing.
         #[arg(long)]
         dot: bool,
+    },
+    /// Execute the program in the interpreter (`r0` is the exit code).
+    Run {
+        /// Path to a `.o` ELF object or a flat `.bin` of raw instructions.
+        path: PathBuf,
+        /// Print each step (instruction plus changed registers).
+        #[arg(long)]
+        trace: bool,
     },
 }
 
@@ -127,6 +135,50 @@ fn cmd_cfg(path: &Path, dot: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Default step budget for `run` (bounds infinite loops).
+const DEFAULT_MAX_STEPS: usize = 1_000_000;
+
+fn cmd_run(path: &Path, trace: bool) -> anyhow::Result<()> {
+    use ebpf_vm::StepResult;
+    for prog in &load_decoded(path)? {
+        let mut vm = ebpf_vm::Vm::new(prog.insns.clone());
+        if !trace {
+            match vm.run(DEFAULT_MAX_STEPS) {
+                StepResult::Exit(code) => println!("exit: {code}"),
+                StepResult::Error(e) => println!("error: {e}"),
+                StepResult::Continue => unreachable!("run never returns Continue"),
+            }
+            continue;
+        }
+        loop {
+            let pc = vm.pc();
+            let before = *vm.regs();
+            match vm.step() {
+                StepResult::Continue => {
+                    let after = vm.regs();
+                    let changed: Vec<String> = before
+                        .iter()
+                        .zip(after.iter())
+                        .enumerate()
+                        .filter(|(i, (a, b))| a != b && *i != usize::from(ebpf_vm::FRAME_PTR))
+                        .map(|(i, (_, b))| format!("r{i} = {b}"))
+                        .collect();
+                    println!("PC {pc}: {}  [{}]", prog.insns[pc], changed.join(", "));
+                }
+                StepResult::Exit(code) => {
+                    println!("exit: {code}");
+                    break;
+                }
+                StepResult::Error(e) => {
+                    println!("error at PC {pc}: {e}");
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let filter = match cli.verbose {
@@ -144,5 +196,6 @@ fn main() -> anyhow::Result<()> {
         Command::Inspect { path } => cmd_inspect(path),
         Command::Disasm { path } => cmd_disasm(path),
         Command::Cfg { path, dot } => cmd_cfg(path, *dot),
+        Command::Run { path, trace } => cmd_run(path, *trace),
     }
 }
