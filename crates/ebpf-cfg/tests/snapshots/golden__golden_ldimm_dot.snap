@@ -1,0 +1,8 @@
+---
+source: crates/ebpf-cfg/tests/golden.rs
+expression: "dot_fixture(\"ldimm.bin\")"
+---
+digraph cfg {
+  node [shape=box, fontname="monospace"];
+  n0 [label="block 0 [slots 0..3]\l0   r2 = 0x5566778811223344\l2   exit\l"];
+}

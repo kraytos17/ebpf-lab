@@ -1,7 +1,7 @@
 //! `ebpf-lab` — inspect, verify, execute, and optimize eBPF programs.
 //!
-//! v0.1 surface: `inspect` and `disasm`. Later milestones add
-//! `cfg`, `verify`, `run`, `trace`, `optimize`, `xdp`, and `map`.
+//! v0.2 surface: `inspect`, `disasm`, and `cfg`. Later milestones add
+//! `verify`, `run`, `trace`, `optimize`, `xdp`, and `map`.
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -32,6 +32,14 @@ enum Command {
         /// Path to a `.o` ELF object or a flat `.bin` of raw instructions.
         path: PathBuf,
     },
+    /// Print the control-flow graph (block listing, or DOT with `--dot`).
+    Cfg {
+        /// Path to a `.o` ELF object or a flat `.bin` of raw instructions.
+        path: PathBuf,
+        /// Emit Graphviz DOT instead of the block listing.
+        #[arg(long)]
+        dot: bool,
+    },
 }
 
 /// Load programs from `path`, accepting either ELF `.o` or flat `.bin`.
@@ -51,28 +59,70 @@ fn load_programs(path: &Path) -> anyhow::Result<Vec<ebpf_elf::ElfProgram>> {
     }
 }
 
-fn cmd_inspect(path: &Path) -> anyhow::Result<()> {
-    let programs = load_programs(path)?;
-    for prog in &programs {
-        let insns = ebpf_isa::decode_program(&prog.bytes)
-            .with_context(|| format!("decoding program `{}`", prog.name))?;
+/// A program with its decoded instruction stream.
+struct DecodedProgram {
+    /// Section name (or file path for flat `.bin` input).
+    name: String,
+    /// Inferred program type.
+    prog_type: ebpf_elf::ProgType,
+    /// Relocation count (resolved in a later milestone).
+    relocations: usize,
+    /// Decoded instructions shared by every downstream stage.
+    insns: Vec<ebpf_isa::Insn>,
+}
 
+/// Load and decode every program in `path` (ELF `.o` or flat `.bin`).
+fn load_decoded(path: &Path) -> anyhow::Result<Vec<DecodedProgram>> {
+    load_programs(path)?
+        .into_iter()
+        .map(|prog| {
+            let insns = ebpf_isa::decode_program(&prog.bytes)
+                .with_context(|| format!("decoding program `{}`", prog.name))?;
+            Ok(DecodedProgram {
+                name: prog.name,
+                prog_type: prog.prog_type,
+                relocations: prog.relocations.len(),
+                insns,
+            })
+        })
+        .collect()
+}
+
+fn cmd_inspect(path: &Path) -> anyhow::Result<()> {
+    for prog in &load_decoded(path)? {
         println!("Program: {}", prog.name);
         println!("Type: {}", prog.prog_type);
-        println!("Instructions: {}", insns.len());
-        println!("Relocations: {}", prog.relocations.len());
+        println!("Instructions: {}", prog.insns.len());
+        println!("Relocations: {}", prog.relocations);
         println!();
-        print!("{}", ebpf_disasm::disassemble(&insns));
+        print!("{}", ebpf_disasm::disassemble(&prog.insns));
     }
     Ok(())
 }
 
 fn cmd_disasm(path: &Path) -> anyhow::Result<()> {
-    let programs = load_programs(path)?;
-    for prog in &programs {
-        let insns = ebpf_isa::decode_program(&prog.bytes)
-            .with_context(|| format!("decoding program `{}`", prog.name))?;
-        print!("{}", ebpf_disasm::disassemble(&insns));
+    for prog in &load_decoded(path)? {
+        print!("{}", ebpf_disasm::disassemble(&prog.insns));
+    }
+    Ok(())
+}
+
+fn cmd_cfg(path: &Path, dot: bool) -> anyhow::Result<()> {
+    for prog in &load_decoded(path)? {
+        let insns = &prog.insns;
+        let cfg = ebpf_cfg::build_cfg(insns)
+            .with_context(|| format!("building CFG for `{}`", prog.name))?;
+        if dot {
+            print!("{}", ebpf_cfg::to_dot(&cfg, insns));
+        } else {
+            println!("Blocks: {}  Edges: {}", cfg.graph.node_count(), cfg.graph.edge_count());
+            for node in cfg.graph.node_indices() {
+                let bb = &cfg.graph[node];
+                println!("block {}: [{}..{})", node.index(), bb.start, bb.end);
+                let base = cfg.slot_of[bb.start] as usize;
+                print!("{}", ebpf_disasm::disassemble_from(&insns[bb.start..bb.end], base));
+            }
+        }
     }
     Ok(())
 }
@@ -93,5 +143,6 @@ fn main() -> anyhow::Result<()> {
     match &cli.command {
         Command::Inspect { path } => cmd_inspect(path),
         Command::Disasm { path } => cmd_disasm(path),
+        Command::Cfg { path, dot } => cmd_cfg(path, *dot),
     }
 }

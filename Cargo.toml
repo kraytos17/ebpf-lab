@@ -4,6 +4,7 @@ members = [
     "crates/ebpf-isa",
     "crates/ebpf-elf",
     "crates/ebpf-disasm",
+    "crates/ebpf-cfg",
     "crates/ebpf-lab-cli",
 ]
 
@@ -14,13 +15,15 @@ license = "MIT"
 repository = "https://github.com/kraytos17/ebpf-lab"
 homepage = "https://github.com/kraytos17/ebpf-lab"
 documentation = "https://docs.rs/ebpf-isa"
-version = "0.1.0"
+version = "0.2.0"
 
 [workspace.dependencies]
-ebpf-isa = { version = "0.1.0", path = "crates/ebpf-isa" }
-ebpf-elf = { version = "0.1.0", path = "crates/ebpf-elf" }
-ebpf-disasm = { version = "0.1.0", path = "crates/ebpf-disasm" }
+ebpf-isa = { version = "0.2.0", path = "crates/ebpf-isa" }
+ebpf-elf = { version = "0.2.0", path = "crates/ebpf-elf" }
+ebpf-disasm = { version = "0.2.0", path = "crates/ebpf-disasm" }
+ebpf-cfg = { version = "0.2.0", path = "crates/ebpf-cfg" }
 object = "0.40.0"
+petgraph = "0.8.3"
 thiserror = "2.0.20"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }

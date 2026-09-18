@@ -22,11 +22,12 @@ crates/
   ebpf-isa/      # instruction encoding/decoding (RawInsn -> Insn)
   ebpf-elf/      # ELF/.o parsing, section extraction (object crate)
   ebpf-disasm/   # bytecode -> human-readable text
+  ebpf-cfg/      # control-flow graph (BasicBlock, Cfg, DOT export)
   ebpf-lab-cli/  # `ebpf-lab` binary (clap derive)
 tests/fixtures/  # hand-assembled .bin fixtures
 ```
 
-Later milestones add `ebpf-cfg`, `ebpf-vm`, `ebpf-verifier`, `ebpf-maps`,
+Later milestones add `ebpf-vm`, `ebpf-verifier`, `ebpf-maps`,
 `ebpf-xdp`, `ebpf-ssa`, `ebpf-opt` — each consuming the same decoded
 `Vec<Insn>` from `ebpf-isa`.
 

@@ -1,0 +1,13 @@
+---
+source: crates/ebpf-cfg/tests/golden.rs
+expression: "dot_fixture(\"branch.bin\")"
+---
+digraph cfg {
+  node [shape=box, fontname="monospace"];
+  n0 [label="block 0 [slots 0..3]\l0   mov r1, 10\l1   mov r0, 1\l2   jeq r1, 10, +1\l"];
+  n1 [label="block 1 [slots 3..4]\l0   mov r0, 2\l"];
+  n2 [label="block 2 [slots 4..5]\l0   exit\l"];
+  n0 -> n2 [label="true"];
+  n0 -> n1 [label="false"];
+  n1 -> n2 [label=""];
+}

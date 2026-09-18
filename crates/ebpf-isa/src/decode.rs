@@ -3,7 +3,7 @@
 //! Decodes a raw little-endian instruction stream into the structured form
 //! shared by the disassembler, CFG builder, VM, and verifier.
 
-use crate::insn::{DecodeError, Insn, Operand, RawInsn, Reg};
+use crate::insn::{AluOp, DecodeError, Insn, JumpOp, MemSize, Operand, RawInsn, Reg};
 use crate::opcode::{self, class};
 
 /// Decode a whole program from raw bytes.
@@ -15,11 +15,8 @@ use crate::opcode::{self, class};
 ///
 /// Returns [`DecodeError`] on truncation, bad registers, or unknown classes/ops.
 ///
-/// # Panics
-///
-/// Never panics on its own; the internal slice conversion is guarded by the
-/// length check above (clippy's `missing_panics_doc` fires on the
-/// `expect`, hence this section).
+/// This function never panics: every slice access is fallible and mapped to
+/// [`DecodeError`].
 ///
 /// # Example
 ///
@@ -40,7 +37,9 @@ pub fn decode_program(bytes: &[u8]) -> Result<Vec<Insn>, DecodeError> {
             return Err(DecodeError::Truncated { remaining: remaining.len() });
         }
 
-        let raw = RawInsn::from_bytes(remaining[..8].try_into().expect("len checked"));
+        let chunk: &[u8; RawInsn::SIZE] =
+            remaining.first_chunk().ok_or(DecodeError::Truncated { remaining: remaining.len() })?;
+        let raw = RawInsn::from_bytes(chunk);
         let (insn, consumed) = decode_one(raw, remaining)?;
         out.push(insn);
         i += consumed;
@@ -57,24 +56,24 @@ fn decode_one(raw: RawInsn, rest: &[u8]) -> Result<(Insn, usize), DecodeError> {
         return Ok((Insn::Call { func: raw.imm.cast_unsigned() }, RawInsn::SIZE));
     }
     if raw.opcode == opcode::LD_IMM_DW {
-        if rest.len() < 16 {
-            return Err(DecodeError::TruncatedWide);
-        }
-
-        let next = RawInsn::from_bytes(rest[8..16].try_into().expect("len checked"));
+        let wide: &[u8; 16] = rest.first_chunk().ok_or(DecodeError::TruncatedWide)?;
+        let hi: &[u8; RawInsn::SIZE] =
+            wide[RawInsn::SIZE..16].try_into().map_err(|_| DecodeError::TruncatedWide)?;
+        let next = RawInsn::from_bytes(hi);
         let imm = i64::from(raw.imm.cast_unsigned()) | (i64::from(next.imm.cast_unsigned()) << 32);
         return Ok((Insn::LoadImm64 { dst: Reg::new(raw.dst())?, imm }, 16));
     }
 
-    match opcode::klass(raw.opcode) {
+    let klass = opcode::klass(raw.opcode);
+    match klass {
         class::ALU64 | class::ALU => {
-            let is64 = opcode::klass(raw.opcode) == class::ALU64;
-            let op = crate::insn::AluOp::from_opcode(raw.opcode)?;
+            let is64 = klass == class::ALU64;
+            let op = AluOp::from_opcode(raw.opcode)?;
             let src = decode_operand(raw)?;
             Ok((Insn::Alu { is64, op, dst: Reg::new(raw.dst())?, src }, RawInsn::SIZE))
         }
         class::JMP | class::JMP32 => {
-            let op = crate::insn::JumpOp::from_opcode(raw.opcode)?;
+            let op = JumpOp::from_opcode(raw.opcode)?;
             let src = decode_operand(raw)?;
             Ok((
                 Insn::Jump { op, dst: Reg::new(raw.dst())?, src, offset: raw.offset },
@@ -82,7 +81,7 @@ fn decode_one(raw: RawInsn, rest: &[u8]) -> Result<(Insn, usize), DecodeError> {
             ))
         }
         class::LDX => {
-            let size = crate::insn::MemSize::from_opcode(raw.opcode)?;
+            let size = MemSize::from_opcode(raw.opcode)?;
             Ok((
                 Insn::Load {
                     size,
@@ -94,8 +93,8 @@ fn decode_one(raw: RawInsn, rest: &[u8]) -> Result<(Insn, usize), DecodeError> {
             ))
         }
         class::ST | class::STX => {
-            let size = crate::insn::MemSize::from_opcode(raw.opcode)?;
-            let src = if opcode::klass(raw.opcode) == class::ST {
+            let size = MemSize::from_opcode(raw.opcode)?;
+            let src = if klass == class::ST {
                 Operand::Imm(raw.imm)
             } else {
                 Operand::Reg(Reg::new(raw.src())?)

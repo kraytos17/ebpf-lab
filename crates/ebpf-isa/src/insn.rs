@@ -386,6 +386,41 @@ pub enum Insn {
     },
 }
 
+impl fmt::Display for Insn {
+    /// Canonical text form (the same rendering the disassembler prints).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Alu { is64, op, dst, src } => {
+                let suffix = if *is64 { "" } else { "32" };
+                match (op, src) {
+                    (AluOp::Neg, _) => write!(f, "neg{suffix} {dst}"),
+                    (AluOp::End, Operand::Imm(v)) => write!(f, "end{suffix} {dst}, {v}"),
+                    _ => write!(f, "{}{suffix} {dst}, {src}", op.mnemonic()),
+                }
+            }
+            Self::Load { size, dst, base, offset } => {
+                write!(f, "{dst} = *({} *)({base} + {offset})", size.mnemonic())
+            }
+            Self::Store { size, base, offset, src } => match src {
+                Operand::Imm(v) => {
+                    write!(f, "*({} *)({base} + {offset}) = {v}", size.mnemonic())
+                }
+                Operand::Reg(r) => {
+                    write!(f, "*({} *)({base} + {offset}) = {r}", size.mnemonic())
+                }
+            },
+            Self::LoadImm64 { dst, imm } => write!(f, "{dst} = {imm:#x}"),
+            Self::Jump { op, dst, src, offset } => match op {
+                JumpOp::Always => write!(f, "ja +{offset}"),
+                _ => write!(f, "{} {dst}, {src}, +{offset}", op.mnemonic()),
+            },
+            Self::Call { func } => write!(f, "call {func}"),
+            Self::Exit => write!(f, "exit"),
+            Self::Unknown { raw } => write!(f, "unknown 0x{:02x}", raw.opcode),
+        }
+    }
+}
+
 /// Decode failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum DecodeError {
