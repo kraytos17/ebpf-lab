@@ -66,6 +66,27 @@ pub struct Reg(pub u8);
 pub struct InvalidReg(pub u8);
 
 impl Reg {
+    /// Frame-pointer register `r10` (read-only in the VM).
+    pub const FRAME_PTR: Self = Self(10);
+
+    /// Array index for this register.
+    ///
+    /// The single `as` cast in the codebase for register indexing: `Reg`
+    /// is validated to `0..=10` at decode, so every other site indexes
+    /// through `Index<Reg>` impls instead of casting.
+    #[inline]
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    /// Whether this is the read-only frame pointer.
+    #[inline]
+    #[must_use]
+    pub const fn is_frame_ptr(self) -> bool {
+        self.0 == Self::FRAME_PTR.0
+    }
+
     /// Fallible constructor validating the `0..=10` range.
     ///
     /// # Errors
@@ -100,6 +121,36 @@ impl fmt::Display for Operand {
     }
 }
 
+/// Operand width: 32-bit operations (`BPF_ALU` / `BPF_JMP32`) vs 64-bit
+/// (`BPF_ALU64` / `BPF_JMP`). A named enum instead of an `is64: bool` flag
+/// so call sites read `Width::B64` rather than a bare `true`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Width {
+    /// 32-bit semantics (results truncated, jumps compare low words).
+    B32,
+    /// 64-bit semantics.
+    B64,
+}
+
+impl Width {
+    /// `true` for 64-bit operations.
+    #[must_use]
+    pub const fn is_64(self) -> bool {
+        matches!(self, Self::B64)
+    }
+}
+
+/// Byte-swap direction for `BPF_END`: little-endian vs big-endian output.
+/// A named enum instead of a `to_be: bool` flag so matches read as
+/// `Endian::Be` rather than a bare boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Endian {
+    /// Little-endian output (`BPF_TO_LE`): mask to the width.
+    Le,
+    /// Big-endian output (`BPF_TO_BE`): mask, then swap within the width.
+    Be,
+}
+
 /// ALU operations (upper nibble of ALU/ALU64 opcodes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AluOp {
@@ -130,10 +181,7 @@ pub enum AluOp {
     /// `>>=` (arithmetic).
     Arsh,
     /// Byte swap (`to_le`/`to_be` 16/32/64).
-    End {
-        /// `true` for big-endian output (`BPF_TO_BE`), `false` for little (`BPF_TO_LE`).
-        to_be: bool,
-    },
+    End(Endian),
 }
 
 impl AluOp {
@@ -160,7 +208,7 @@ impl AluOp {
             0xa => Ok(Self::Xor),
             0xb => Ok(Self::Mov),
             0xc => Ok(Self::Arsh),
-            0xd => Ok(Self::End { to_be: opcode & 0x08 != 0 }),
+            0xd => Ok(Self::End(if opcode & 0x08 != 0 { Endian::Be } else { Endian::Le })),
             v => Err(DecodeError::UnknownAluOp(v)),
         }
     }
@@ -182,7 +230,7 @@ impl AluOp {
             Self::Xor => "xor",
             Self::Mov => "mov",
             Self::Arsh => "arsh",
-            Self::End { .. } => "end",
+            Self::End(_) => "end",
         }
     }
 }
@@ -321,12 +369,15 @@ impl MemSize {
 }
 
 /// A decoded eBPF instruction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Copy` : at 16 bytes the interpreter copies instructions
+/// by value in its hot loop instead of cloning per step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Insn {
     /// ALU32/ALU64 operation.
     Alu {
-        /// `true` for 64-bit (`BPF_ALU64`), `false` for 32-bit (`BPF_ALU`).
-        is64: bool,
+        /// Operand width (32- vs 64-bit semantics).
+        width: Width,
         /// Operation.
         op: AluOp,
         /// Destination register.
@@ -365,8 +416,8 @@ pub enum Insn {
     },
     /// Conditional or unconditional jump.
     Jump {
-        /// `true` for 64-bit comparisons (`BPF_JMP`), `false` for 32-bit (`BPF_JMP32`).
-        is64: bool,
+        /// Comparison width (64-bit `BPF_JMP` vs 32-bit `BPF_JMP32`).
+        width: Width,
         /// Condition.
         op: JumpOp,
         /// Compared register.
@@ -394,11 +445,11 @@ impl fmt::Display for Insn {
     /// Canonical text form (the same rendering the disassembler prints).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Alu { is64, op, dst, src } => {
-                let suffix = if *is64 { "" } else { "32" };
+            Self::Alu { width, op, dst, src } => {
+                let suffix = if width.is_64() { "" } else { "32" };
                 match (op, src) {
                     (AluOp::Neg, _) => write!(f, "neg{suffix} {dst}"),
-                    (AluOp::End { .. }, Operand::Imm(v)) => write!(f, "end{suffix} {dst}, {v}"),
+                    (AluOp::End(_), Operand::Imm(v)) => write!(f, "end{suffix} {dst}, {v}"),
                     _ => write!(f, "{}{suffix} {dst}, {src}", op.mnemonic()),
                 }
             }
@@ -426,7 +477,11 @@ impl fmt::Display for Insn {
 }
 
 /// Decode failure.
+///
+/// `#[non_exhaustive]` so future decoder diagnostics (BTF-aware errors,
+/// relocation failures) don't break downstream matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum DecodeError {
     /// Truncated input (fewer than 8 bytes remain).
     #[error("truncated instruction stream: {remaining} trailing byte(s)")]
@@ -476,5 +531,14 @@ mod tests {
     fn mem_size_bytes() {
         assert_eq!(MemSize::Dw.bytes(), 8);
         assert_eq!(MemSize::B.bytes(), 1);
+    }
+
+    #[test]
+    fn insn_stays_compact() {
+        // Stability guard for the interpreter hot loop: `Vm::step` copies
+        // one `Insn` per step, so growth here is a direct dispatch cost.
+        // Bump the bound deliberately (not silently) if a new variant
+        // legitimately needs more room.
+        assert!(size_of::<Insn>() <= 16, "Insn grew to {} bytes; see comment", size_of::<Insn>());
     }
 }

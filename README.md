@@ -6,6 +6,8 @@
 An eBPF laboratory in Rust: inspect, verify, execute, and optimize eBPF programs.
 
 Target toolchain: Rust 1.98, edition 2024, stable channel.
+MSRV policy: `rust-version = "1.98"` is pinned in CI; dependency bumps must
+keep building under `cargo update -Z minimal-versions`.
 
 ## Quickstart
 
@@ -47,9 +49,16 @@ profile attributing ≥20% to the candidate.
 ## Quality gates
 
 ```bash
+just verify   # fmt + clippy + test + doc (needs `just`; raw commands below)
+```
+
+or without `just`:
+
+```bash
 cargo fmt --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked
+cargo nextest run --workspace --locked
+cargo test --doc --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --locked
 ```
 

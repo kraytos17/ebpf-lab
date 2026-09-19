@@ -33,6 +33,16 @@ fn golden_branch() {
 }
 
 #[test]
+fn golden_branch_untaken() {
+    insta::assert_snapshot!(disasm_fixture("branch_untaken.bin"));
+}
+
+#[test]
+fn golden_diamond() {
+    insta::assert_snapshot!(disasm_fixture("diamond.bin"));
+}
+
+#[test]
 fn golden_ldimm() {
     insta::assert_snapshot!(disasm_fixture("ldimm.bin"));
 }

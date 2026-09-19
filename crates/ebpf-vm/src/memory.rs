@@ -1,9 +1,22 @@
-//! Memory stub for the v0.3 interpreter: bounded stack only.
+//! Memory model for the current interpreter: stack, packet, alignment.
 //!
 //! Every access goes through [`MemoryView::load`] / [`MemoryView::store`],
-//! the same chokepoint the v0.4 memory model, the v0.5 verifier, and the
-//! map/packet stages will extend. v0.4 adds the initialization bitmap,
-//! packet buffers, alignment control, and map memory on top of this.
+//! the same chokepoint the future verifier reasons about statically and the
+//! map stage will extend with a third region.
+//!
+//! Regions:
+//!
+//! - Stack: `[STACK_BASE - STACK_SIZE, STACK_BASE)`, read-write, with a
+//!   per-byte initialization bitmap. Reading a byte that was never written
+//!   is [`MemError::UninitializedRead`], mirroring the kernel verifier.
+//! - Packet: `[PACKET_BASE, PACKET_BASE + len)`, read-only in v0.4, backing
+//!   the XDP context (§v0.8). With no packet loaded, any packet-range
+//!   access is [`MemError::NoPacket`].
+//! - Anything else: [`MemError::OutOfBounds`].
+//!
+//! Multi-byte accesses require natural alignment while
+//! [`MemoryView::align_checks`] is enabled (the default); disable it to
+//! model targets with unaligned-access relaxation.
 
 use ebpf_isa::MemSize;
 use thiserror::Error;
@@ -17,8 +30,27 @@ pub const STACK_SIZE: usize = 512;
 /// arbitrary — what matters is that out-of-range accesses are rejected.
 pub const STACK_BASE: i64 = 0x1_0000;
 
+/// Virtual address of the first packet byte, when a packet is loaded.
+///
+/// Well clear of the stack so region classification never overlaps.
+pub const PACKET_BASE: i64 = 0x2_0000;
+
+/// Require natural alignment for multi-byte accesses.
+#[inline]
+fn check_alignment(addr: i64, size: MemSize) -> Result<(), MemError> {
+    let align = i64::from(size.bytes());
+    if align > 1 && addr.rem_euclid(align) != 0 {
+        return Err(MemError::Misaligned { addr, size: size.bytes(), align: size.bytes() });
+    }
+    Ok(())
+}
+
 /// Memory access failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+///
+/// `#[non_exhaustive]` so later stages (map faults, helper errors) can
+/// extend this without breaking matches.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum MemError {
     /// Address (plus access width) falls outside every known region.
     #[error("out-of-bounds {size}-byte access at address {addr:#x}")]
@@ -28,12 +60,108 @@ pub enum MemError {
         /// Access width in bytes.
         size: u8,
     },
+    /// Address is stack-shaped but outside
+    /// `[STACK_BASE - STACK_SIZE, STACK_BASE)`.
+    #[error("stack overflow: {size}-byte access at address {addr:#x}")]
+    StackOverflow {
+        /// Faulting virtual address.
+        addr: i64,
+        /// Access width in bytes.
+        size: u8,
+    },
+    /// Stack read of a byte that was never written.
+    #[error("uninitialized {size}-byte stack read at address {addr:#x}")]
+    UninitializedRead {
+        /// Faulting virtual address.
+        addr: i64,
+        /// Access width in bytes.
+        size: u8,
+    },
+    /// Packet-range access with no packet loaded.
+    #[error("packet access with no packet loaded")]
+    NoPacket,
+    /// Multi-byte access at a naturally-unaligned address.
+    #[error("misaligned {size}-byte access at address {addr:#x} (needs {align}-byte alignment)")]
+    Misaligned {
+        /// Faulting virtual address.
+        addr: i64,
+        /// Access width in bytes.
+        size: u8,
+        /// Required alignment in bytes.
+        align: u8,
+    },
 }
 
-/// The 512-byte program stack.
+/// Which region an address belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemRegion {
+    /// `[STACK_BASE - STACK_SIZE, STACK_BASE)`.
+    Stack,
+    /// `[PACKET_BASE, …)`.
+    Packet,
+    /// Outside every known region.
+    Unknown,
+}
+
+/// Read-only packet buffer backing the XDP context.
+#[derive(Debug, Clone, Default)]
+pub struct PacketBuffer {
+    bytes: Vec<u8>,
+}
+
+impl PacketBuffer {
+    /// Copy packet bytes into the buffer.
+    #[must_use]
+    pub const fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+
+    /// Packet length in bytes.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Whether the packet is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Raw packet bytes.
+    #[must_use]
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    #[inline]
+    fn load(&self, addr: i64, size: MemSize, align_checks: bool) -> Result<i64, MemError> {
+        let width = usize::from(size.bytes());
+        let off = addr
+            .checked_sub(PACKET_BASE)
+            .and_then(|o| usize::try_from(o).ok())
+            .filter(|&o| o.checked_add(width).is_some_and(|end| end <= self.bytes.len()))
+            .ok_or_else(|| MemError::OutOfBounds { addr, size: size.bytes() })?;
+        if align_checks {
+            check_alignment(addr, size)?;
+        }
+
+        let mut v: i64 = 0;
+        for (i, b) in self.bytes[off..off + width].iter().enumerate() {
+            v |= i64::from(*b) << (8 * i);
+        }
+        Ok(v)
+    }
+}
+
+/// The 512-byte program stack with a 512-bit initialization bitset.
+///
+/// One bit per byte in `[u64; 8]` (8× smaller than a byte bitmap); an access
+/// tests its whole range with at most two word masks.
 #[derive(Debug, Clone)]
 pub struct StackMemory {
     bytes: [u8; STACK_SIZE],
+    initialized: [u64; STACK_SIZE / 64],
 }
 
 impl StackMemory {
@@ -43,48 +171,106 @@ impl StackMemory {
     /// `low_matches_size` test pins it to [`STACK_SIZE`].
     pub const LOW: i64 = STACK_BASE - 512;
 
+    /// Stack length as `i64` (matches [`STACK_SIZE`]; pinned by the same test).
+    const LEN: i64 = 512;
+
+    /// `off as usize` below is sound: the range test proved
+    /// `0 <= off <= 512`, which always fits.
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    #[inline]
     fn index(addr: i64, size: MemSize) -> Result<usize, MemError> {
-        let oob = || MemError::OutOfBounds { addr, size: size.bytes() };
         let width = i64::from(size.bytes());
-        let len = i64::try_from(STACK_SIZE).map_err(|_| oob())?;
-        let lo = STACK_BASE - len;
-        // `addr > STACK_BASE - width` (rather than `addr + width > …`) so
-        // the check itself cannot overflow.
-        if addr < lo || addr > STACK_BASE - width {
-            return Err(oob());
+        // `checked_sub` keeps the check itself overflow-free; a single
+        // range test then covers both ends (no per-call `try_from` on the
+        // constant length, no closure allocation).
+        let off = addr
+            .checked_sub(Self::LOW)
+            .ok_or_else(|| MemError::StackOverflow { addr, size: size.bytes() })?;
+        if off < 0 || off > Self::LEN - width {
+            return Err(MemError::StackOverflow { addr, size: size.bytes() });
         }
-        usize::try_from(addr - lo).map_err(|_| oob())
+        // Sound: `0 <= off <= LEN - width <= LEN <= usize::MAX`.
+        Ok(off as usize)
     }
 
-    fn load(&self, addr: i64, size: MemSize) -> Result<i64, MemError> {
+    /// Whether every byte in `[i, i + width)` was written (`width <= 8`, so
+    /// the range covers at most two words).
+    #[inline]
+    const fn is_init(&self, i: usize, width: usize) -> bool {
+        let word = i >> 6;
+        let bit = i & 63;
+        if bit + width <= 64 {
+            let mask = ((1u64 << width) - 1) << bit;
+            self.initialized[word] & mask == mask
+        } else {
+            let first = 64 - bit;
+            let mask_lo = u64::MAX << bit;
+            let mask_hi = (1u64 << (width - first)) - 1;
+            self.initialized[word] & mask_lo == mask_lo
+                && self.initialized[word + 1] & mask_hi == mask_hi
+        }
+    }
+
+    /// Mark every byte in `[i, i + width)` written.
+    #[inline]
+    const fn mark_init(&mut self, i: usize, width: usize) {
+        let word = i >> 6;
+        let bit = i & 63;
+        if bit + width <= 64 {
+            self.initialized[word] |= ((1u64 << width) - 1) << bit;
+        } else {
+            let first = 64 - bit;
+            self.initialized[word] |= u64::MAX << bit;
+            self.initialized[word + 1] |= (1u64 << (width - first)) - 1;
+        }
+    }
+
+    #[inline]
+    fn load(&self, addr: i64, size: MemSize, align_checks: bool) -> Result<i64, MemError> {
         let i = Self::index(addr, size)?;
+        if align_checks {
+            check_alignment(addr, size)?;
+        }
+
+        let width = usize::from(size.bytes());
+        if !self.is_init(i, width) {
+            return Err(MemError::UninitializedRead { addr, size: size.bytes() });
+        }
+        // One checked slice copy per width, then a pure `from_le_bytes` —
+        // a single bounds check instead of one per byte.
         let v = match size {
             MemSize::B => i64::from(self.bytes[i]),
-            MemSize::H => i64::from(u16::from_le_bytes([self.bytes[i], self.bytes[i + 1]])),
-            // Sound: `index` proved `i + width <= STACK_SIZE`, so every
-            // byte access below is in bounds.
-            MemSize::W => i64::from(u32::from_le_bytes([
-                self.bytes[i],
-                self.bytes[i + 1],
-                self.bytes[i + 2],
-                self.bytes[i + 3],
-            ])),
-            MemSize::Dw => i64::from_le_bytes([
-                self.bytes[i],
-                self.bytes[i + 1],
-                self.bytes[i + 2],
-                self.bytes[i + 3],
-                self.bytes[i + 4],
-                self.bytes[i + 5],
-                self.bytes[i + 6],
-                self.bytes[i + 7],
-            ]),
+            MemSize::H => {
+                let mut b = [0u8; 2];
+                b.copy_from_slice(&self.bytes[i..i + 2]);
+                i64::from(u16::from_le_bytes(b))
+            }
+            MemSize::W => {
+                let mut b = [0u8; 4];
+                b.copy_from_slice(&self.bytes[i..i + 4]);
+                i64::from(u32::from_le_bytes(b))
+            }
+            MemSize::Dw => {
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&self.bytes[i..i + 8]);
+                i64::from_le_bytes(b)
+            }
         };
         Ok(v)
     }
 
-    fn store(&mut self, addr: i64, size: MemSize, value: i64) -> Result<(), MemError> {
+    #[inline]
+    fn store(
+        &mut self,
+        addr: i64,
+        size: MemSize,
+        value: i64,
+        align_checks: bool,
+    ) -> Result<(), MemError> {
         let i = Self::index(addr, size)?;
+        if align_checks {
+            check_alignment(addr, size)?;
+        }
         // Little-endian low bytes; slicing `to_le_bytes` truncates without
         // any lossy `as` cast.
         let le = value.to_le_bytes();
@@ -94,40 +280,128 @@ impl StackMemory {
             MemSize::W => self.bytes[i..i + 4].copy_from_slice(&le[..4]),
             MemSize::Dw => self.bytes[i..i + 8].copy_from_slice(&le[..]),
         }
+        self.mark_init(i, usize::from(size.bytes()));
         Ok(())
     }
 }
 
 impl Default for StackMemory {
     fn default() -> Self {
-        Self { bytes: [0; STACK_SIZE] }
+        Self { bytes: [0; STACK_SIZE], initialized: [0; STACK_SIZE / 64] }
     }
 }
 
-/// The VM's view of memory. v0.3: stack only; packet/map regions arrive
-/// with the XDP (§v0.8) and map (§v0.7) milestones.
-#[derive(Debug, Clone, Default)]
+/// The VM's view of memory: stack plus an optional packet buffer.
+///
+/// Map memory arrives with the map milestone.
+#[derive(Debug, Clone)]
 pub struct MemoryView {
     stack: StackMemory,
+    packet: Option<PacketBuffer>,
+    align_checks: bool,
+}
+
+impl Default for MemoryView {
+    /// Empty stack, no packet, alignment enforcement on.
+    fn default() -> Self {
+        Self { stack: StackMemory::default(), packet: None, align_checks: true }
+    }
 }
 
 impl MemoryView {
+    /// Classify an address into its region.
+    ///
+    /// Stack-shaped addresses classify as [`MemRegion::Stack`] even when the
+    /// access width would straddle the boundary — the width check then
+    /// reports [`MemError::StackOverflow`] rather than a generic fault.
+    /// The frame-pointer value itself (`STACK_BASE`, one past the top)
+    /// counts as stack-shaped for the same reason. Packet-shaped addresses
+    /// (at or above [`PACKET_BASE`]) classify as [`MemRegion::Packet`]
+    /// whether or not a packet is currently loaded; the access itself
+    /// reports [`MemError::NoPacket`] when unset.
+    #[must_use]
+    #[inline]
+    pub const fn classify(addr: i64) -> MemRegion {
+        if addr >= StackMemory::LOW && addr <= STACK_BASE {
+            MemRegion::Stack
+        } else if addr >= PACKET_BASE {
+            MemRegion::Packet
+        } else {
+            MemRegion::Unknown
+        }
+    }
+
+    /// Load a packet buffer into the view (replaces any previous one).
+    pub fn set_packet(&mut self, packet: PacketBuffer) {
+        self.packet = Some(packet);
+    }
+
+    /// Drop the loaded packet, if any.
+    pub fn clear_packet(&mut self) {
+        self.packet = None;
+    }
+
+    /// Length of the loaded packet, or `None` when unset.
+    #[must_use]
+    pub fn packet_len(&self) -> Option<usize> {
+        self.packet.as_ref().map(PacketBuffer::len)
+    }
+
+    /// Enable or disable natural-alignment enforcement.
+    pub const fn set_align_checks(&mut self, enabled: bool) {
+        self.align_checks = enabled;
+    }
+
+    /// Whether alignment is currently enforced.
+    #[must_use]
+    pub const fn align_checks(&self) -> bool {
+        self.align_checks
+    }
+
     /// Load `size` bytes (little-endian, zero-extended) from `addr`.
+    ///
+    /// Bounds are checked before alignment, so a straddling access reports
+    /// [`MemError::StackOverflow`]/[`MemError::OutOfBounds`] rather than
+    /// [`MemError::Misaligned`].
     ///
     /// # Errors
     ///
-    /// Returns [`MemError::OutOfBounds`] when `addr` is outside the stack.
+    /// Returns [`MemError::StackOverflow`] for stack-shaped out-of-range
+    /// accesses, [`MemError::OutOfBounds`] outside every region,
+    /// [`MemError::NoPacket`] for packet-range accesses with nothing loaded,
+    /// [`MemError::Misaligned`] for unaligned multi-byte accesses, and
+    /// [`MemError::UninitializedRead`] for stack bytes never written.
+    #[inline]
     pub fn load(&self, addr: i64, size: MemSize) -> Result<i64, MemError> {
-        self.stack.load(addr, size)
+        match Self::classify(addr) {
+            MemRegion::Stack => self.stack.load(addr, size, self.align_checks),
+            MemRegion::Packet => {
+                let Some(packet) = self.packet.as_ref() else {
+                    return Err(MemError::NoPacket);
+                };
+                packet.load(addr, size, self.align_checks)
+            }
+            MemRegion::Unknown => Err(MemError::OutOfBounds { addr, size: size.bytes() }),
+        }
     }
 
     /// Store the low `size` bytes of `value` at `addr`.
     ///
+    /// Packet memory is read-only in v0.4: stores there report
+    /// [`MemError::OutOfBounds`]. All other error cases mirror [`load`](Self::load);
+    /// a successful store marks the stack bytes initialized.
+    ///
     /// # Errors
     ///
-    /// Returns [`MemError::OutOfBounds`] when `addr` is outside the stack.
+    /// See [`load`](Self::load).
+    #[inline]
     pub fn store(&mut self, addr: i64, size: MemSize, value: i64) -> Result<(), MemError> {
-        self.stack.store(addr, size, value)
+        match Self::classify(addr) {
+            MemRegion::Stack => self.stack.store(addr, size, value, self.align_checks),
+            MemRegion::Packet | MemRegion::Unknown => {
+                Err(MemError::OutOfBounds { addr, size: size.bytes() })
+            }
+        }
     }
 }
 
@@ -149,13 +423,136 @@ mod tests {
     #[test]
     fn low_matches_size() {
         assert_eq!(usize::try_from(STACK_BASE - StackMemory::LOW).unwrap(), STACK_SIZE);
+        assert_eq!(i64::try_from(STACK_SIZE).unwrap(), StackMemory::LEN);
     }
 
     #[test]
     fn rejects_oob() {
         let mem = MemoryView::default();
-        assert!(matches!(mem.load(STACK_BASE, MemSize::B), Err(MemError::OutOfBounds { .. })));
-        assert!(matches!(mem.load(STACK_BASE - 4, MemSize::Dw), Err(MemError::OutOfBounds { .. })));
+        assert!(matches!(mem.load(STACK_BASE, MemSize::B), Err(MemError::StackOverflow { .. })));
+        assert!(matches!(
+            mem.load(STACK_BASE - 4, MemSize::Dw),
+            Err(MemError::StackOverflow { .. })
+        ));
         assert!(matches!(mem.load(0, MemSize::W), Err(MemError::OutOfBounds { .. })));
+    }
+
+    #[test]
+    fn rejects_uninitialized_read() {
+        let mem = MemoryView::default();
+        assert!(matches!(
+            mem.load(STACK_BASE - 8, MemSize::Dw),
+            Err(MemError::UninitializedRead { .. })
+        ));
+    }
+
+    #[test]
+    fn store_marks_only_written_bytes() {
+        let mut mem = MemoryView::default();
+        mem.store(STACK_BASE - 8, MemSize::B, 0xAB).unwrap();
+        assert_eq!(mem.load(STACK_BASE - 8, MemSize::B).unwrap(), 0xAB);
+        assert!(matches!(
+            mem.load(STACK_BASE - 7, MemSize::B),
+            Err(MemError::UninitializedRead { .. })
+        ));
+        // A wide load over a half-written range still faults.
+        assert!(matches!(
+            mem.load(STACK_BASE - 8, MemSize::Dw),
+            Err(MemError::UninitializedRead { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_misaligned() {
+        let mut mem = MemoryView::default();
+        assert!(matches!(
+            mem.store(STACK_BASE - 7, MemSize::W, 1),
+            Err(MemError::Misaligned { .. })
+        ));
+        assert!(matches!(mem.load(STACK_BASE - 12, MemSize::Dw), Err(MemError::Misaligned { .. })));
+        // Single-byte accesses are always aligned; disabling the check
+        // admits the rest.
+        mem.store(STACK_BASE - 8, MemSize::B, 1).unwrap();
+        mem.set_align_checks(false);
+        mem.store(STACK_BASE - 7, MemSize::W, 1).unwrap();
+        assert_eq!(mem.load(STACK_BASE - 7, MemSize::W).unwrap(), 1);
+    }
+
+    #[test]
+    fn packet_load_and_bounds() {
+        let mut mem = MemoryView::default();
+        assert!(matches!(mem.load(PACKET_BASE, MemSize::B), Err(MemError::NoPacket)));
+        mem.set_packet(PacketBuffer::new(vec![0xAA, 0xBB, 0xCC, 0xDD]));
+        assert_eq!(mem.packet_len(), Some(4));
+        assert_eq!(mem.load(PACKET_BASE, MemSize::B).unwrap(), 0xAA);
+        assert_eq!(mem.load(PACKET_BASE, MemSize::H).unwrap(), 0xBBAA);
+        assert_eq!(mem.load(PACKET_BASE, MemSize::W).unwrap(), 0xDDCC_BBAA);
+        assert!(matches!(
+            mem.load(PACKET_BASE + 1, MemSize::Dw),
+            Err(MemError::OutOfBounds { .. })
+        ));
+        // Packet memory is read-only in v0.4.
+        assert!(matches!(mem.store(PACKET_BASE, MemSize::B, 0), Err(MemError::OutOfBounds { .. })));
+        mem.clear_packet();
+        assert_eq!(mem.packet_len(), None);
+        assert!(matches!(mem.load(PACKET_BASE, MemSize::B), Err(MemError::NoPacket)));
+    }
+
+    use proptest::prelude::*;
+
+    /// Any `MemSize`, uniformly.
+    fn arb_size() -> impl Strategy<Value = MemSize> {
+        prop_oneof![Just(MemSize::B), Just(MemSize::H), Just(MemSize::W), Just(MemSize::Dw),]
+    }
+
+    /// Zero-extended low bytes of `value` for `size`, matching `store`/`load`.
+    fn trunc(value: i64, size: MemSize) -> i64 {
+        let width = usize::from(size.bytes());
+        let mut b = [0u8; 8];
+        b[..width].copy_from_slice(&value.to_le_bytes()[..width]);
+        i64::from_le_bytes(b)
+    }
+
+    /// Stack address for a 0-based offset (offsets here are always < 512,
+    /// so the conversion is infallible).
+    fn at(off: usize) -> i64 {
+        StackMemory::LOW + i64::try_from(off).unwrap()
+    }
+
+    proptest! {
+        /// Aligned in-bounds store→load round-trips the truncated value.
+        #[test]
+        fn stack_roundtrip(off in 0..512usize, size in arb_size(), value in any::<i64>()) {
+            let width = usize::from(size.bytes());
+            let aligned = off & !(width - 1);
+            prop_assume!(aligned + width <= STACK_SIZE);
+            let mut mem = MemoryView::default();
+            let addr = at(aligned);
+            mem.store(addr, size, value).unwrap();
+            prop_assert_eq!(mem.load(addr, size).unwrap(), trunc(value, size));
+        }
+
+        /// On a fresh view, every aligned in-bounds load faults with
+        /// `UninitializedRead` — never `Ok`, never another variant.
+        #[test]
+        fn fresh_stack_never_readable(off in 0..512usize, size in arb_size()) {
+            let width = usize::from(size.bytes());
+            let aligned = off & !(width - 1);
+            prop_assume!(aligned + width <= STACK_SIZE);
+            let mem = MemoryView::default();
+            let addr = at(aligned);
+            let is_uninit = matches!(mem.load(addr, size), Err(MemError::UninitializedRead { .. }));
+            prop_assert!(is_uninit);
+        }
+
+        /// Outside the stack and packet ranges, loads always report
+        /// `OutOfBounds` regardless of width (no panic, no success).
+        #[test]
+        fn unknown_region_always_oob(addr in any::<i64>(), size in arb_size()) {
+            prop_assume!(MemoryView::classify(addr) == MemRegion::Unknown);
+            let mem = MemoryView::default();
+            let is_oob = matches!(mem.load(addr, size), Err(MemError::OutOfBounds { .. }));
+            prop_assert!(is_oob);
+        }
     }
 }

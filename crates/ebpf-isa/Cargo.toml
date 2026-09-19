@@ -6,13 +6,16 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+documentation = "https://docs.rs/ebpf-isa"
 
 [dependencies]
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-insta = "1.48.0"
+insta.workspace = true
 
 [[bench]]
 name = "decode"

@@ -24,6 +24,11 @@ fn golden_branch_dot() {
 }
 
 #[test]
+fn golden_diamond_dot() {
+    insta::assert_snapshot!(dot_fixture("diamond.bin"));
+}
+
+#[test]
 fn golden_arith_dot() {
     insta::assert_snapshot!(dot_fixture("arith.bin"));
 }

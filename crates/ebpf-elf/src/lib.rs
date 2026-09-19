@@ -32,20 +32,58 @@ impl ProgType {
     /// Infer the program type from a libbpf section name.
     ///
     /// Returns `None` for sections that are not eBPF programs
-    /// (`.maps`, `.BTF`, `.symtab`, …).
+    /// (`.maps`, `.BTF`, `.symtab`, …). Prefer [`SectionKind::classify`],
+    /// which names the skipped sections instead of erasing them.
     #[must_use]
     pub fn from_section_name(name: &str) -> Option<Self> {
+        match SectionKind::classify(name) {
+            SectionKind::Program(prog_type) => Some(prog_type),
+            _ => None,
+        }
+    }
+}
+
+/// Classification of an ELF section by libbpf `SEC()` name convention.
+///
+/// Unlike [`ProgType::from_section_name`]'s `Option`, every section gets a
+/// nameable variant — so when v1.0 starts parsing `.maps`/BTF metadata,
+/// those stages match exhaustively here instead of re-parsing names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SectionKind {
+    /// An eBPF program section; carries its inferred type.
+    Program(ProgType),
+    /// Map definitions (`.maps` / `maps`).
+    Maps,
+    /// BPF Type Format (`.BTF`, `.BTF.ext`).
+    Btf,
+    /// Everything else (symtab, debug info, empty names, …).
+    Ignored,
+}
+
+impl SectionKind {
+    /// Classify a section name.
+    #[must_use]
+    pub fn classify(name: &str) -> Self {
         let base = name.split('/').next().unwrap_or(name);
         match base {
-            "xdp" => Some(Self::Xdp),
-            "kprobe" | "kretprobe" => Some(Self::Kprobe),
-            "tc" | "classifier" => Some(Self::Tc),
-            "socket" => Some(Self::Socket),
-            "tracepoint" => Some(Self::Tracepoint),
-            "maps" | ".maps" => None,
-            _ if name.starts_with('.') => None,
-            _ if name.is_empty() => None,
-            _ => Some(Self::Other(name.to_string())),
+            "xdp" => Self::Program(ProgType::Xdp),
+            "kprobe" | "kretprobe" => Self::Program(ProgType::Kprobe),
+            "tc" | "classifier" => Self::Program(ProgType::Tc),
+            "socket" => Self::Program(ProgType::Socket),
+            "tracepoint" => Self::Program(ProgType::Tracepoint),
+            "maps" | ".maps" => Self::Maps,
+            ".BTF" | ".BTF.ext" => Self::Btf,
+            _ if name.starts_with('.') || name.is_empty() => Self::Ignored,
+            _ => Self::Program(ProgType::Other(name.to_string())),
+        }
+    }
+
+    /// The program type, if this section holds a program.
+    #[must_use]
+    pub fn program_type(self) -> Option<ProgType> {
+        match self {
+            Self::Program(prog_type) => Some(prog_type),
+            _ => None,
         }
     }
 }
@@ -98,7 +136,11 @@ impl ElfProgram {
 }
 
 /// ELF loading errors.
+///
+/// `#[non_exhaustive]` so future stages (BTF parsing, relocation
+/// resolution) can add variants without breaking downstream matches.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ElfError {
     /// File I/O failure.
     #[error("cannot read {path}: {source}")]
@@ -142,7 +184,7 @@ pub fn load_bytes(data: &[u8], label: &str) -> Result<Vec<ElfProgram>, ElfError>
     let mut programs = Vec::new();
     for section in obj.sections() {
         let Ok(name) = section.name() else { continue };
-        let Some(prog_type) = ProgType::from_section_name(name) else {
+        let Some(prog_type) = SectionKind::classify(name).program_type() else {
             continue;
         };
 
@@ -199,6 +241,17 @@ mod tests {
         assert_eq!(ProgType::from_section_name(".maps"), None);
         assert_eq!(ProgType::from_section_name(".symtab"), None);
         assert_eq!(ProgType::from_section_name("my_prog"), Some(ProgType::Other("my_prog".into())));
+    }
+
+    #[test]
+    fn section_kind_names_skips() {
+        assert_eq!(SectionKind::classify(".maps"), SectionKind::Maps);
+        assert_eq!(SectionKind::classify("maps"), SectionKind::Maps);
+        assert_eq!(SectionKind::classify(".BTF"), SectionKind::Btf);
+        assert_eq!(SectionKind::classify(".BTF.ext"), SectionKind::Btf);
+        assert_eq!(SectionKind::classify(".symtab"), SectionKind::Ignored);
+        assert!(SectionKind::classify("xdp").program_type().is_some());
+        assert!(SectionKind::classify(".maps").program_type().is_none());
     }
 
     #[test]

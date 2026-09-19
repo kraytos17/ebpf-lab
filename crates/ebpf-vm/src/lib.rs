@@ -11,24 +11,31 @@
 //! - Division or modulo by zero yields zero (no trap), like the kernel.
 //! - `r10` is the read-only frame pointer (`STACK_BASE`); the VM never
 //!   writes it.
-//! - Jumps resolve in *decoded-index* space here (the CFG crate owns the
-//!   slot-space translation for static analysis).
+//! - Jumps were pre-resolved to absolute indices by [`exec::load`]; the
+//!   per-step fetch bounds-check subsumes target safety (the CFG crate owns
+//!   the slot-space translation for static analysis).
 
+pub mod exec;
 pub mod memory;
 
-use ebpf_isa::insn::{AluOp, Insn, JumpOp, Operand};
+use ebpf_isa::insn::{AluOp, Endian, Insn, JumpOp, Reg, Width};
+use exec::{ExecInsn, load};
 use std::collections::HashMap;
 use thiserror::Error;
 
-pub use memory::{MemError, MemoryView, STACK_BASE, STACK_SIZE};
+pub use memory::{
+    MemError, MemRegion, MemoryView, PACKET_BASE, PacketBuffer, STACK_BASE, STACK_SIZE,
+};
 
 /// Number of general-purpose registers (`r0`–`r10`).
 pub const NUM_REGS: usize = 11;
-/// Frame-pointer register (read-only).
-pub const FRAME_PTR: u8 = 10;
 
 /// Execution failure.
+///
+/// `#[non_exhaustive]` so future stages (packet/map faults, helper errors)
+/// can extend this without breaking downstream matches.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum VmError {
     /// Unknown opcode word (decoder preserved it, the VM rejects it).
     #[error("illegal instruction at pc {pc}")]
@@ -69,6 +76,27 @@ pub enum VmError {
     Memory(#[from] MemError),
 }
 
+/// Payload for a statically-invalid instruction (see [`ExecInsn::Trap`]).
+///
+/// Produced once by [`load`]; [`step`](Vm::step) rebuilds the
+/// full [`VmError`] with the firing program counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrapKind {
+    /// Jump target outside the program (slot-space number).
+    OobJump {
+        /// Computed target slot.
+        target: i64,
+    },
+    /// Invalid `BPF_END` width (the immediate).
+    BadEndWidth {
+        /// Requested width.
+        width: i64,
+    },
+    /// Unknown opcode, or a decoder-invariant violation (e.g. `End` with a
+    /// register source, which the decoder never emits).
+    Illegal,
+}
+
 /// One interpreter step's outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepResult {
@@ -79,6 +107,12 @@ pub enum StepResult {
     /// Execution failed.
     Error(VmError),
 }
+
+/// Terminal outcome of [`Vm::run`]: the exit code or the fatal error.
+///
+/// Unlike [`StepResult`], `Continue` is unrepresentable here — `run` only
+/// ever terminates — so callers match exhaustively with no `unreachable!`.
+pub type RunOutcome = Result<i64, VmError>;
 
 /// Helper function signature: reads args from `r1`–`r5`, writes `r0`,
 /// advances `pc` past the `call` on success.
@@ -103,23 +137,108 @@ impl HelperRegistry {
     }
 }
 
+/// Register file `r0`–`r10`.
+///
+/// Indexed only by [`Reg`], so an out-of-range access is
+/// unrepresentable past decode: the single bounds-checked conversion lives
+/// in [`Reg::index`], not scattered across the interpreter.
+#[derive(Debug, Clone, Copy)]
+pub struct Regs([i64; NUM_REGS]);
+
+impl Regs {
+    /// Zeroed registers with the frame pointer installed at `r10`.
+    fn zeroed_with_frame_pointer() -> Self {
+        let mut regs = Self([0i64; NUM_REGS]);
+        regs[Reg::FRAME_PTR] = STACK_BASE;
+        regs
+    }
+
+    /// Borrow the raw array (for whole-file snapshots such as traces).
+    #[must_use]
+    pub const fn as_array(&self) -> &[i64; NUM_REGS] {
+        &self.0
+    }
+
+    /// Iterate over all eleven registers in order.
+    pub fn iter(&self) -> std::slice::Iter<'_, i64> {
+        self.0.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Regs {
+    type Item = &'a i64;
+    type IntoIter = std::slice::Iter<'a, i64>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl std::ops::Index<Reg> for Regs {
+    type Output = i64;
+
+    #[inline]
+    fn index(&self, r: Reg) -> &i64 {
+        &self.0[r.index()]
+    }
+}
+
+impl std::ops::IndexMut<Reg> for Regs {
+    #[inline]
+    fn index_mut(&mut self, r: Reg) -> &mut i64 {
+        &mut self.0[r.index()]
+    }
+}
+
 /// The interpreter: registers, program counter, memory, and helpers.
+///
+/// Holds both the decoded [`Insn`] stream (for the [`insns`](Vm::insns)
+/// getter and traces) and the pre-resolved [`ExecInsn`] stream it actually
+/// steps. Lowering happens once in [`Vm::new`]; see [`exec::load`].
 #[derive(Debug)]
 pub struct Vm {
-    regs: [i64; NUM_REGS],
+    regs: Regs,
     pc: usize,
     insns: Vec<Insn>,
+    exec: Vec<ExecInsn>,
     memory: MemoryView,
     helpers: HelperRegistry,
 }
 
 impl Vm {
     /// New machine over `insns`: registers zeroed, `r10 = STACK_BASE`.
+    ///
+    /// Lowering (jump resolution, operand splitting, `End` validation) runs
+    /// once here; statically-invalid instructions become
+    /// [`ExecInsn::Trap`]s that fire if — and only if — execution reaches
+    /// them, exactly as the old runtime checks did.
     #[must_use]
     pub fn new(insns: Vec<Insn>) -> Self {
-        let mut regs = [0i64; NUM_REGS];
-        regs[FRAME_PTR as usize] = STACK_BASE;
-        Self { regs, pc: 0, insns, memory: MemoryView::default(), helpers: HelperRegistry::empty() }
+        let exec = load(&insns);
+        Self {
+            regs: Regs::zeroed_with_frame_pointer(),
+            pc: 0,
+            insns,
+            exec,
+            memory: MemoryView::default(),
+            helpers: HelperRegistry::empty(),
+        }
+    }
+
+    /// Build from a pre-lowered instruction stream (see [`load`]).
+    ///
+    /// Used by benchmarks to exclude one-time lowering from steady-state
+    /// measurement. Prefer [`Vm::new`] unless you are measuring.
+    #[must_use]
+    pub fn from_exec(insns: Vec<Insn>, exec: Vec<ExecInsn>) -> Self {
+        Self {
+            regs: Regs::zeroed_with_frame_pointer(),
+            pc: 0,
+            insns,
+            exec,
+            memory: MemoryView::default(),
+            helpers: HelperRegistry::empty(),
+        }
     }
 
     /// Attach a helper registry (builder-style).
@@ -131,7 +250,7 @@ impl Vm {
 
     /// Current register file (`r0`–`r10`).
     #[must_use]
-    pub const fn regs(&self) -> &[i64; NUM_REGS] {
+    pub const fn regs(&self) -> &Regs {
         &self.regs
     }
 
@@ -147,13 +266,6 @@ impl Vm {
         &self.insns
     }
 
-    fn read_operand(&self, src: Operand) -> i64 {
-        match src {
-            Operand::Reg(r) => self.regs[r.0 as usize],
-            Operand::Imm(v) => i64::from(v),
-        }
-    }
-
     fn dispatch_helper(&mut self, func: u32) -> StepResult {
         self.helpers
             .0
@@ -162,64 +274,48 @@ impl Vm {
             .map_or(StepResult::Error(VmError::UnknownHelper { func }), |helper| helper(self))
     }
 
-    /// Advance the program counter to a jump target, bounds-checked.
-    fn jump_to(&mut self, offset: i16) -> StepResult {
-        let from = self.pc;
-        let err = |target| StepResult::Error(VmError::JumpOutOfBounds { pc: from, target });
-        // Total conversion: `pc` indexes a live `Vec`, so it always fits.
-        let Some(base) = i64::try_from(from).ok() else {
-            return err(i64::MAX);
-        };
-        let Some(target) = base.checked_add(1).and_then(|b| b.checked_add(i64::from(offset)))
-        else {
-            return err(i64::MIN);
-        };
-        match usize::try_from(target).ok().filter(|&t| t < self.insns.len()) {
-            Some(t) => {
-                self.pc = t;
-                StepResult::Continue
-            }
-            None => err(target),
-        }
-    }
-
     /// Execute one instruction.
     pub fn step(&mut self) -> StepResult {
-        let Some(insn) = self.insns.get(self.pc).cloned() else {
+        // The fetch bounds-check doubles as jump-target safety: every
+        // target was validated at load, so a bad `pc` can only come from
+        // a corrupted machine, never from a well-formed jump.
+        let Some(insn) = self.exec.get(self.pc).copied() else {
             let target = i64::try_from(self.pc).unwrap_or(i64::MAX);
             return StepResult::Error(VmError::JumpOutOfBounds { pc: self.pc, target });
         };
         match insn {
-            Insn::Alu { is64, op, dst, src } => {
-                let rhs = self.read_operand(src);
-                let lhs = self.regs[dst.0 as usize];
-                match alu_apply(op, lhs, rhs, is64, self.pc) {
-                    Ok(result) => {
-                        // r10 is read-only: silently keep the frame pointer,
-                        // mirroring hardware that ignores the write. (The
-                        // verifier rejects such programs statically.)
-                        if dst.0 != FRAME_PTR {
-                            self.regs[dst.0 as usize] = result;
-                        }
-                        self.pc += 1;
-                        StepResult::Continue
-                    }
-                    Err(e) => StepResult::Error(e),
-                }
-            }
-            Insn::LoadImm64 { dst, imm } => {
-                if dst.0 != FRAME_PTR {
-                    self.regs[dst.0 as usize] = imm;
+            ExecInsn::AluReg { width, op, dst, src } => {
+                let result = alu_apply(op, self.regs[dst], self.regs[src], width);
+                // r10 is read-only: silently keep the frame pointer,
+                // mirroring hardware that ignores the write. (The
+                // verifier rejects such programs statically.)
+                if !dst.is_frame_ptr() {
+                    self.regs[dst] = result;
                 }
                 self.pc += 1;
                 StepResult::Continue
             }
-            Insn::Load { size, dst, base, offset } => {
-                let addr = self.regs[base.0 as usize].wrapping_add(i64::from(offset));
+            ExecInsn::AluImm { width, op, dst, imm } => {
+                let result = alu_apply(op, self.regs[dst], i64::from(imm), width);
+                if !dst.is_frame_ptr() {
+                    self.regs[dst] = result;
+                }
+                self.pc += 1;
+                StepResult::Continue
+            }
+            ExecInsn::LoadImm64 { dst, imm } => {
+                if !dst.is_frame_ptr() {
+                    self.regs[dst] = imm;
+                }
+                self.pc += 1;
+                StepResult::Continue
+            }
+            ExecInsn::Load { size, dst, base, offset } => {
+                let addr = self.regs[base].wrapping_add(i64::from(offset));
                 match self.memory.load(addr, size) {
                     Ok(v) => {
-                        if dst.0 != FRAME_PTR {
-                            self.regs[dst.0 as usize] = v;
+                        if !dst.is_frame_ptr() {
+                            self.regs[dst] = v;
                         }
                         self.pc += 1;
                         StepResult::Continue
@@ -227,10 +323,9 @@ impl Vm {
                     Err(e) => StepResult::Error(VmError::Memory(e)),
                 }
             }
-            Insn::Store { size, base, offset, src } => {
-                let addr = self.regs[base.0 as usize].wrapping_add(i64::from(offset));
-                let value = self.read_operand(src);
-                match self.memory.store(addr, size, value) {
+            ExecInsn::StoreReg { size, base, offset, src } => {
+                let addr = self.regs[base].wrapping_add(i64::from(offset));
+                match self.memory.store(addr, size, self.regs[src]) {
                     Ok(()) => {
                         self.pc += 1;
                         StepResult::Continue
@@ -238,198 +333,272 @@ impl Vm {
                     Err(e) => StepResult::Error(VmError::Memory(e)),
                 }
             }
-            Insn::Jump { is64, op, dst, src, offset } => {
-                if op == JumpOp::Always {
-                    return self.jump_to(offset);
-                }
-                let lhs = self.regs[dst.0 as usize];
-                let rhs = self.read_operand(src);
-                if jump_taken(op, lhs, rhs, is64) {
-                    self.jump_to(offset)
-                } else {
-                    self.pc += 1;
-                    StepResult::Continue
+            ExecInsn::StoreImm { size, base, offset, imm } => {
+                let addr = self.regs[base].wrapping_add(i64::from(offset));
+                match self.memory.store(addr, size, i64::from(imm)) {
+                    Ok(()) => {
+                        self.pc += 1;
+                        StepResult::Continue
+                    }
+                    Err(e) => StepResult::Error(VmError::Memory(e)),
                 }
             }
-            Insn::Call { func } => self.dispatch_helper(func),
-            Insn::Exit => StepResult::Exit(self.regs[0]),
-            Insn::Unknown { .. } => StepResult::Error(VmError::IllegalInstruction { pc: self.pc }),
+            ExecInsn::JumpReg { width, op, dst, src, target } => {
+                if op == JumpOp::Always {
+                    self.pc = target as usize;
+                    return StepResult::Continue;
+                }
+                if jump_taken(op, self.regs[dst], self.regs[src], width) {
+                    self.pc = target as usize;
+                } else {
+                    self.pc += 1;
+                }
+                StepResult::Continue
+            }
+            ExecInsn::JumpImm { width, op, dst, imm, target } => {
+                if jump_taken(op, self.regs[dst], i64::from(imm), width) {
+                    self.pc = target as usize;
+                } else {
+                    self.pc += 1;
+                }
+                StepResult::Continue
+            }
+            ExecInsn::JumpAlways { target } => {
+                self.pc = target as usize;
+                StepResult::Continue
+            }
+            ExecInsn::Call { func } => self.dispatch_helper(func),
+            ExecInsn::Exit => StepResult::Exit(self.regs[Reg(0)]),
+            ExecInsn::Trap(kind) => StepResult::Error(kind.into_error(self.pc)),
         }
     }
 
     /// Run to completion or error, with a step budget against infinite loops.
-    pub fn run(&mut self, max_steps: usize) -> StepResult {
+    ///
+    /// # Errors
+    ///
+    /// Returns the fatal [`VmError`] when the program faults, hits an
+    /// unknown helper, or exhausts `max_steps`.
+    #[tracing::instrument(skip(self), fields(max_steps))]
+    pub fn run(&mut self, max_steps: usize) -> RunOutcome {
         for _ in 0..max_steps {
             match self.step() {
                 StepResult::Continue => {}
-                StepResult::Exit(code) => return StepResult::Exit(code),
-                StepResult::Error(e) => return StepResult::Error(e),
+                StepResult::Exit(code) => return Ok(code),
+                StepResult::Error(e) => return Err(e),
             }
         }
-        StepResult::Error(VmError::StepsExceeded { limit: max_steps })
+        Err(VmError::StepsExceeded { limit: max_steps })
     }
 }
 
 /// Apply an ALU operation to concrete values.
 ///
-/// `is64` selects 64-bit semantics; 32-bit results are zero-extended.
-/// Division or modulo by zero yields zero (kernel behavior, no trap).
+/// Thin dispatcher over [`alu64`]/[`alu32`]: the width branch happens once
+/// here so each half is a straight jump-table match. Division or modulo by
+/// zero yields zero (kernel behavior, no trap).
 ///
-/// Cast allows below are intentional: eBPF arithmetic is *defined* as
-/// wrapping at the operand width with truncation on narrowing, so every
-/// `as` here implements the ISA semantic rather than hiding a bug.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap)]
-fn alu_apply(op: AluOp, lhs: i64, rhs: i64, is64: bool, pc: usize) -> Result<i64, VmError> {
-    if is64 {
-        let r = match op {
-            AluOp::Add => lhs.wrapping_add(rhs),
-            AluOp::Sub => lhs.wrapping_sub(rhs),
-            AluOp::Mul => lhs.wrapping_mul(rhs),
-            AluOp::Div => {
-                if rhs == 0 {
-                    0
-                } else {
-                    (lhs as u64).wrapping_div(rhs as u64) as i64
-                }
-            }
-            AluOp::Mod => {
-                if rhs == 0 {
-                    0
-                } else {
-                    (lhs as u64).wrapping_rem(rhs as u64) as i64
-                }
-            }
-            AluOp::Or => lhs | rhs,
-            AluOp::And => lhs & rhs,
-            AluOp::Xor => lhs ^ rhs,
-            AluOp::Mov => rhs,
-            AluOp::Neg => lhs.wrapping_neg(),
-            AluOp::Lsh => lhs.wrapping_shl(rhs as u32 & 63),
-            AluOp::Rsh => ((lhs as u64).wrapping_shr(rhs as u32 & 63)) as i64,
-            AluOp::Arsh => lhs.wrapping_shr(rhs as u32 & 63),
-            AluOp::End { to_be } => endian_swap(lhs, rhs, to_be, pc)?,
-        };
-        Ok(r)
-    } else {
-        let (l, r) = (lhs as u32, rhs as u32);
-        let w = match op {
-            AluOp::Add => l.wrapping_add(r),
-            AluOp::Sub => l.wrapping_sub(r),
-            AluOp::Mul => l.wrapping_mul(r),
-            AluOp::Div => {
-                if r == 0 {
-                    0
-                } else {
-                    l.wrapping_div(r)
-                }
-            }
-            AluOp::Mod => {
-                if r == 0 {
-                    0
-                } else {
-                    l.wrapping_rem(r)
-                }
-            }
-            AluOp::Or => l | r,
-            AluOp::And => l & r,
-            AluOp::Xor => l ^ r,
-            AluOp::Mov => r,
-            AluOp::Neg => l.wrapping_neg(),
-            AluOp::Lsh => l.wrapping_shl(r & 31),
-            AluOp::Rsh => l.wrapping_shr(r & 31),
-            AluOp::Arsh => ((l as i32).wrapping_shr(r & 31)) as u32,
-            AluOp::End { to_be } => endian_swap_32(l, rhs, to_be, pc)?,
-        };
-        Ok(i64::from(w))
+/// Cast allows on the halves are intentional: eBPF arithmetic is *defined*
+/// as wrapping at the operand width with truncation on narrowing, so every
+/// `as` there implements the ISA semantic rather than hiding a bug.
+#[inline]
+fn alu_apply(op: AluOp, lhs: i64, rhs: i64, width: Width) -> i64 {
+    match width {
+        Width::B64 => alu64(op, lhs, rhs),
+        Width::B32 => alu32(op, lhs, rhs),
     }
+}
+
+/// 64-bit ALU (see [`alu_apply`] for the casting rationale).
+// Shift amounts narrow `rhs` to `u32` (masked to 6 bits right after);
+// everything else here reinterprets in-width via `cast_signed`/`cast_unsigned`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[inline]
+fn alu64(op: AluOp, lhs: i64, rhs: i64) -> i64 {
+    match op {
+        AluOp::Add => lhs.wrapping_add(rhs),
+        AluOp::Sub => lhs.wrapping_sub(rhs),
+        AluOp::Mul => lhs.wrapping_mul(rhs),
+        AluOp::Div => {
+            if rhs == 0 {
+                0
+            } else {
+                lhs.cast_unsigned().wrapping_div(rhs.cast_unsigned()).cast_signed()
+            }
+        }
+        AluOp::Mod => {
+            if rhs == 0 {
+                0
+            } else {
+                lhs.cast_unsigned().wrapping_rem(rhs.cast_unsigned()).cast_signed()
+            }
+        }
+        AluOp::Or => lhs | rhs,
+        AluOp::And => lhs & rhs,
+        AluOp::Xor => lhs ^ rhs,
+        AluOp::Mov => rhs,
+        AluOp::Neg => lhs.wrapping_neg(),
+        AluOp::Lsh => lhs.wrapping_shl(rhs as u32 & 63),
+        AluOp::Rsh => lhs.cast_unsigned().wrapping_shr(rhs as u32 & 63).cast_signed(),
+        AluOp::Arsh => lhs.wrapping_shr(rhs as u32 & 63),
+        AluOp::End(endian) => endian_swap(lhs, rhs, endian),
+    }
+}
+
+/// 32-bit ALU with zero-extended result (see [`alu_apply`]).
+#[inline]
+fn alu32(op: AluOp, lhs: i64, rhs: i64) -> i64 {
+    // Low words: BPF_ALU32 operates on the low 32 bits, so truncation here
+    // is the ISA semantic, not a bug.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let (l, r) = (lhs as u32, rhs as u32);
+    let w = match op {
+        AluOp::Add => l.wrapping_add(r),
+        AluOp::Sub => l.wrapping_sub(r),
+        AluOp::Mul => l.wrapping_mul(r),
+        AluOp::Div => {
+            if r == 0 {
+                0
+            } else {
+                l.wrapping_div(r)
+            }
+        }
+        AluOp::Mod => {
+            if r == 0 {
+                0
+            } else {
+                l.wrapping_rem(r)
+            }
+        }
+        AluOp::Or => l | r,
+        AluOp::And => l & r,
+        AluOp::Xor => l ^ r,
+        AluOp::Mov => r,
+        AluOp::Neg => l.wrapping_neg(),
+        AluOp::Lsh => l.wrapping_shl(r & 31),
+        AluOp::Rsh => l.wrapping_shr(r & 31),
+        AluOp::Arsh => (l.cast_signed().wrapping_shr(r & 31)).cast_unsigned(),
+        AluOp::End(endian) => endian_swap_32(l, rhs, endian),
+    };
+    i64::from(w)
 }
 
 /// `BPF_END`: mask to `width` bits (from the immediate), then byte-swap
 /// within the width when big-endian output was requested. Little-endian
 /// output is a plain mask on little-endian hosts like this lab's.
 ///
+/// Widths are validated at load ([`load`](exec::load) rejects anything but
+/// 16/32/64), so the dead arm is unreachable by construction.
+///
 /// The `as` casts truncate to the operand width per the ISA semantic
 /// (see [`alu_apply`]).
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap)]
-fn endian_swap(value: i64, width_imm: i64, to_be: bool, pc: usize) -> Result<i64, VmError> {
+fn endian_swap(value: i64, width_imm: i64, endian: Endian) -> i64 {
     let masked: u64 = match width_imm {
-        16 => u64::from(value as u16),
-        32 => u64::from(value as u32),
-        64 => value as u64,
-        w => return Err(VmError::InvalidEndWidth { pc, width: w }),
+        16 => value.cast_unsigned() & 0xFFFF,
+        32 => value.cast_unsigned() & 0xFFFF_FFFF,
+        64 => value.cast_unsigned(),
+        _ => unreachable!("BPF_END width validated at load"),
     };
-    if !to_be {
-        return Ok(masked as i64);
+    if endian == Endian::Le {
+        return masked.cast_signed();
     }
     let swapped = match width_imm {
-        16 => u64::from((masked as u16).swap_bytes()),
-        32 => u64::from((masked as u32).swap_bytes()),
+        // `masked` holds only the low 16 bits (16-arm above); the `as`
+        // only satisfies the `swap_bytes` API.
+        16 =>
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            u64::from((masked as u16).swap_bytes())
+        }
+        // Same: only the low 32 bits are significant here.
+        32 =>
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            u64::from((masked as u32).swap_bytes())
+        }
         _ => masked.swap_bytes(),
     };
-    Ok(swapped as i64)
+    swapped.cast_signed()
 }
 
 /// 32-bit variant of [`endian_swap`] (result is zero-extended by the caller).
 ///
-/// Same intentional-truncation rationale as [`alu_apply`].
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap)]
-fn endian_swap_32(value: u32, width_imm: i64, to_be: bool, pc: usize) -> Result<u32, VmError> {
+/// Same load-time validation rationale as [`endian_swap`].
+fn endian_swap_32(value: u32, width_imm: i64, endian: Endian) -> u32 {
     let masked: u32 = match width_imm {
-        16 => u32::from(value as u16),
+        16 => value & 0xFFFF,
         32 | 64 => value,
-        w => return Err(VmError::InvalidEndWidth { pc, width: w }),
+        _ => unreachable!("BPF_END width validated at load"),
     };
-    if !to_be {
-        return Ok(masked);
+    if endian == Endian::Le {
+        return masked;
     }
-    let swapped = match width_imm {
-        16 => u32::from((masked as u16).swap_bytes()),
+    match width_imm {
+        // `masked` holds only the low 16 bits (16-arm above).
+        16 =>
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            u32::from((masked as u16).swap_bytes())
+        }
         _ => masked.swap_bytes(),
-    };
-    Ok(swapped)
+    }
 }
 
 /// Evaluate a conditional jump on concrete values.
 ///
-/// `is64` selects 64-bit comparisons; otherwise the low 32 bits compare.
-/// `BPF_JSET` is taken iff `(lhs & rhs) != 0`. Bit-pattern reinterprets
-/// below are the defined comparison semantics (see [`alu_apply`]).
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_possible_wrap)]
-const fn jump_taken(op: JumpOp, lhs: i64, rhs: i64, is64: bool) -> bool {
-    if is64 {
-        let (l, r) = (lhs as u64, rhs as u64);
-        match op {
-            JumpOp::Always => true,
-            JumpOp::Eq => l == r,
-            JumpOp::Ne => l != r,
-            JumpOp::Gt => l > r,
-            JumpOp::Ge => l >= r,
-            JumpOp::Lt => l < r,
-            JumpOp::Le => l <= r,
-            JumpOp::Sgt => lhs > rhs,
-            JumpOp::Sge => lhs >= rhs,
-            JumpOp::Slt => lhs < rhs,
-            JumpOp::Sle => lhs <= rhs,
-            JumpOp::Set => l & r != 0,
-            JumpOp::Call | JumpOp::Exit => false,
-        }
-    } else {
-        let (l, r) = (lhs as u32, rhs as u32);
-        match op {
-            JumpOp::Always => true,
-            JumpOp::Eq => l == r,
-            JumpOp::Ne => l != r,
-            JumpOp::Gt => l > r,
-            JumpOp::Ge => l >= r,
-            JumpOp::Lt => l < r,
-            JumpOp::Le => l <= r,
-            JumpOp::Sgt => lhs as i32 > rhs as i32,
-            JumpOp::Sge => lhs as i32 >= rhs as i32,
-            JumpOp::Slt => (lhs as i32) < rhs as i32,
-            JumpOp::Sle => (lhs as i32) <= rhs as i32,
-            JumpOp::Set => l & r != 0,
-            JumpOp::Call | JumpOp::Exit => false,
-        }
+/// Thin dispatcher over [`jump_taken_64`]/[`jump_taken_32`].
+/// `BPF_JSET` is taken iff `(lhs & rhs) != 0`. Bit-pattern reinterprets in
+/// the halves are the defined comparison semantics (see [`alu_apply`]).
+#[inline]
+const fn jump_taken(op: JumpOp, lhs: i64, rhs: i64, width: Width) -> bool {
+    match width {
+        Width::B64 => jump_taken_64(op, lhs, rhs),
+        Width::B32 => jump_taken_32(op, lhs, rhs),
+    }
+}
+
+/// 64-bit comparisons.
+#[inline]
+const fn jump_taken_64(op: JumpOp, lhs: i64, rhs: i64) -> bool {
+    let (l, r) = (lhs.cast_unsigned(), rhs.cast_unsigned());
+    match op {
+        JumpOp::Always => true,
+        JumpOp::Eq => l == r,
+        JumpOp::Ne => l != r,
+        JumpOp::Gt => l > r,
+        JumpOp::Ge => l >= r,
+        JumpOp::Lt => l < r,
+        JumpOp::Le => l <= r,
+        JumpOp::Sgt => lhs > rhs,
+        JumpOp::Sge => lhs >= rhs,
+        JumpOp::Slt => lhs < rhs,
+        JumpOp::Sle => lhs <= rhs,
+        JumpOp::Set => l & r != 0,
+        JumpOp::Call | JumpOp::Exit => false,
+    }
+}
+
+/// 32-bit comparisons over the low words.
+#[inline]
+const fn jump_taken_32(op: JumpOp, lhs: i64, rhs: i64) -> bool {
+    // Low words: BPF_JMP32 compares the low 32 bits, so truncation here
+    // is the ISA semantic, not a bug.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let (l, r) = (lhs as u32, rhs as u32);
+    match op {
+        JumpOp::Always => true,
+        JumpOp::Eq => l == r,
+        JumpOp::Ne => l != r,
+        JumpOp::Gt => l > r,
+        JumpOp::Ge => l >= r,
+        JumpOp::Lt => l < r,
+        JumpOp::Le => l <= r,
+        JumpOp::Sgt => l.cast_signed() > r.cast_signed(),
+        JumpOp::Sge => l.cast_signed() >= r.cast_signed(),
+        JumpOp::Slt => l.cast_signed() < r.cast_signed(),
+        JumpOp::Sle => l.cast_signed() <= r.cast_signed(),
+        JumpOp::Set => l & r != 0,
+        JumpOp::Call | JumpOp::Exit => false,
     }
 }
 
@@ -437,20 +606,19 @@ const fn jump_taken(op: JumpOp, lhs: i64, rhs: i64, is64: bool) -> bool {
 ///
 /// # Errors
 ///
-/// Returns [`ebpf_isa::DecodeError`] on malformed bytecode, or the runtime
-/// [`VmError`] wrapped in [`StepResult::Error`].
-pub fn run_bytes(bytes: &[u8], max_steps: usize) -> Result<StepResult, ebpf_isa::DecodeError> {
+/// Returns [`ebpf_isa::DecodeError`] on malformed bytecode; the inner
+/// [`RunOutcome`] carries the runtime result.
+pub fn run_bytes(bytes: &[u8], max_steps: usize) -> Result<RunOutcome, ebpf_isa::DecodeError> {
     let insns = ebpf_isa::decode_program(bytes)?;
     Ok(Vm::new(insns).run(max_steps))
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use ebpf_isa::decode::decode_program;
 
-    fn run_asm(words: &[[u8; 8]]) -> StepResult {
+    fn run_asm(words: &[[u8; 8]]) -> RunOutcome {
         let bytes: Vec<u8> = words.iter().flatten().copied().collect();
         let insns = decode_program(&bytes).expect("test prog decodes");
         Vm::new(insns).run(10_000)
@@ -471,7 +639,7 @@ mod tests {
             w(0xbf, 0, 3, 0, 0),
             w(0x95, 0, 0, 0, 0),
         ];
-        assert_eq!(run_asm(&prog), StepResult::Exit(30));
+        assert_eq!(run_asm(&prog), Ok(30));
     }
 
     #[test]
@@ -484,7 +652,7 @@ mod tests {
             w(0xb7, 0, 0, 0, 2),
             w(0x95, 0, 0, 0, 0),
         ];
-        assert_eq!(run_asm(&taken), StepResult::Exit(1));
+        assert_eq!(run_asm(&taken), Ok(1));
         // r1=9 → not taken, r0 becomes 2
         let not_taken = [
             w(0xb7, 1, 0, 0, 9),
@@ -493,7 +661,7 @@ mod tests {
             w(0xb7, 0, 0, 0, 2),
             w(0x95, 0, 0, 0, 0),
         ];
-        assert_eq!(run_asm(&not_taken), StepResult::Exit(2));
+        assert_eq!(run_asm(&not_taken), Ok(2));
     }
 
     #[test]
@@ -507,7 +675,7 @@ mod tests {
             w(0xa5, 1, 0, -3, 10),
             w(0x95, 0, 0, 0, 0),
         ];
-        assert_eq!(run_asm(&prog), StepResult::Exit(10));
+        assert_eq!(run_asm(&prog), Ok(10));
     }
 
     #[test]
@@ -520,7 +688,7 @@ mod tests {
             w(0xb7, 0, 0, 0, 1),
             w(0x95, 0, 0, 0, 0),
         ];
-        assert_eq!(run_asm(&lt), StepResult::Exit(1));
+        assert_eq!(run_asm(&lt), Ok(1));
         // Same with jle (0xb5, taken) → skips the mov → 0
         let le = [
             w(0xb7, 0, 0, 0, 0),
@@ -529,7 +697,7 @@ mod tests {
             w(0xb7, 0, 0, 0, 1),
             w(0x95, 0, 0, 0, 0),
         ];
-        assert_eq!(run_asm(&le), StepResult::Exit(0));
+        assert_eq!(run_asm(&le), Ok(0));
     }
 
     #[test]
@@ -541,27 +709,27 @@ mod tests {
             w(0x79, 0, 10, -8, 0),
             w(0x95, 0, 0, 0, 0),
         ];
-        assert_eq!(run_asm(&prog), StepResult::Exit(42));
+        assert_eq!(run_asm(&prog), Ok(42));
     }
 
     #[test]
     fn div_by_zero_yields_zero() {
         // r0=7; r0/=0; exit
         let prog = [w(0xb7, 0, 0, 0, 7), w(0x37, 0, 0, 0, 0), w(0x95, 0, 0, 0, 0)];
-        assert_eq!(run_asm(&prog), StepResult::Exit(0));
+        assert_eq!(run_asm(&prog), Ok(0));
     }
 
     #[test]
     fn unknown_helper_errors() {
         let prog = [w(0x85, 0, 0, 0, 1), w(0x95, 0, 0, 0, 0)];
-        assert_eq!(run_asm(&prog), StepResult::Error(VmError::UnknownHelper { func: 1 }));
+        assert_eq!(run_asm(&prog), Err(VmError::UnknownHelper { func: 1 }));
     }
 
     #[test]
     fn oob_stack_access_errors() {
         // ldxdw r0, [r10+8]; exit (above the frame pointer)
         let prog = [w(0x79, 0, 10, 8, 0), w(0x95, 0, 0, 0, 0)];
-        assert!(matches!(run_asm(&prog), StepResult::Error(VmError::Memory(_))));
+        assert!(matches!(run_asm(&prog), Err(VmError::Memory(_))));
     }
 
     #[test]
@@ -569,23 +737,20 @@ mod tests {
         let prog = [w(0x05, 0, 0, -1, 0)]; // ja -1 (self)
         let bytes: Vec<u8> = prog.iter().flatten().copied().collect();
         let insns = decode_program(&bytes).expect("decodes");
-        assert_eq!(
-            Vm::new(insns).run(100),
-            StepResult::Error(VmError::StepsExceeded { limit: 100 })
-        );
+        assert_eq!(Vm::new(insns).run(100), Err(VmError::StepsExceeded { limit: 100 }));
     }
 
     #[test]
     fn alu32_zero_extends() {
         // r0=-1; add32 r0,1 → low word wraps to 0, upper zeroed → 0
         let prog = [w(0xb7, 0, 0, 0, -1), w(0x04, 0, 0, 0, 1), w(0x95, 0, 0, 0, 0)];
-        assert_eq!(run_asm(&prog), StepResult::Exit(0));
+        assert_eq!(run_asm(&prog), Ok(0));
     }
 
     #[test]
     fn endian_swap_be16() {
         // r0=0x1234; end be16 → r0=0x3412
         let prog = [w(0xb7, 0, 0, 0, 0x1234), w(0xdc, 0, 0, 0, 16), w(0x95, 0, 0, 0, 0)];
-        assert_eq!(run_asm(&prog), StepResult::Exit(0x3412));
+        assert_eq!(run_asm(&prog), Ok(0x3412));
     }
 }

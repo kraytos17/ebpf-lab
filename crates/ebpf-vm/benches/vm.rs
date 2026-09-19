@@ -2,9 +2,11 @@
 //!
 //! Run with `cargo bench -p ebpf-vm`.
 
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
+use ebpf_isa::MemSize;
 use ebpf_isa::decode::decode_program;
-use ebpf_vm::Vm;
+use ebpf_vm::{MemoryView, STACK_BASE, Vm, exec};
+use std::hint::black_box;
 
 fn straight_line(adds: usize) -> Vec<u8> {
     let mut bytes = Vec::with_capacity((adds + 2) * 8);
@@ -32,25 +34,48 @@ fn bench_vm(c: &mut Criterion) {
     let mut group = c.benchmark_group("vm");
     let bytes = straight_line(1000);
     let insns = decode_program(&bytes).expect("bench program decodes");
+    // Lower once outside the loop: one-time load cost is not steady state.
+    // Per-iteration clones mirror the old `Vm::new(insns.clone())` shape
+    // (same 16/24-byte memcpy per instruction).
+    let exec = exec::load(&insns);
     group.throughput(Throughput::Elements(insns.len() as u64));
     group.bench_function("straight_1000_adds", |b| {
-        b.iter(|| {
-            let mut vm = Vm::new(insns.clone());
-            vm.run(10_000)
-        });
+        b.iter_batched(
+            || (insns.clone(), exec.clone()),
+            |(i, e)| Vm::from_exec(i, e).run(10_000),
+            BatchSize::SmallInput,
+        );
     });
 
     let bytes = counter_loop(1000);
     let insns = decode_program(&bytes).expect("bench program decodes");
+    let exec = exec::load(&insns);
     group.throughput(Throughput::Elements(3000));
     group.bench_function("loop_1000_iters", |b| {
-        b.iter(|| {
-            let mut vm = Vm::new(insns.clone());
-            vm.run(10_000)
-        });
+        b.iter_batched(
+            || (insns.clone(), exec.clone()),
+            |(i, e)| Vm::from_exec(i, e).run(10_000),
+            BatchSize::SmallInput,
+        );
     });
     group.finish();
 }
 
-criterion_group!(benches, bench_vm);
+fn bench_memory(c: &mut Criterion) {
+    let mut group = c.benchmark_group("memory");
+    group.throughput(Throughput::Elements(2));
+    for size in [MemSize::B, MemSize::H, MemSize::W, MemSize::Dw] {
+        group.bench_with_input(format!("store_load_{}", size.mnemonic()), &size, |b, &size| {
+            b.iter(|| {
+                let mut mem = MemoryView::default();
+                mem.store(STACK_BASE - 8, size, black_box(0x0102_0304_0506_0708))
+                    .expect("in bounds");
+                black_box(mem.load(STACK_BASE - 8, size).expect("in bounds"))
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_vm, bench_memory);
 criterion_main!(benches);

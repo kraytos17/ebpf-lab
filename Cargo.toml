@@ -8,6 +8,7 @@ members = [
     "crates/ebpf-vm",
     "crates/ebpf-lab-cli",
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2024"
@@ -16,14 +17,18 @@ license = "MIT"
 repository = "https://github.com/kraytos17/ebpf-lab"
 homepage = "https://github.com/kraytos17/ebpf-lab"
 documentation = "https://docs.rs/ebpf-isa"
-version = "0.3.0"
+version = "0.4.0"
 
 [workspace.dependencies]
-ebpf-isa = { version = "0.3.0", path = "crates/ebpf-isa" }
-ebpf-elf = { version = "0.3.0", path = "crates/ebpf-elf" }
-ebpf-disasm = { version = "0.3.0", path = "crates/ebpf-disasm" }
-ebpf-cfg = { version = "0.3.0", path = "crates/ebpf-cfg" }
-ebpf-vm = { version = "0.3.0", path = "crates/ebpf-vm" }
+# Dependency policy: every third-party version lives here exactly once and
+# crates inherit via `dep.workspace = true`. Bump with
+# `cargo update -p <pkg>` so Cargo.lock records the change for review.
+ebpf-isa = { version = "0.4.0", path = "crates/ebpf-isa" }
+ebpf-elf = { version = "0.4.0", path = "crates/ebpf-elf" }
+ebpf-disasm = { version = "0.4.0", path = "crates/ebpf-disasm" }
+ebpf-cfg = { version = "0.4.0", path = "crates/ebpf-cfg" }
+ebpf-vm = { version = "0.4.0", path = "crates/ebpf-vm" }
+
 object = "0.40.0"
 petgraph = "0.8.3"
 criterion = "0.8.2"
@@ -32,6 +37,8 @@ anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+insta = "1.48.0"
+proptest = "1.11.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -43,4 +50,13 @@ nursery = { level = "warn", priority = 0 }
 unwrap_used = { level = "warn", priority = 1 }
 
 [profile.dev]
+debug = "line-tables-only"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.bench]
+inherits = "release"
 debug = "line-tables-only"

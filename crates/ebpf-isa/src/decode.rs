@@ -3,7 +3,7 @@
 //! Decodes a raw little-endian instruction stream into the structured form
 //! shared by the disassembler, CFG builder, VM, and verifier.
 
-use crate::insn::{AluOp, DecodeError, Insn, JumpOp, MemSize, Operand, RawInsn, Reg};
+use crate::insn::{AluOp, DecodeError, Insn, JumpOp, MemSize, Operand, RawInsn, Reg, Width};
 use crate::opcode::{self, class};
 
 /// Decode a whole program from raw bytes.
@@ -28,6 +28,7 @@ use crate::opcode::{self, class};
 /// let insns = decode_program(&bytes).unwrap();
 /// assert!(matches!(insns[1], Insn::Exit));
 /// ```
+#[tracing::instrument(skip(bytes), fields(len = bytes.len()))]
 pub fn decode_program(bytes: &[u8]) -> Result<Vec<Insn>, DecodeError> {
     let mut out = Vec::with_capacity(bytes.len() / RawInsn::SIZE);
     let mut i = 0;
@@ -67,23 +68,23 @@ fn decode_one(raw: RawInsn, rest: &[u8]) -> Result<(Insn, usize), DecodeError> {
     let klass = opcode::klass(raw.opcode);
     match klass {
         class::ALU64 | class::ALU => {
-            let is64 = klass == class::ALU64;
+            let width = if klass == class::ALU64 { Width::B64 } else { Width::B32 };
             let op = AluOp::from_opcode(raw.opcode)?;
             // BPF_END reuses the source bit as the LE/BE selector, so its
             // operand is always the immediate width (16/32/64).
-            let src = if matches!(op, AluOp::End { .. }) {
+            let src = if matches!(op, AluOp::End(_)) {
                 Operand::Imm(raw.imm)
             } else {
                 decode_operand(raw)?
             };
-            Ok((Insn::Alu { is64, op, dst: Reg::new(raw.dst())?, src }, RawInsn::SIZE))
+            Ok((Insn::Alu { width, op, dst: Reg::new(raw.dst())?, src }, RawInsn::SIZE))
         }
         class::JMP | class::JMP32 => {
-            let is64 = klass == class::JMP;
+            let width = if klass == class::JMP { Width::B64 } else { Width::B32 };
             let op = JumpOp::from_opcode(raw.opcode)?;
             let src = decode_operand(raw)?;
             Ok((
-                Insn::Jump { is64, op, dst: Reg::new(raw.dst())?, src, offset: raw.offset },
+                Insn::Jump { width, op, dst: Reg::new(raw.dst())?, src, offset: raw.offset },
                 RawInsn::SIZE,
             ))
         }
@@ -142,7 +143,7 @@ mod tests {
         let insns = decode_program(&bytes).unwrap();
         assert_eq!(
             insns[0],
-            Insn::Alu { is64: true, op: AluOp::Mov, dst: Reg(0), src: Operand::Imm(42) }
+            Insn::Alu { width: Width::B64, op: AluOp::Mov, dst: Reg(0), src: Operand::Imm(42) }
         );
     }
 
@@ -182,7 +183,7 @@ mod tests {
         assert_eq!(
             insns[0],
             Insn::Jump {
-                is64: true,
+                width: Width::B64,
                 op: JumpOp::Eq,
                 dst: Reg(1),
                 src: Operand::Imm(10),

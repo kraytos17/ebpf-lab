@@ -10,3 +10,7 @@
 *.swp
 *.swo
 .idea/
+
+fuzz/artifacts/
+fuzz/coverage/
+fuzz/corpus/
