@@ -338,6 +338,7 @@ dependencies = [
  "ebpf-elf",
  "ebpf-isa",
  "ebpf-vm",
+ "lazy_static",
  "tracing",
  "tracing-subscriber",
 ]

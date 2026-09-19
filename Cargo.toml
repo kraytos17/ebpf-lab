@@ -39,6 +39,12 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 insta = "1.48.0"
 proptest = "1.11.0"
+# Floor workaround: sharded-slab 0.1.4 uses
+# `__lazy_static_internal` (exists since lazy_static 1.1) but allows
+# lazy_static 1.0.0, which minimal-versions resolution picks and then
+# fails to compile. Pinning >= 1.4 graph-wide sidesteps the upstream
+# loose floor (ebpf-lab-cli pulls the chain via tracing-subscriber).
+lazy_static = "1.4"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

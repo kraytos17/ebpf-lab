@@ -12,6 +12,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   unbreaks the MSRV minimal-versions job (minimal `flate2` pulled the
   uncompilable `gcc 0.3.3` fossil). Compressed sections were already
   skipped gracefully, so behavior is unchanged.
+- `lazy_static >= 1.4` floor on `ebpf-lab-cli` (with rationale comment):
+  `sharded-slab 0.1.4` uses `__lazy_static_internal` (needs >= 1.1) but
+  allows 1.0.0, which minimal resolution picks and fails to compile.
 
 ## [0.4.0] - 2026-09-19
 
