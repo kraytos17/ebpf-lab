@@ -25,7 +25,7 @@ jobs:
         with:
           tool: cargo-fuzz
       - uses: Swatinem/rust-cache@v2
-      - run: cargo +nightly fuzz build
+      - run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
 
   run:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -40,7 +40,7 @@ jobs:
         with:
           tool: cargo-fuzz
       - uses: Swatinem/rust-cache@v2
-      - run: cargo +nightly fuzz run decode_program -- -max_total_time=300
+      - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu decode_program -- -max_total_time=300
       - name: upload crashers
         if: failure()
         uses: actions/upload-artifact@v7
