@@ -29,7 +29,7 @@ ebpf-disasm = { version = "0.4.0", path = "crates/ebpf-disasm" }
 ebpf-cfg = { version = "0.4.0", path = "crates/ebpf-cfg" }
 ebpf-vm = { version = "0.4.0", path = "crates/ebpf-vm" }
 
-object = "0.40.0"
+object = { version = "0.40.0", default-features = false, features = ["read", "std"] }
 petgraph = "0.8.3"
 criterion = "0.8.2"
 thiserror = "2.0.20"

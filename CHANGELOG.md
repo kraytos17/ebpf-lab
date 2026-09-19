@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `object` dependency slimmed to `read` + `std` (no `compression`):
+  drops `flate2`/`ruzstd` from the tree (−65 entries) and
+  unbreaks the MSRV minimal-versions job (minimal `flate2` pulled the
+  uncompilable `gcc 0.3.3` fossil). Compressed sections were already
+  skipped gracefully, so behavior is unchanged.
+
 ## [0.4.0] - 2026-09-19
 
 ### Added
