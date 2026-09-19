@@ -1,38 +1,143 @@
 # ebpf-lab
 
 [![ci](https://github.com/kraytos17/ebpf-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/kraytos17/ebpf-lab/actions/workflows/ci.yml)
+[![fuzz](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml/badge.svg)](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml)
 [![msrv](https://img.shields.io/badge/MSRV-1.98-blue)](https://github.com/kraytos17/ebpf-lab)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![tests](https://img.shields.io/badge/tests-63-blue)](https://github.com/kraytos17/ebpf-lab)
+[![fixtures](https://img.shields.io/badge/fixtures-12-orange)](tests/fixtures/)
 
 An eBPF laboratory in Rust: inspect, verify, execute, and optimize eBPF programs.
 
-Target toolchain: Rust 1.98, edition 2024, stable channel.
-MSRV policy: `rust-version = "1.98"` is pinned in CI; dependency bumps must
-keep building under `cargo update -Z minimal-versions`.
+Currently implements the **decode → disassemble → CFG → VM** pipeline with basic  memory model
+(uninitialized-stack detection, alignment enforcement, packet region), 12 hand-assembled fixtures,
+a libFuzzer harness, and property-based tests.
 
 ## Quickstart
 
 ```bash
 cargo build --workspace
 ./target/debug/ebpf-lab inspect tests/fixtures/mov_exit.bin
-./target/debug/ebpf-lab disasm tests/fixtures/arith.bin
+./target/debug/ebpf-lab run tests/fixtures/arith.bin
+./target/debug/ebpf-lab run --trace tests/fixtures/loop.bin
 ```
 
-## Workspace layout
+## Subcommands
 
-```text
-crates/
-  ebpf-isa/      # instruction encoding/decoding (RawInsn -> Insn)
-  ebpf-elf/      # ELF/.o parsing, section extraction (object crate)
-  ebpf-disasm/   # bytecode -> human-readable text
-  ebpf-cfg/      # control-flow graph (BasicBlock, Cfg, DOT export)
-  ebpf-vm/       # concrete interpreter (Vm, step/run, memory, helpers)
-  ebpf-lab-cli/  # `ebpf-lab` binary (clap derive)
-tests/fixtures/  # hand-assembled .bin fixtures
+| Command | Description | Example |
+|---------|-------------|---------|
+| `inspect` | Program header + disassembly | `ebpf-lab inspect program.o` |
+| `disasm` | Raw disassembly only | `ebpf-lab disasm program.bin` |
+| `cfg` | Control-flow graph (block listing) | `ebpf-lab cfg program.bin` |
+| `cfg --dot` | Graphviz DOT output | `ebpf-lab cfg program.bin --dot \| dot -Tsvg -o cfg.svg` |
+| `run` | Execute in the interpreter (`r0` = exit code) | `ebpf-lab run program.bin` |
+| `run --trace` | Per-step register diff trace | `ebpf-lab run --trace program.bin` |
+
+Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
+
+## Architecture
+
+```
+┌─────────┐    ┌──────────────┐    ┌──────────────-┐
+│  .bin / │───▶│  ebpf-isa    │───▶│  ebpf-disasm  │──▶ human text
+│  .o ELF │    │  decode      │    │  format       │
+└─────────┘    └──────┬───────┘    └───────────────┘
+                      │
+                Vec<Insn>           ← decoded once, reused everywhere
+                      │
+          ┌───────────┼─────────────┐
+          ▼           ▼             ▼
+     ┌─────────┐ ┌─────────┐ ┌─────────────┐
+     │ebpf-cfg │ │ebpf-vm  │ │future:      │
+     │build_cfg│ │step/run │ │verifier,    │
+     │to_dot   │ │memory   │ │maps, XDP,   │
+     │Pc / Slot│ │exec     │ │SSA, opt     │
+     └─────────┘ └─────────┘ └─────────────┘
 ```
 
-Later milestones add `ebpf-verifier`, `ebpf-maps`,
-`ebpf-xdp`, `ebpf-ssa`, `ebpf-opt` — each consuming the same decoded
-`Vec<Insn>` from `ebpf-isa`.
+### Crate map
+
+| Crate | Purpose | Key types |
+|-------|---------|-----------|
+| [`ebpf-isa`](crates/ebpf-isa) | Instruction encoding/decoding | `RawInsn`, `Insn`, `Reg`, `MemSize`, `Width` |
+| [`ebpf-elf`](crates/ebpf-elf) | ELF `.o` parsing, section extraction | `ElfProgram`, `ProgType`, `SectionKind` |
+| [`ebpf-disasm`](crates/ebpf-disasm) | Bytecode → human-readable text | `disassemble`, `Display for Insn` |
+| [`ebpf-cfg`](crates/ebpf-cfg) | Control-flow graph construction | `BasicBlock`, `Cfg`, `Pc`, `Slot`, `to_dot` |
+| [`ebpf-vm`](crates/ebpf-vm) | Concrete interpreter + v0.4 memory | `Vm`, `ExecInsn`, `MemoryView`, `MemError` |
+| [`ebpf-lab-cli`](crates/ebpf-lab-cli) | `ebpf-lab` binary | clap derive, tracing |
+
+## Memory model (v0.4)
+
+The interpreter's `MemoryView` routes every load/store through a single chokepoint:
+
+| Feature | Error variant | Behavior |
+|---------|---------------|----------|
+| Stack OOB | `StackOverflow` | `[STACK_BASE - 512, STACK_BASE)` range |
+| Unwritten stack byte | `UninitializedRead` | `[u64; 8]` bitset, one bit per byte |
+| Misaligned access | `Misaligned` | Natural alignment enforced, togglable |
+| Packet with no buffer | `NoPacket` | Read-only region at `PACKET_BASE` |
+| Packet OOB | `OutOfBounds` | Same variant for unknown regions |
+
+Bounds are checked **before** alignment, so a straddling access reports the
+range fault — matching the kernel verifier's diagnostic priority.
+
+## Test fixtures
+
+12 hand-assembled `.bin` programs exercising the happy path *and* canonical
+rejections. See [`tests/fixtures/README.md`](tests/fixtures/README.md) for
+the full table (bytes, assembly, exit code, what each exercises).
+
+Highlights:
+
+| Fixture | Verifies |
+|---------|----------|
+| `mov_exit.bin` | Minimal decode → run |
+| `arith.bin` | ALU64 reg ops, sum = 30 |
+| `branch.bin` | Conditional jump taken edge, CFG 3 blocks |
+| `diamond.bin` | If/else merge (v0.6 join tests) |
+| `uninit_read.bin` | `UninitializedRead` rejection |
+| `misaligned.bin` | `Misaligned` rejection (v0.4 path) |
+| `illegal.bin` | Unknown opcode → `IllegalInstruction` |
+
+Fuzz seeds are staged from these via `fuzz/build.rs` (protobuf-style: refreshed only when
+fixtures change, never committed in the corpus dir).
+
+## Quality gates
+
+### Local
+
+```bash
+just verify          # fmt + clippy + test + doc
+just verify-all      # + cargo-deny
+just bench-quick     # smoke each bench (decode, cfg, vm)
+just fuzz-smoke      # 60s fuzzer run (needs nightly + cargo-fuzz)
+```
+
+### CI
+
+| Job | What |
+|-----|------|
+| `fmt` | `cargo fmt --check` |
+| `clippy` | `-D warnings`, pedantic + nursery |
+| `test` | nextest + explicit doctests |
+| `coverage` | llvm-cov lcov artifact (72% baseline) |
+| `bench` | compile-check + smoke per bench target |
+| `doc` | `RUSTDOCFLAGS="-D warnings"` |
+| `deny` | advisories, licenses, bans, sources |
+| `msrv-minimal` | `minimal-versions` resolve + check on 1.98 |
+| `fuzz build` | nightly ASan build on decoder changes |
+| `fuzz run` | 300s timed run (weekly / manual) |
+
+```bash
+just verify   # equivalent of fmt + clippy + test + doc
+```
+
+### Fuzzing
+
+- **Harness**: `fuzz/fuzz_targets/decode_program.rs` — arbitrary bytes in, `DecodeError` out
+- **Corpus**: staged from `tests/fixtures/` by `fuzz/build.rs` on fixture changes
+- **CI**: build on every PR touching the decoder; timed run weekly
+- **60s smoke**: 22M execs, 0 crashes
 
 ## Benchmarks
 
@@ -42,33 +147,50 @@ cargo bench -p ebpf-cfg --bench cfg
 cargo bench -p ebpf-vm --bench vm
 ```
 
-Baselines (observation mode): decode ~1.1 GiB/s,
-CFG ~35–50 Melem/s, VM ~180 Melem/s. No repr/layout changes without a
-profile attributing ≥20% to the candidate.
+Baselines (v0.4, `profile.release`, criterion):
 
-## Quality gates
+| Benchmark | Result |
+|-----------|--------|
+| `decode/4096_slots` | ~25 µs (~1.2 GiB/s) |
+| `cfg/4096_slots` | ~98 µs (~42 Melem/s) |
+| `vm/straight_1000_adds` | ~4.4 µs (~228 Melem/s) |
+| `vm/loop_1000_iters` | ~10.8 µs (~278 Melem/s) |
+| `memory/store_load` | ~500 ps per access |
 
-```bash
-just verify   # fmt + clippy + test + doc (needs `just`; raw commands below)
-```
+No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 
-or without `just`:
+## Design principles
 
-```bash
-cargo fmt --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo nextest run --workspace --locked
-cargo test --doc --workspace --locked
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --locked
-```
-
-`Cargo.lock` is committed intentionally: this workspace ships a binary
-(`ebpf-lab`), so reproducible builds matter.
+1. **Decode once, reuse everywhere** — `ebpf-isa` emits `Vec<Insn>` once; CFG, VM, verifier, SSA
+   all consume the same stream. Never re-parse raw bytes.
+2. **Single memory chokepoint** — all loads/stores go through `MemoryView`, the same surface the
+   verifier will statically reason about in v0.5.
+3. **Infallible lowering** — `exec::load` resolves jumps to absolute targets at load time;
+   statically-invalid instructions become `Trap`s (never panics), preserving the exact error
+   the old runtime checks would have produced.
+4. **No unsafe, ever** — `unsafe_code = "forbid"` at the workspace level.
 
 ## Milestones
 
-- v0.1 ELF + disassembler
-- v0.2 CFG (`petgraph`, DOT export)
-- v0.3 VM interpreter + criterion benches
-- v0.4 memory model, v0.5 verifier, v0.6 abstract interpretation
-- v0.7 maps, v0.8 XDP, v0.9 SSA+optimizer, v1.0 real-world compat (BTF, relocs, bounded loops)
+- [x] **v0.1** — ELF loading + disassembler
+- [x] **v0.2** — Control-flow graph (`petgraph`, DOT export)
+- [x] **v0.3** — VM interpreter + criterion benchmarks
+- [x] **v0.4** — Memory model (stack init bitmap, packet region, alignment, 12 fixtures)
+- **v0.5** — Verifier (register type/range tracking, static memory safety)
+- **v0.6** — Abstract interpretation (interval lattice, branch refinement, joins)
+- **v0.7** — Map simulator (HASH, ARRAY, LRU, ring buffer)
+- **v0.8** — Packet/XDP simulator
+- **v0.9** — SSA construction + optimization passes
+- **v1.0** — Real-world compatibility (BTF, relocs, bounded loops)
+
+## Contributing
+
+1. `git clone` → `cargo build --workspace`
+2. Add fixtures to `tests/fixtures/` (see [the guide](tests/fixtures/README.md))
+3. Run `just verify` — all 63 tests + clippy + doc must be green
+4. Run `cargo insta review` after disassembler/CFG changes to accept new snapshots
+5. Run `just fuzz-smoke` before touching the decoder
+
+## License
+
+MIT — see [LICENSE](LICENSE).
