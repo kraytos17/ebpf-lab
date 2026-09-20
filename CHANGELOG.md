@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-20
+
+### Added
+
+- `ebpf-verifier`: academic-clean verifier (interval lattice over
+  `std::ops` traits, DAG-only worklist with fixed-point reprocessing,
+  branch refinement with complement normalization, JSON trace output).
+  Accepts all valid fixtures; rejects uninit reads, bad jumps, illegal
+  opcodes, misaligned access, and uninitialized `r0` at exit.
+  Differential oracle (`accept_implies_vm_safe`): every accepted
+  program, fixture or property-generated, runs in the VM without a
+  memory fault.
+- Lattice laws (`proptest`, 256 cases each): `join`/`meet`
+  commutativity + idempotence, Top/Bottom absorption, meet-Bottom
+  implies disjoint-or-Bottom, and `Add` soundness over interval corners.
+- CLI: `ebpf-lab verify [--trace]` (verdict or per-PC JSON trace).
+
+### Fixed
+
+- Interpreter throughput: `#[inline]` on `step()` fuses the dispatch
+  match into the `run()` loop (~−20% straight-line, ~−35% loop-heavy,
+  criterion, vs v0.4 baselines); `#[inline]` on both `endian_swap`
+  halves; removed duplicate `STACK_BYTES` conversion in the verifier's
+  `byte_range`. No behavior change.
+
 ### Changed
 
 - `object` dependency slimmed to `read` + `std` (no `compression`):
@@ -164,3 +189,5 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 [0.1.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.1.0
 [0.2.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.2.0
 [0.3.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.3.0
+[0.4.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.4.0
+[0.5.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.5.0

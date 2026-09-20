@@ -1,0 +1,27 @@
+[package]
+name = "ebpf-verifier"
+description = "Academic-clean eBPF verifier (interval lattice, DAG-only, no helpers)"
+keywords = ["ebpf", "bpf", "verifier", "abstract-interpretation"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ebpf-verifier"
+
+[dependencies]
+ebpf-isa.workspace = true
+ebpf-cfg.workspace = true
+ebpf-disasm.workspace = true
+petgraph.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+ebpf-vm.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

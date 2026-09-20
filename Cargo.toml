@@ -7,6 +7,7 @@ members = [
     "crates/ebpf-cfg",
     "crates/ebpf-vm",
     "crates/ebpf-lab-cli",
+    "crates/ebpf-verifier",
 ]
 exclude = ["fuzz"]
 
@@ -28,6 +29,7 @@ ebpf-elf = { version = "0.4.0", path = "crates/ebpf-elf" }
 ebpf-disasm = { version = "0.4.0", path = "crates/ebpf-disasm" }
 ebpf-cfg = { version = "0.4.0", path = "crates/ebpf-cfg" }
 ebpf-vm = { version = "0.4.0", path = "crates/ebpf-vm" }
+ebpf-verifier = { version = "0.4.0", path = "crates/ebpf-verifier" }
 
 object = { version = "0.40.0", default-features = false, features = ["read", "std"] }
 petgraph = "0.8.3"
@@ -39,6 +41,8 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 insta = "1.48.0"
 proptest = "1.11.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 # Floor workaround: sharded-slab 0.1.4 uses
 # `__lazy_static_internal` (exists since lazy_static 1.1) but allows
 # lazy_static 1.0.0, which minimal-versions resolution picks and then

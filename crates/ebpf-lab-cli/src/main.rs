@@ -1,7 +1,7 @@
 //! `ebpf-lab` — inspect, verify, execute, and optimize eBPF programs.
 //!
-//! v0.3 surface: `inspect`, `disasm`, `cfg`, and `run`. Later milestones add
-//! `verify`, `trace`, `optimize`, `xdp`, and `map`.
+//! v0.5 surface: `inspect`, `disasm`, `cfg`, `verify`, and `run`.
+//! Later milestones add `trace`, `optimize`, `xdp`, and `map`.
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
@@ -49,6 +49,15 @@ enum Command {
         #[command(flatten)]
         input: ProgramInput,
         /// Print each step (instruction plus changed registers).
+        #[arg(long)]
+        trace: bool,
+    },
+    /// Verify the program statically (interval analysis, DAG-only).
+    Verify {
+        /// Program input.
+        #[command(flatten)]
+        input: ProgramInput,
+        /// Print the per-PC abstract-state trace as JSON.
         #[arg(long)]
         trace: bool,
     },
@@ -141,6 +150,30 @@ fn cmd_cfg(path: &Path, dot: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn cmd_verify(path: &Path, trace: bool) -> anyhow::Result<()> {
+    for prog in &load_decoded(path)? {
+        let insns = &prog.insns;
+        let cfg = ebpf_cfg::build_cfg(insns)
+            .with_context(|| format!("building CFG for `{}`", prog.meta.name))?;
+        let disasm = ebpf_disasm::disassemble(insns);
+        match ebpf_verifier::verify(insns, &cfg, &disasm) {
+            Ok(result) => {
+                if trace {
+                    println!("{}", result.to_json()?);
+                } else {
+                    println!(
+                        "verified: {} instructions, {} PCs visited",
+                        insns.len(),
+                        result.total_pc
+                    );
+                }
+            }
+            Err(e) => println!("rejected: {e}"),
+        }
+    }
+    Ok(())
+}
+
 /// Default step budget for `run` (bounds infinite loops).
 const DEFAULT_MAX_STEPS: usize = 1_000_000;
 
@@ -203,5 +236,6 @@ fn main() -> anyhow::Result<()> {
         Command::Disasm { input } => cmd_disasm(&input.path),
         Command::Cfg { input, dot } => cmd_cfg(&input.path, *dot),
         Command::Run { input, trace } => cmd_run(&input.path, *trace),
+        Command::Verify { input, trace } => cmd_verify(&input.path, *trace),
     }
 }

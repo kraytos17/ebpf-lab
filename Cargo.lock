@@ -337,10 +337,26 @@ dependencies = [
  "ebpf-disasm",
  "ebpf-elf",
  "ebpf-isa",
+ "ebpf-verifier",
  "ebpf-vm",
  "lazy_static",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ebpf-verifier"
+version = "0.4.0"
+dependencies = [
+ "ebpf-cfg",
+ "ebpf-disasm",
+ "ebpf-isa",
+ "ebpf-vm",
+ "petgraph",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

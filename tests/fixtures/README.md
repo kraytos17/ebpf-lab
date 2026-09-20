@@ -8,7 +8,7 @@ They load at compile time via `include_bytes!`, so they must exist before
 generation step. The fuzz seed corpus (`fuzz/corpus/`, gitignored) is
 staged *from* these files by `fuzz/build.rs`; fixtures are its upstream.
 
-## The six programs
+## The thirteen programs
 
 | File | Slots | Program | Exit | Exercises |
 |---|---|---|---|---|
@@ -24,6 +24,7 @@ staged *from* these files by `fuzz/build.rs`; fixtures are its upstream.
 | `oob_jump.bin` | 2 | `ja +100; exit` | ❌ `JumpOutOfBounds` (target 101) | Canonical bad-target rejection; lowers to `Trap` at load |
 | `illegal.bin` | 2 | `unknown 0x00; exit` | ❌ `IllegalInstruction` (pc 0) | Class-0 opcode → `Unknown` → `Trap`; disassembler roundtrip pinned |
 | `misaligned.bin` | 3 | `mov r1, 1; stw [r10-7], 1; exit` | ❌ `Misaligned` (@0xfff9, needs 4) | In-bounds (505+4 ≤ 512) but unaligned; v0.4 alignment path |
+| `join_uninit.bin` | 8 | `mov r1, 10; jeq r1, 10, +2; mov r0, 0; ja +2; stxdw [r10-8], r1; ja +0; ldxdw r0, [r10-8]; exit` | ❌ `UninitStackRead` (merge) | Taken path stores, fallthrough doesn't; merge must reject (worklist fixed-point regression test) |
 
 Expected disassembly (from `ebpf-lab disasm`, v0.4.0):
 
@@ -41,7 +42,7 @@ stack:     mov r1, 42 / *(dw *)(r10 + -8) = r1 / r0 = *(dw *)(r10 + -8) / exit
 - `ebpf-disasm` golden snapshots: `mov_exit`, `arith`, `branch`, `branch_untaken`, `diamond`, `ldimm`
 - `ebpf-cfg` golden DOT snapshots: `branch`, `diamond` (merge shape), `arith`, `ldimm`
 - `ebpf-vm` exec tests: all eight valid fixtures trap-free (`all_fixtures_trap_free`), exit codes pinned (`fixture_exit_codes`), rejections pinned at load (`invalid_fixtures_trap_at_load`) and runtime (`rejection_fixtures_fail_at_runtime`); `branch`/`loop`/`diamond` target resolution + CFG differential pin
-- Fuzz seeds: all twelve, via `fuzz/build.rs`
+- Fuzz seeds: all thirteen, via `fuzz/build.rs`
 
 ## Adding a fixture
 

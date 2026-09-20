@@ -275,6 +275,10 @@ impl Vm {
     }
 
     /// Execute one instruction.
+    ///
+    /// inline so the hot `run()` loop fuses with the dispatch
+    /// match instead of paying call/ret per step.
+    #[inline]
     pub fn step(&mut self) -> StepResult {
         // The fetch bounds-check doubles as jump-target safety: every
         // target was validated at load, so a bad `pc` can only come from
@@ -492,6 +496,7 @@ fn alu32(op: AluOp, lhs: i64, rhs: i64) -> i64 {
 ///
 /// The `as` casts truncate to the operand width per the ISA semantic
 /// (see [`alu_apply`]).
+#[inline]
 fn endian_swap(value: i64, width_imm: i64, endian: Endian) -> i64 {
     let masked: u64 = match width_imm {
         16 => value.cast_unsigned() & 0xFFFF,
@@ -524,6 +529,7 @@ fn endian_swap(value: i64, width_imm: i64, endian: Endian) -> i64 {
 /// 32-bit variant of [`endian_swap`] (result is zero-extended by the caller).
 ///
 /// Same load-time validation rationale as [`endian_swap`].
+#[inline]
 fn endian_swap_32(value: u32, width_imm: i64, endian: Endian) -> u32 {
     let masked: u32 = match width_imm {
         16 => value & 0xFFFF,

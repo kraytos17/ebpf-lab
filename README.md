@@ -4,13 +4,13 @@
 [![fuzz](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml/badge.svg)](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml)
 [![msrv](https://img.shields.io/badge/MSRV-1.98-blue)](https://github.com/kraytos17/ebpf-lab)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-63-blue)](https://github.com/kraytos17/ebpf-lab)
-[![fixtures](https://img.shields.io/badge/fixtures-12-orange)](tests/fixtures/)
+[![tests](https://img.shields.io/badge/tests-98-blue)](https://github.com/kraytos17/ebpf-lab)
+[![fixtures](https://img.shields.io/badge/fixtures-13-orange)](tests/fixtures/)
 
 An eBPF laboratory in Rust: inspect, verify, execute, and optimize eBPF programs.
 
-Currently implements the **decode → disassemble → CFG → VM** pipeline with basic  memory model
-(uninitialized-stack detection, alignment enforcement, packet region), 12 hand-assembled fixtures,
+Currently implements the **decode → disassemble → CFG → VM → verify** pipeline with basic  memory model
+(uninitialized-stack detection, alignment enforcement, packet region), 13 hand-assembled fixtures,
 a libFuzzer harness, and property-based tests.
 
 ## Quickstart
@@ -32,27 +32,29 @@ cargo build --workspace
 | `cfg --dot` | Graphviz DOT output | `ebpf-lab cfg program.bin --dot \| dot -Tsvg -o cfg.svg` |
 | `run` | Execute in the interpreter (`r0` = exit code) | `ebpf-lab run program.bin` |
 | `run --trace` | Per-step register diff trace | `ebpf-lab run --trace program.bin` |
+| `verify` | Statically verify (interval analysis, DAG-only) | `ebpf-lab verify program.bin` |
+| `verify --trace` | Per-PC abstract-state trace as JSON | `ebpf-lab verify --trace program.bin` |
 
 Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
 
 ## Architecture
 
 ```
-┌─────────┐    ┌──────────────┐    ┌──────────────-┐
+┌─────────┐    ┌──────────────┐    ┌───────────────┐
 │  .bin / │───▶│  ebpf-isa    │───▶│  ebpf-disasm  │──▶ human text
 │  .o ELF │    │  decode      │    │  format       │
 └─────────┘    └──────┬───────┘    └───────────────┘
                       │
                 Vec<Insn>           ← decoded once, reused everywhere
                       │
-          ┌───────────┼─────────────┐
-          ▼           ▼             ▼
-     ┌─────────┐ ┌─────────┐ ┌─────────────┐
-     │ebpf-cfg │ │ebpf-vm  │ │future:      │
-     │build_cfg│ │step/run │ │verifier,    │
-     │to_dot   │ │memory   │ │maps, XDP,   │
-     │Pc / Slot│ │exec     │ │SSA, opt     │
-     └─────────┘ └─────────┘ └─────────────┘
+          ┌───────────┼─────────────┬─────────────┐
+          ▼           ▼             ▼             ▼
+     ┌─────────┐ ┌─────────┐ ┌─────────────┐ ┌──────────────┐
+     │ebpf-cfg │ │ebpf-vm  │ │ebpf-verifier│ │future:       │
+     │build_cfg│ │step/run │ │Range lattice│ │maps, XDP,    │
+     │to_dot   │ │memory   │ │worklist+join│ │SSA, opt      │
+     │Pc / Slot│ │exec     │ │JSON trace   │ │              │
+     └─────────┘ └─────────┘ └─────────────┘ └──────────────┘
 ```
 
 ### Crate map
@@ -64,6 +66,7 @@ Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
 | [`ebpf-disasm`](crates/ebpf-disasm) | Bytecode → human-readable text | `disassemble`, `Display for Insn` |
 | [`ebpf-cfg`](crates/ebpf-cfg) | Control-flow graph construction | `BasicBlock`, `Cfg`, `Pc`, `Slot`, `to_dot` |
 | [`ebpf-vm`](crates/ebpf-vm) | Concrete interpreter + v0.4 memory | `Vm`, `ExecInsn`, `MemoryView`, `MemError` |
+| [`ebpf-verifier`](crates/ebpf-verifier) | Static verifier (interval lattice, DAG-only) | `verify`, `Range`, `VerifierState`, `VerifyError` |
 | [`ebpf-lab-cli`](crates/ebpf-lab-cli) | `ebpf-lab` binary | clap derive, tracing |
 
 ## Memory model (v0.4)
@@ -83,7 +86,7 @@ range fault — matching the kernel verifier's diagnostic priority.
 
 ## Test fixtures
 
-12 hand-assembled `.bin` programs exercising the happy path *and* canonical
+13 hand-assembled `.bin` programs exercising the happy path *and* canonical
 rejections. See [`tests/fixtures/README.md`](tests/fixtures/README.md) for
 the full table (bytes, assembly, exit code, what each exercises).
 
@@ -96,6 +99,7 @@ Highlights:
 | `branch.bin` | Conditional jump taken edge, CFG 3 blocks |
 | `diamond.bin` | If/else merge (v0.6 join tests) |
 | `uninit_read.bin` | `UninitializedRead` rejection |
+| `join_uninit.bin` | Merge-point rejection (fixed-point regression test) |
 | `misaligned.bin` | `Misaligned` rejection (v0.4 path) |
 | `illegal.bin` | Unknown opcode → `IllegalInstruction` |
 
@@ -147,14 +151,14 @@ cargo bench -p ebpf-cfg --bench cfg
 cargo bench -p ebpf-vm --bench vm
 ```
 
-Baselines (v0.4, `profile.release`, criterion):
+Baselines (current main, `profile.release`, criterion):
 
 | Benchmark | Result |
 |-----------|--------|
 | `decode/4096_slots` | ~25 µs (~1.2 GiB/s) |
 | `cfg/4096_slots` | ~98 µs (~42 Melem/s) |
-| `vm/straight_1000_adds` | ~4.4 µs (~228 Melem/s) |
-| `vm/loop_1000_iters` | ~10.8 µs (~278 Melem/s) |
+| `vm/straight_1000_adds` | ~3.2 µs (~312 Melem/s) |
+| `vm/loop_1000_iters` | ~6.9 µs (~437 Melem/s) |
 | `memory/store_load` | ~500 ps per access |
 
 No repr/layout changes without a profile attributing ≥ 20% to the candidate.
@@ -164,7 +168,7 @@ No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 1. **Decode once, reuse everywhere** — `ebpf-isa` emits `Vec<Insn>` once; CFG, VM, verifier, SSA
    all consume the same stream. Never re-parse raw bytes.
 2. **Single memory chokepoint** — all loads/stores go through `MemoryView`, the same surface the
-   verifier will statically reason about in v0.5.
+   verifier reasons about statically.
 3. **Infallible lowering** — `exec::load` resolves jumps to absolute targets at load time;
    statically-invalid instructions become `Trap`s (never panics), preserving the exact error
    the old runtime checks would have produced.
@@ -176,7 +180,7 @@ No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 - [x] **v0.2** — Control-flow graph (`petgraph`, DOT export)
 - [x] **v0.3** — VM interpreter + criterion benchmarks
 - [x] **v0.4** — Memory model (stack init bitmap, packet region, alignment, 12 fixtures)
-- **v0.5** — Verifier (register type/range tracking, static memory safety)
+- [x] **v0.5** — Verifier (interval lattice, worklist + joins, JSON trace, CLI wired, differential oracle, lattice laws)
 - **v0.6** — Abstract interpretation (interval lattice, branch refinement, joins)
 - **v0.7** — Map simulator (HASH, ARRAY, LRU, ring buffer)
 - **v0.8** — Packet/XDP simulator
@@ -187,7 +191,7 @@ No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 
 1. `git clone` → `cargo build --workspace`
 2. Add fixtures to `tests/fixtures/` (see [the guide](tests/fixtures/README.md))
-3. Run `just verify` — all 63 tests + clippy + doc must be green
+3. Run `just verify` — all 98 tests + clippy + doc must be green
 4. Run `cargo insta review` after disassembler/CFG changes to accept new snapshots
 5. Run `just fuzz-smoke` before touching the decoder
 
