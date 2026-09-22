@@ -102,6 +102,14 @@ impl fmt::Display for ProgType {
     }
 }
 
+impl From<&str> for ProgType {
+    /// Infer from a section name, falling back to [`Self::Unknown`] for
+    /// non-program sections (maps, BTF, debug info).
+    fn from(s: &str) -> Self {
+        Self::from_section_name(s).unwrap_or(Self::Unknown)
+    }
+}
+
 /// A relocation entry inside a program section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relocation {
@@ -252,6 +260,15 @@ mod tests {
         assert_eq!(SectionKind::classify(".symtab"), SectionKind::Ignored);
         assert!(SectionKind::classify("xdp").program_type().is_some());
         assert!(SectionKind::classify(".maps").program_type().is_none());
+    }
+
+    #[test]
+    fn prog_type_from_str() {
+        assert_eq!(ProgType::from("xdp"), ProgType::Xdp);
+        assert_eq!(ProgType::from("kprobe/sys_exec"), ProgType::Kprobe);
+        assert_eq!(ProgType::from("my_prog"), ProgType::Other("my_prog".into()));
+        assert_eq!(ProgType::from(".maps"), ProgType::Unknown);
+        assert_eq!(ProgType::from(".symtab"), ProgType::Unknown);
     }
 
     #[test]

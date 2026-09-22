@@ -67,6 +67,24 @@ impl Range {
         }
     }
 
+    /// Widen `self` toward `other`: expand the interval to cover both,
+    /// jumping to the extreme when the new bound moves outward.
+    /// Used at loop headers after the iteration threshold to force
+    /// convergence (each widening step strictly grows toward `Top`,
+    /// which has finite height).
+    #[must_use]
+    pub fn widen(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Bottom, r) | (r, Self::Bottom) => r,
+            (Self::Top, _) | (_, Self::Top) => Self::Top,
+            (Self::Interval { lo: l1, hi: h1 }, Self::Interval { lo: l2, hi: h2 }) => {
+                let lo = if l2 < l1 { i64::MIN } else { l1.min(l2) };
+                let hi = if h2 > h1 { i64::MAX } else { h1.max(h2) };
+                Self::Interval { lo, hi }
+            }
+        }
+    }
+
     /// Whether this range contains exactly one value.
     #[must_use]
     pub const fn is_exact(self) -> bool {
@@ -252,26 +270,29 @@ impl RegType {
             _ => Self::Scalar(Range::Top),
         }
     }
+
+    /// Join `other` into `self` in place. Returns true if `self` changed.
+    ///
+    /// Avoids allocating a fresh state on the hot merge path; the
+    /// boolean carries the fixed-point signal without a second compare.
+    pub fn join_assign(&mut self, other: &Self) -> bool {
+        let joined = Self::join(self, other);
+        if *self == joined {
+            false
+        } else {
+            *self = joined;
+            true
+        }
+    }
 }
 
 /// A single 8-byte stack slot's abstract value.
 ///
-/// Initialization is tracked separately per byte (see
-/// [`VerifierState::stack_init`]): a partial store must not mark its
-/// whole slot readable, or a later wide load would pass here while the
-/// VM faults — breaking accept-implies-safe.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StackSlot {
-    /// Abstract value in this slot (loads always produce `Top` in v0.5;
-    /// kept for trace display and future value tracking).
-    pub ty: RegType,
-}
-
-impl Default for StackSlot {
-    fn default() -> Self {
-        Self { ty: RegType::NotInit }
-    }
-}
+/// A plain [`RegType`] alias: initialization is tracked separately per
+/// byte (see [`VerifierState::stack_init`]), so the slot carries the
+/// value only. Loads produce `Top`; kept for trace display and future
+/// value tracking.
+pub type StackSlot = RegType;
 
 /// Number of 8-byte stack slots (512 / 8 = 64).
 pub const STACK_SLOTS: usize = 64;
@@ -304,7 +325,7 @@ impl VerifierState {
         regs[10] = RegType::StackPtr { offset: 0 };
         Self {
             regs,
-            stack: std::array::from_fn(|_| StackSlot::default()),
+            stack: std::array::from_fn(|_| RegType::NotInit),
             stack_init: [false; STACK_BYTES],
         }
     }
@@ -313,10 +334,22 @@ impl VerifierState {
     #[must_use]
     pub fn join(a: &Self, b: &Self) -> Self {
         let regs = std::array::from_fn(|i| RegType::join(&a.regs[i], &b.regs[i]));
-        let stack = std::array::from_fn(|i| StackSlot {
-            ty: RegType::join(&a.stack[i].ty, &b.stack[i].ty),
-        });
+        let stack = std::array::from_fn(|i| RegType::join(&a.stack[i], &b.stack[i]));
         let stack_init = std::array::from_fn(|i| a.stack_init[i] && b.stack_init[i]);
+        Self { regs, stack, stack_init }
+    }
+
+    /// Widen two states at a loop header: widen each scalar register,
+    /// join everything else. `stack_init` uses intersection (a byte must
+    /// be initialized on *every* path to stay marked).
+    #[must_use]
+    pub fn widen(old: &Self, new: &Self) -> Self {
+        let regs = std::array::from_fn(|i| match (&old.regs[i], &new.regs[i]) {
+            (RegType::Scalar(r1), RegType::Scalar(r2)) => RegType::Scalar(r1.widen(*r2)),
+            _ => RegType::join(&old.regs[i], &new.regs[i]),
+        });
+        let stack = std::array::from_fn(|i| RegType::join(&old.stack[i], &new.stack[i]));
+        let stack_init = std::array::from_fn(|i| old.stack_init[i] && new.stack_init[i]);
         Self { regs, stack, stack_init }
     }
 
@@ -324,6 +357,58 @@ impl VerifierState {
     #[must_use]
     pub fn equals(&self, other: &Self) -> bool {
         self == other
+    }
+
+    /// Join `other` into `self` in place. Returns true if anything changed.
+    ///
+    /// The merge-path fast path: mutates the stored state directly and
+    /// reports the fixed-point signal without allocating a fresh state
+    /// plus a second equality compare.
+    pub fn join_assign(&mut self, other: &Self) -> bool {
+        let mut changed = false;
+        for (a, b) in self.regs.iter_mut().zip(other.regs.iter()) {
+            changed |= a.join_assign(b);
+        }
+        for (a, b) in self.stack.iter_mut().zip(other.stack.iter()) {
+            changed |= a.join_assign(b);
+        }
+        for (a, b) in self.stack_init.iter_mut().zip(other.stack_init.iter()) {
+            let next = *a && *b;
+            if next != *a {
+                *a = next;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Widen `other` into `self` in place. Returns true if anything changed.
+    ///
+    /// Same in-place contract as [`Self::join_assign`], but scalar
+    /// registers use [`Range::widen`] to force loop convergence.
+    pub fn widen_assign(&mut self, other: &Self) -> bool {
+        let mut changed = false;
+        for (a, b) in self.regs.iter_mut().zip(other.regs.iter()) {
+            let next = match (&*a, b) {
+                (RegType::Scalar(r1), RegType::Scalar(r2)) => RegType::Scalar(r1.widen(*r2)),
+                _ => RegType::join(a, b),
+            };
+            if *a != next {
+                *a = next;
+                changed = true;
+            }
+        }
+        for (a, b) in self.stack.iter_mut().zip(other.stack.iter()) {
+            changed |= a.join_assign(b);
+        }
+        for (a, b) in self.stack_init.iter_mut().zip(other.stack_init.iter()) {
+            let next = *a && *b;
+            if next != *a {
+                *a = next;
+                changed = true;
+            }
+        }
+        changed
     }
 }
 
@@ -469,8 +554,8 @@ mod tests {
 
     #[test]
     fn stack_slot_default() {
-        let s = StackSlot::default();
-        assert!(matches!(s.ty, RegType::NotInit));
+        let s: StackSlot = RegType::NotInit;
+        assert!(matches!(s, RegType::NotInit));
     }
 
     #[test]
@@ -486,5 +571,77 @@ mod tests {
         assert!(matches!(s.regs[10], RegType::StackPtr { offset: 0 }));
         assert!(matches!(s.regs[0], RegType::NotInit));
         assert!(s.stack_init.iter().all(|&b| !b));
+    }
+
+    #[test]
+    fn widen_idempotent() {
+        let a = Range::Interval { lo: 1, hi: 5 };
+        assert_eq!(a.widen(a), a);
+        assert_eq!(Range::Top.widen(Range::Top), Range::Top);
+        assert_eq!(Range::Bottom.widen(Range::Bottom), Range::Bottom);
+    }
+
+    #[test]
+    fn widen_grows_left() {
+        // New lo moves outward → jump to MIN.
+        let old = Range::Interval { lo: 5, hi: 10 };
+        let new = Range::Interval { lo: 2, hi: 10 };
+        assert_eq!(old.widen(new), Range::Interval { lo: i64::MIN, hi: 10 });
+    }
+
+    #[test]
+    fn widen_grows_to_top() {
+        let old = Range::Interval { lo: 5, hi: 10 };
+        let new = Range::Interval { lo: -100, hi: 100 };
+        assert_eq!(old.widen(new), Range::Interval { lo: i64::MIN, hi: i64::MAX });
+    }
+
+    #[test]
+    fn widen_absorbs_top() {
+        let a = Range::exact(5);
+        assert_eq!(Range::Top.widen(a), Range::Top);
+        assert_eq!(a.widen(Range::Top), Range::Top);
+        assert_eq!(Range::Bottom.widen(a), a);
+        assert_eq!(a.widen(Range::Bottom), a);
+    }
+
+    #[test]
+    fn state_widen_basic() {
+        let mut a = VerifierState::initial();
+        let mut b = VerifierState::initial();
+        a.regs[0] = RegType::Scalar(Range::Interval { lo: 0, hi: 5 });
+        b.regs[0] = RegType::Scalar(Range::Interval { lo: 0, hi: 10 });
+        // hi moved outward → MAX.
+        let w = VerifierState::widen(&a, &b);
+        assert_eq!(w.regs[0], RegType::Scalar(Range::Interval { lo: 0, hi: i64::MAX }));
+        // StackPtr registers fall back to join.
+        assert!(matches!(w.regs[10], RegType::StackPtr { offset: 0 }));
+    }
+
+    #[test]
+    fn join_assign_matches_join() {
+        let mut a = VerifierState::initial();
+        let mut b = VerifierState::initial();
+        a.regs[0] = RegType::Scalar(Range::Interval { lo: 0, hi: 5 });
+        b.regs[0] = RegType::Scalar(Range::Interval { lo: 3, hi: 8 });
+        let expected = VerifierState::join(&a, &b);
+        let mut assigned = a;
+        assert!(assigned.join_assign(&b));
+        assert_eq!(assigned, expected);
+        // Second join is a no-op.
+        assert!(!assigned.join_assign(&b));
+    }
+
+    #[test]
+    fn widen_assign_matches_widen() {
+        let mut a = VerifierState::initial();
+        let mut b = VerifierState::initial();
+        a.regs[0] = RegType::Scalar(Range::Interval { lo: 0, hi: 5 });
+        b.regs[0] = RegType::Scalar(Range::Interval { lo: 0, hi: 10 });
+        let expected = VerifierState::widen(&a, &b);
+        let mut assigned = a;
+        assert!(assigned.widen_assign(&b));
+        assert_eq!(assigned, expected);
+        assert!(!assigned.widen_assign(&b));
     }
 }

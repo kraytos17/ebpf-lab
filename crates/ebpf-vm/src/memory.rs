@@ -154,6 +154,20 @@ impl PacketBuffer {
     }
 }
 
+impl From<Vec<u8>> for PacketBuffer {
+    /// Copy packet bytes into the buffer.
+    fn from(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
+}
+
+impl From<&[u8]> for PacketBuffer {
+    /// Copy a packet slice into the buffer.
+    fn from(bytes: &[u8]) -> Self {
+        Self { bytes: bytes.to_vec() }
+    }
+}
+
 /// The 512-byte program stack with a 512-bit initialization bitset.
 ///
 /// One bit per byte in `[u64; 8]` (8× smaller than a byte bitmap); an access
@@ -373,6 +387,9 @@ impl MemoryView {
     /// [`MemError::UninitializedRead`] for stack bytes never written.
     #[inline]
     pub fn load(&self, addr: i64, size: MemSize) -> Result<i64, MemError> {
+        if (StackMemory::LOW..=STACK_BASE).contains(&addr) {
+            return self.stack.load(addr, size, self.align_checks);
+        }
         match Self::classify(addr) {
             MemRegion::Stack => self.stack.load(addr, size, self.align_checks),
             MemRegion::Packet => {
@@ -396,6 +413,9 @@ impl MemoryView {
     /// See [`load`](Self::load).
     #[inline]
     pub fn store(&mut self, addr: i64, size: MemSize, value: i64) -> Result<(), MemError> {
+        if (StackMemory::LOW..=STACK_BASE).contains(&addr) {
+            return self.stack.store(addr, size, value, self.align_checks);
+        }
         match Self::classify(addr) {
             MemRegion::Stack => self.stack.store(addr, size, value, self.align_checks),
             MemRegion::Packet | MemRegion::Unknown => {
@@ -409,6 +429,16 @@ impl MemoryView {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packet_buffer_from_conversions() {
+        let v = vec![0xAAu8, 0xBB, 0xCC];
+        let a = PacketBuffer::from(v.clone());
+        assert_eq!(a.as_slice(), v.as_slice());
+        let b = PacketBuffer::from(v.as_slice());
+        assert_eq!(b.as_slice(), v.as_slice());
+        assert_eq!(a.len(), 3);
+    }
 
     #[test]
     fn roundtrip_all_widths() {

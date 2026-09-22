@@ -1,6 +1,6 @@
 //! `ebpf-lab` — inspect, verify, execute, and optimize eBPF programs.
 //!
-//! v0.5 surface: `inspect`, `disasm`, `cfg`, `verify`, and `run`.
+//! v0.6 surface: `inspect`, `disasm`, `cfg`, `verify`, and `run`.
 //! Later milestones add `trace`, `optimize`, `xdp`, and `map`.
 
 use anyhow::Context;
@@ -52,7 +52,7 @@ enum Command {
         #[arg(long)]
         trace: bool,
     },
-    /// Verify the program statically (interval analysis, DAG-only).
+    /// Verify the program statically (interval analysis, widening for loops).
     Verify {
         /// Program input.
         #[command(flatten)]
@@ -60,6 +60,9 @@ enum Command {
         /// Print the per-PC abstract-state trace as JSON.
         #[arg(long)]
         trace: bool,
+        /// Widening threshold: max loop-header re-joins before widening fires.
+        #[arg(long, default_value_t = 16)]
+        max_iterations: usize,
     },
 }
 
@@ -150,13 +153,15 @@ fn cmd_cfg(path: &Path, dot: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_verify(path: &Path, trace: bool) -> anyhow::Result<()> {
+fn cmd_verify(path: &Path, trace: bool, max_iterations: usize) -> anyhow::Result<()> {
+    let config =
+        ebpf_verifier::VerifyConfig { widening_threshold: max_iterations, collect_trace: trace };
     for prog in &load_decoded(path)? {
         let insns = &prog.insns;
         let cfg = ebpf_cfg::build_cfg(insns)
             .with_context(|| format!("building CFG for `{}`", prog.meta.name))?;
         let disasm = ebpf_disasm::disassemble(insns);
-        match ebpf_verifier::verify(insns, &cfg, &disasm) {
+        match ebpf_verifier::verify_with_config(insns, &cfg, &disasm, &config) {
             Ok(result) => {
                 if trace {
                     println!("{}", result.to_json()?);
@@ -236,6 +241,8 @@ fn main() -> anyhow::Result<()> {
         Command::Disasm { input } => cmd_disasm(&input.path),
         Command::Cfg { input, dot } => cmd_cfg(&input.path, *dot),
         Command::Run { input, trace } => cmd_run(&input.path, *trace),
-        Command::Verify { input, trace } => cmd_verify(&input.path, *trace),
+        Command::Verify { input, trace, max_iterations } => {
+            cmd_verify(&input.path, *trace, *max_iterations)
+        }
     }
 }

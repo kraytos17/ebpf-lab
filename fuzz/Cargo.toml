@@ -10,10 +10,19 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4.13"
 ebpf-isa = { path = "../crates/ebpf-isa" }
+ebpf-cfg = { path = "../crates/ebpf-cfg" }
+ebpf-disasm = { path = "../crates/ebpf-disasm" }
+ebpf-verifier = { path = "../crates/ebpf-verifier" }
 
 [[bin]]
 name = "decode_program"
 path = "fuzz_targets/decode_program.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "verify_pipeline"
+path = "fuzz_targets/verify_pipeline.rs"
 test = false
 doc = false
 

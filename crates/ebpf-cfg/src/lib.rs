@@ -303,7 +303,8 @@ pub fn build_cfg(insns: &[Insn]) -> Result<Cfg, CfgError> {
 
 /// Whether the graph contains a cycle (a loop).
 ///
-/// v0.5's verifier rejects cyclic programs; this predicate is the check.
+/// Since v0.6 the verifier accepts loops via threshold widening instead of
+/// rejecting them; this predicate remains for diagnostics and tests.
 #[must_use]
 pub fn has_back_edge(cfg: &Cfg) -> bool {
     petgraph::algo::is_cyclic_directed(&cfg.graph)
@@ -405,7 +406,8 @@ mod tests {
         assert!(kinds.contains(&EdgeKind::BranchFalse));
     }
 
-    /// Back-edge is detected (loop), even though v0.5 will reject it.
+    /// Back-edge is detected (loop); since v0.6 the verifier accepts
+    /// these via widening instead of rejecting them.
     #[test]
     fn detects_cycle() {
         // mov r0,0; add r0,1; jeq r0,10,+1; ja -3; exit

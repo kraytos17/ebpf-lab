@@ -8,7 +8,7 @@ They load at compile time via `include_bytes!`, so they must exist before
 generation step. The fuzz seed corpus (`fuzz/corpus/`, gitignored) is
 staged *from* these files by `fuzz/build.rs`; fixtures are its upstream.
 
-## The thirteen programs
+## The sixteen programs
 
 | File | Slots | Program | Exit | Exercises |
 |---|---|---|---|---|
@@ -18,7 +18,10 @@ staged *from* these files by `fuzz/build.rs`; fixtures are its upstream.
 | `branch_untaken.bin` | 5 | `mov r1, 9; mov r0, 1; jeq r1, 10, +1; mov r0, 2; exit` | 2 (fallthrough) | Same shape, false edge |
 | `diamond.bin` | 6 | `mov r1, 5; jeq r1, 10, +2; mov r0, 1; ja +1; mov r0, 2; exit` | 1 (merge) | If/else rejoin; both paths merge at the exit block (v0.6 join tests) |
 | `ldimm.bin` | 3 slots (2 insns) | `r2 = 0x5566778811223344; exit` | 0 | Wide `ld_imm_dw` (occupies slots 0–1, hence PC 0 → 2) |
-| `loop.bin` | 6 | `r0 = 0; r1 = 0; add r0, 1; add r1, 1; jlt r1, 10, -3; exit` | 10 | Back edge (idx 4 → idx 2); CFG cycle detection |
+| `loop.bin` | 6 | `r0 = 0; r1 = 0; add r0, 1; add r1, 1; jlt r1, 10, -3; exit` | 10 | Bounded loop; verifier converges via widening (v0.6) |
+| `loop_1000_iters.bin` | 6 | `r0 = 0; r1 = 0; add r0, 1; add r1, 1; jlt r1, 1000, -3; exit` | 1000 | Long loop; widening fires after threshold (v0.6) |
+| `helper_prandom.bin` | 4 | `call 43; stxdw [r10-8], r0; ldxdw r0, [r10-8]; exit` | nondet | Typed helper `bpf_get_prandom_u32` + stack roundtrip (v0.6) |
+| `helper_ktime.bin` | 2 | `call 5; exit` | nondet | Typed helper `bpf_ktime_get_ns` (v0.6) |
 | `stack.bin` | 4 | `mov r1, 42; stxdw [r10-8], r1; ldxdw r0, [r10-8]; exit` | 42 | Stack store/load roundtrip, frame pointer |
 | `uninit_read.bin` | 2 | `ldxdw r0, [r10-8]; exit` | ❌ `UninitializedRead` | Canonical unread-stack rejection (v0.5 verifier example) |
 | `oob_jump.bin` | 2 | `ja +100; exit` | ❌ `JumpOutOfBounds` (target 101) | Canonical bad-target rejection; lowers to `Trap` at load |
@@ -42,7 +45,8 @@ stack:     mov r1, 42 / *(dw *)(r10 + -8) = r1 / r0 = *(dw *)(r10 + -8) / exit
 - `ebpf-disasm` golden snapshots: `mov_exit`, `arith`, `branch`, `branch_untaken`, `diamond`, `ldimm`
 - `ebpf-cfg` golden DOT snapshots: `branch`, `diamond` (merge shape), `arith`, `ldimm`
 - `ebpf-vm` exec tests: all eight valid fixtures trap-free (`all_fixtures_trap_free`), exit codes pinned (`fixture_exit_codes`), rejections pinned at load (`invalid_fixtures_trap_at_load`) and runtime (`rejection_fixtures_fail_at_runtime`); `branch`/`loop`/`diamond` target resolution + CFG differential pin
-- Fuzz seeds: all thirteen, via `fuzz/build.rs`
+- `ebpf-verifier` fixture tests: valid fixtures verify (incl. loops via widening + typed helpers), rejections pin exact `VerifyError` variants
+- Fuzz seeds: all sixteen, via `fuzz/build.rs`
 
 ## Adding a fixture
 

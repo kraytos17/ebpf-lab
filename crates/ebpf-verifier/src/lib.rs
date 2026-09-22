@@ -1,8 +1,10 @@
-//! Academic-clean eBPF verifier: interval lattice, DAG-only, no helpers/maps.
+//! Academic-clean eBPF verifier: interval lattice, threshold widening,
+//! typed helpers.
 //!
 //! Walks every reachable instruction without executing it and proves (or
-//! refutes) memory safety. Loops are rejected; the verifier requires the
-//! CFG to be a DAG (checked via `ebpf_cfg::has_back_edge`).
+//! refutes) memory safety. Bounded loops converge via threshold widening
+//! (see [`VerifyConfig`]); known helpers are typed via
+//! [`HelperSignature`], unknown helpers still reject.
 //!
 //! # Quick start
 //!
@@ -28,7 +30,10 @@ use thiserror::Error;
 pub use refine::refine;
 pub use state::{Range, RegType, StackSlot, VerifierState};
 pub use trace::{RegSummary, StackSummary, TraceEntry};
-pub use verify::verify;
+pub use verify::{
+    HelperSignature, HelperSignatureRegistry, KtimeNs, PrandomU32, TracePrintk, VerifyConfig,
+    verify, verify_with_config,
+};
 
 /// A successfully verified program with per-PC state snapshots.
 #[derive(Debug)]
@@ -80,14 +85,7 @@ pub enum VerifyError {
         offset: i32,
     },
 
-    /// CFG contains a loop (back-edge).
-    #[error("unsupported loop (back-edge detected)")]
-    UnsupportedLoop {
-        /// PC reported (always 0 since the check is pre-instruction).
-        pc: usize,
-    },
-
-    /// Helper function called (not supported in v0.5).
+    /// Helper function called (not in the built-in registry).
     #[error("unknown helper function {func} at pc {pc}")]
     UnknownHelper {
         /// PC of the call instruction.

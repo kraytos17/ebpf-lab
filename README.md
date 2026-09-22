@@ -4,14 +4,14 @@
 [![fuzz](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml/badge.svg)](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml)
 [![msrv](https://img.shields.io/badge/MSRV-1.98-blue)](https://github.com/kraytos17/ebpf-lab)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-98-blue)](https://github.com/kraytos17/ebpf-lab)
-[![fixtures](https://img.shields.io/badge/fixtures-13-orange)](tests/fixtures/)
+[![tests](https://img.shields.io/badge/tests-113-blue)](https://github.com/kraytos17/ebpf-lab)
+[![fixtures](https://img.shields.io/badge/fixtures-16-orange)](tests/fixtures/)
 
 An eBPF laboratory in Rust: inspect, verify, execute, and optimize eBPF programs.
 
 Currently implements the **decode → disassemble → CFG → VM → verify** pipeline with basic  memory model
-(uninitialized-stack detection, alignment enforcement, packet region), 13 hand-assembled fixtures,
-a libFuzzer harness, and property-based tests.
+(uninitialized-stack detection, alignment enforcement, packet region), 16 hand-assembled fixtures,
+libFuzzer harnesses, and property-based tests.
 
 ## Quickstart
 
@@ -32,8 +32,9 @@ cargo build --workspace
 | `cfg --dot` | Graphviz DOT output | `ebpf-lab cfg program.bin --dot \| dot -Tsvg -o cfg.svg` |
 | `run` | Execute in the interpreter (`r0` = exit code) | `ebpf-lab run program.bin` |
 | `run --trace` | Per-step register diff trace | `ebpf-lab run --trace program.bin` |
-| `verify` | Statically verify (interval analysis, DAG-only) | `ebpf-lab verify program.bin` |
+| `verify` | Statically verify (interval analysis, widening for loops) | `ebpf-lab verify program.bin` |
 | `verify --trace` | Per-PC abstract-state trace as JSON | `ebpf-lab verify --trace program.bin` |
+| `verify --max-iterations N` | Widening threshold for loops (default 16) | `ebpf-lab verify --max-iterations 32 program.bin` |
 
 Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
 
@@ -66,7 +67,7 @@ Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
 | [`ebpf-disasm`](crates/ebpf-disasm) | Bytecode → human-readable text | `disassemble`, `Display for Insn` |
 | [`ebpf-cfg`](crates/ebpf-cfg) | Control-flow graph construction | `BasicBlock`, `Cfg`, `Pc`, `Slot`, `to_dot` |
 | [`ebpf-vm`](crates/ebpf-vm) | Concrete interpreter + v0.4 memory | `Vm`, `ExecInsn`, `MemoryView`, `MemError` |
-| [`ebpf-verifier`](crates/ebpf-verifier) | Static verifier (interval lattice, DAG-only) | `verify`, `Range`, `VerifierState`, `VerifyError` |
+| [`ebpf-verifier`](crates/ebpf-verifier) | Static verifier (interval lattice, widening, typed helpers) | `verify`, `verify_with_config`, `Range`, `VerifierState`, `VerifyError`, `HelperSignature` |
 | [`ebpf-lab-cli`](crates/ebpf-lab-cli) | `ebpf-lab` binary | clap derive, tracing |
 
 ## Memory model (v0.4)
@@ -86,7 +87,7 @@ range fault — matching the kernel verifier's diagnostic priority.
 
 ## Test fixtures
 
-13 hand-assembled `.bin` programs exercising the happy path *and* canonical
+16 hand-assembled `.bin` programs exercising the happy path *and* canonical
 rejections. See [`tests/fixtures/README.md`](tests/fixtures/README.md) for
 the full table (bytes, assembly, exit code, what each exercises).
 
@@ -98,6 +99,10 @@ Highlights:
 | `arith.bin` | ALU64 reg ops, sum = 30 |
 | `branch.bin` | Conditional jump taken edge, CFG 3 blocks |
 | `diamond.bin` | If/else merge (v0.6 join tests) |
+| `loop.bin` | Bounded loop, converges via widening |
+| `loop_1000_iters.bin` | Long loop, widening fires after threshold |
+| `helper_prandom.bin` | Typed helper `bpf_get_prandom_u32` + stack roundtrip |
+| `helper_ktime.bin` | Typed helper `bpf_ktime_get_ns` |
 | `uninit_read.bin` | `UninitializedRead` rejection |
 | `join_uninit.bin` | Merge-point rejection (fixed-point regression test) |
 | `misaligned.bin` | `Misaligned` rejection (v0.4 path) |
@@ -114,7 +119,7 @@ fixtures change, never committed in the corpus dir).
 just verify          # fmt + clippy + test + doc
 just verify-all      # + cargo-deny
 just bench-quick     # smoke each bench (decode, cfg, vm)
-just fuzz-smoke      # 60s fuzzer run (needs nightly + cargo-fuzz)
+just fuzz-smoke      # 2×60s fuzzer runs (needs nightly + cargo-fuzz)
 ```
 
 ### CI
@@ -129,8 +134,8 @@ just fuzz-smoke      # 60s fuzzer run (needs nightly + cargo-fuzz)
 | `doc` | `RUSTDOCFLAGS="-D warnings"` |
 | `deny` | advisories, licenses, bans, sources |
 | `msrv-minimal` | `minimal-versions` resolve + check on 1.98 |
-| `fuzz build` | nightly ASan build on decoder changes |
-| `fuzz run` | 300s timed run (weekly / manual) |
+| `fuzz build` | nightly ASan build on isa/cfg/disasm/verifier changes |
+| `fuzz run` | 300s timed runs, both targets (weekly / manual) |
 
 ```bash
 just verify   # equivalent of fmt + clippy + test + doc
@@ -138,10 +143,13 @@ just verify   # equivalent of fmt + clippy + test + doc
 
 ### Fuzzing
 
-- **Harness**: `fuzz/fuzz_targets/decode_program.rs` — arbitrary bytes in, `DecodeError` out
+- **Harnesses**: `fuzz/fuzz_targets/decode_program.rs` (arbitrary bytes in,
+  `DecodeError` out) and `fuzz/fuzz_targets/verify_pipeline.rs`
+  (decode → CFG → verify must never panic or hang; verdict only,
+  256-insn cap)
 - **Corpus**: staged from `tests/fixtures/` by `fuzz/build.rs` on fixture changes
-- **CI**: build on every PR touching the decoder; timed run weekly
-- **60s smoke**: 22M execs, 0 crashes
+- **CI**: build on every PR touching isa/cfg/disasm/verifier; timed runs weekly
+- **60s smoke**: decode 22M execs + pipeline 3M runs, 0 crashes
 
 ## Benchmarks
 
@@ -181,7 +189,7 @@ No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 - [x] **v0.3** — VM interpreter + criterion benchmarks
 - [x] **v0.4** — Memory model (stack init bitmap, packet region, alignment, 12 fixtures)
 - [x] **v0.5** — Verifier (interval lattice, worklist + joins, JSON trace, CLI wired, differential oracle, lattice laws)
-- **v0.6** — Abstract interpretation (interval lattice, branch refinement, joins)
+- [x] **v0.6** — Widening + typed helpers (loop convergence, 3 built-in helpers, extensible registry)
 - **v0.7** — Map simulator (HASH, ARRAY, LRU, ring buffer)
 - **v0.8** — Packet/XDP simulator
 - **v0.9** — SSA construction + optimization passes
@@ -191,9 +199,9 @@ No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 
 1. `git clone` → `cargo build --workspace`
 2. Add fixtures to `tests/fixtures/` (see [the guide](tests/fixtures/README.md))
-3. Run `just verify` — all 98 tests + clippy + doc must be green
+3. Run `just verify` — all 113 tests + clippy + doc must be green
 4. Run `cargo insta review` after disassembler/CFG changes to accept new snapshots
-5. Run `just fuzz-smoke` before touching the decoder
+5. Run `just fuzz-smoke` before touching the decoder or verifier
 
 ## License
 

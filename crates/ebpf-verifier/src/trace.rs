@@ -24,9 +24,11 @@ pub struct TraceEntry {
 pub struct RegSummary {
     /// Register index (0–10).
     pub r: usize,
-    /// Human-readable type description.
+    /// Human-readable type description (one of `not_init`, `scalar`,
+    /// `unknown`, `bottom`, `stack_ptr` — hence `&'static str`, no
+    /// allocation per register per PC).
     #[serde(rename = "type")]
-    pub ty: String,
+    pub ty: &'static str,
     /// Optional value range (for scalars).
     pub range: Option<[i64; 2]>,
     /// Optional stack offset (for stack pointers).
@@ -44,21 +46,19 @@ pub struct StackSummary {
 
 /// Format a register type into a summary.
 #[must_use]
-pub fn format_reg(index: usize, reg: &RegType) -> RegSummary {
+pub const fn format_reg(index: usize, reg: &RegType) -> RegSummary {
     match reg {
-        RegType::NotInit => {
-            RegSummary { r: index, ty: "not_init".into(), range: None, offset: None }
-        }
+        RegType::NotInit => RegSummary { r: index, ty: "not_init", range: None, offset: None },
         RegType::Scalar(r) => {
             let (ty, range) = match r {
-                crate::state::Range::Bottom => ("bottom".into(), None),
-                crate::state::Range::Top => ("unknown".into(), None),
-                crate::state::Range::Interval { lo, hi } => ("scalar".into(), Some([*lo, *hi])),
+                crate::state::Range::Bottom => ("bottom", None),
+                crate::state::Range::Top => ("unknown", None),
+                crate::state::Range::Interval { lo, hi } => ("scalar", Some([*lo, *hi])),
             };
             RegSummary { r: index, ty, range, offset: None }
         }
         RegType::StackPtr { offset } => {
-            RegSummary { r: index, ty: "stack_ptr".into(), range: None, offset: Some(*offset) }
+            RegSummary { r: index, ty: "stack_ptr", range: None, offset: Some(*offset) }
         }
     }
 }
@@ -81,7 +81,7 @@ pub fn format_stack(
     let (chunks, _) = init.as_chunks::<8>();
     for (slot, bytes) in slots.iter().zip(chunks) {
         if bytes.iter().all(|&b| b) {
-            let value = match &slot.ty {
+            let value = match slot {
                 RegType::Scalar(crate::state::Range::Interval { lo, hi }) if lo == hi => {
                     format!("{lo:#x}")
                 }

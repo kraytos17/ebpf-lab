@@ -5,6 +5,61 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-22
+
+### Added
+
+- `ebpf-verifier`: threshold widening for loops (`Range::widen`,
+  `VerifierState::widen`, `VerifyConfig { widening_threshold }`,
+  `verify_with_config`). Blocks re-joined past the threshold switch
+  from `join` to `widen`, forcing convergence; `loop.bin` and the new
+  `loop_1000_iters.bin` now verify.
+- `ebpf-verifier`: typed helpers via `HelperSignature` trait +
+  `HelperSignatureRegistry::built_in` (3 helpers: `bpf_get_prandom_u32`
+  → `[0, i32::MAX]`, `bpf_ktime_get_ns` → `[0, i64::MAX]`,
+  `bpf_trace_printk` → `Top`). Unknown helpers still reject with
+  `UnknownHelper`. New fixtures `helper_prandom.bin`, `helper_ktime.bin`.
+- CLI: `ebpf-lab verify --max-iterations N` (default 16).
+- Fuzzing: new `verify_pipeline` target (decode → CFG → verify must never
+  panic or hang; verdict-only, 256-insn cap); corpus re-staged to all 16
+  fixtures for both targets; `fuzz/build.rs` syncs both corpus dirs;
+  CI triggers on isa/cfg/disasm/verifier paths and runs both targets.
+
+### Changed
+
+- Rust idioms: `From<Reg> for usize` (non-`const` twin of `Reg::index`),
+  `From<[u8; 8]>` / `From<RawInsn>` roundtrip (non-`const` twins of
+  `from_bytes`/`to_bytes`), `From<&str> for ProgType` (via
+  `from_section_name`, fallback `Unknown`), `From<Vec<u8>>` /
+  `From<&[u8]> for PacketBuffer`; `StackSlot` is now a `RegType` alias
+  (no more `.ty` indirection); `describe_action` uses `Display` for
+  `Reg`/`Operand` instead of manual `r{}` formatting.
+- Verifier hot path: `VerifyConfig.collect_trace` skips per-PC string
+  allocation when the CLI runs without `--trace`; generation counters
+  replace `processed` state clones; `visited` bitvec replaces
+  `HashSet`; `disasm` split once instead of `lines().nth(pc)` per PC;
+  `jump_info` computed once per block; in-place `join_assign` /
+  `widen_assign` replace allocate-then-compare merges; `Vec` LIFO stack
+  replaces `VecDeque`; `HelperSignatureRegistry` is zero-sized
+  (`match` over `&'static`, no `HashMap`/`Box`); `check_and_transfer`
+  no longer rewrites `r10` per instruction (writes to r10 keep the
+  frame pointer instead). No behavior change (`no_trace_verdict_matches`
+  pins verdict parity).
+- `ebpf-vm`: stack fast path in `MemoryView::load`/`store` (single
+  range test before `classify`); `dispatch_helper` marked `#[cold]`,
+  error value built lazily via `map_or_else`.
+  Benches flat within noise (`straight_1000_adds` ~3.0µs,
+  `loop_1000_iters` ~6.9µs).
+- `ebpf-verifier`: `RegSummary.ty` is `&'static str` instead of `String`
+  (identical JSON; ~55 fewer allocations per traced PC), which also lets
+  `format_reg` become `const fn`.
+- `ebpf-isa`: decoder drops the redundant length check before
+  `first_chunk` (single fallible slice access per slot).
+
+### Removed
+
+- `VerifyError::UnsupportedLoop`: loops are now accepted via widening.
+
 ## [0.5.0] - 2026-09-20
 
 ### Added
@@ -55,6 +110,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Observability: `#[tracing::instrument]` on `decode_program`,
   `build_cfg`, `Vm::run`, and CLI `load_programs` (byte slices skipped).
 
+- `ebpf-vm`: v0.4 memory model — per-byte initialization bitmap on the
+  stack (`UninitializedRead` on never-written bytes), `MemRegion`
+  classifier (stack / packet / unknown), read-only `PacketBuffer` at
+  `PACKET_BASE` (`NoPacket` when unset), natural-alignment enforcement
+  with `set_align_checks` toggle (`Misaligned`), and `StackOverflow`
+  distinct from `OutOfBounds`. Init tracking is a `[u64; 8]` bitset.
+  Bounds are checked before alignment, so a straddling access reports
+  the range fault. All access still flows through the single
+  `MemoryView::load`/`store` chokepoint; `Vm::step` call sites unchanged.
+
 ### Changed
 
 - Release profile: thin LTO, `codegen-units = 1`, `strip` — binary
@@ -69,20 +134,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - CI: nextest + explicit doctests, llvm-cov baseline job (72% lines),
   bench compile + smoke, MSRV minimal-versions attempt, fuzz build.
 
-### Added
-
-- `ebpf-vm`: v0.4 memory model — per-byte initialization bitmap on the
-  stack (`UninitializedRead` on never-written bytes), `MemRegion`
-  classifier (stack / packet / unknown), read-only `PacketBuffer` at
-  `PACKET_BASE` (`NoPacket` when unset), natural-alignment enforcement
-  with `set_align_checks` toggle (`Misaligned`), and `StackOverflow`
-  distinct from `OutOfBounds`. Init tracking is a `[u64; 8]` bitset.
-  Bounds are checked before alignment, so a straddling access reports
-  the range fault. All access still flows through the single
-  `MemoryView::load`/`store` chokepoint; `Vm::step` call sites unchanged.
-
-### Changed
-
 - `ebpf-vm`: new pre-resolved `exec::ExecInsn` execution form — Reg/Imm
   operands split into separate variants, jumps carry absolute targets
   resolved once at load, `End` widths validated at load. `step()` runs the
@@ -92,8 +143,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and CLI output unchanged. Measured: loop bench +19% (jump-heavy);
   straight-line flat within noise (bench harness now clones two vecs per
   iteration — measurement artifact, not steady state).
-
-### Changed
 
 - `ebpf-elf`: new `SectionKind::{Program, Maps, Btf, Ignored}` classifier;
   `ProgType::from_section_name` delegates to it, so skipped sections are
@@ -106,8 +155,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   behind `block_at`/`slot_at`, so decoded-vs-slot confusion is a type error.
 - All error enums (`DecodeError`, `ElfError`, `CfgError`, `VmError`,
   `MemError`) are now `#[non_exhaustive]` for future extension.
-
-### Changed
 
 - `ebpf-isa`: `Insn::Alu`/`Insn::Jump` carry `Width::{B32,B64}` instead of
   an `is64: bool` flag; `AluOp::End` carries `Endian::{Le,Be}` instead of
@@ -191,3 +238,4 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 [0.3.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.3.0
 [0.4.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.4.0
 [0.5.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.5.0
+[0.6.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.6.0

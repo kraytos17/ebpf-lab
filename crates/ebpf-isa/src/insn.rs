@@ -56,6 +56,26 @@ impl RawInsn {
     }
 }
 
+impl From<[u8; 8]> for RawInsn {
+    /// Decode from 8 little-endian bytes.
+    ///
+    /// Non-`const` twin of [`RawInsn::from_bytes`] for generic contexts;
+    /// `const` callers keep using `from_bytes`.
+    fn from(b: [u8; 8]) -> Self {
+        Self::from_bytes(&b)
+    }
+}
+
+impl From<RawInsn> for [u8; 8] {
+    /// Encode back to 8 little-endian bytes.
+    ///
+    /// Non-`const` twin of [`RawInsn::to_bytes`]; `const` callers keep
+    /// using `to_bytes`.
+    fn from(raw: RawInsn) -> Self {
+        raw.to_bytes()
+    }
+}
+
 /// General-purpose register `r0`–`r10` (`r10` is the read-only frame pointer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Reg(pub u8);
@@ -100,6 +120,17 @@ impl Reg {
 impl fmt::Display for Reg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "r{}", self.0)
+    }
+}
+
+impl From<Reg> for usize {
+    /// Register number as an array index.
+    ///
+    /// Non-`const` twin of [`Reg::index`] for generic contexts
+    /// (`Into<usize>` bounds, `.map(usize::from)`, …); hot paths keep
+    /// using `index()` so they stay `const`.
+    fn from(r: Reg) -> Self {
+        r.0 as Self
     }
 }
 
@@ -531,6 +562,22 @@ mod tests {
     fn mem_size_bytes() {
         assert_eq!(MemSize::Dw.bytes(), 8);
         assert_eq!(MemSize::B.bytes(), 1);
+    }
+
+    #[test]
+    fn reg_into_usize() {
+        assert_eq!(usize::from(Reg(0)), 0);
+        assert_eq!(usize::from(Reg::FRAME_PTR), 10);
+        assert_eq!(usize::from(Reg(3)), Reg(3).index());
+    }
+
+    #[test]
+    fn raw_insn_from_roundtrip() {
+        let bytes = [0xb7u8, 0x00, 0, 0, 1, 0, 0, 0];
+        let raw = RawInsn::from(bytes);
+        assert_eq!(raw, RawInsn::from_bytes(&bytes));
+        let back: [u8; 8] = raw.into();
+        assert_eq!(back, bytes);
     }
 
     #[test]

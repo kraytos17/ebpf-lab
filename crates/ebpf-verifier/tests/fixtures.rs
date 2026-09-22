@@ -33,8 +33,53 @@ fn accepts_valid_fixtures() {
         "branch_untaken.bin",
         "diamond.bin",
         "stack.bin",
+        "loop.bin",
+        "loop_1000_iters.bin",
+        "helper_prandom.bin",
+        "helper_ktime.bin",
     ] {
         verify_fixture(name).unwrap_or_else(|e| panic!("{name} should verify: {e}"));
+    }
+}
+
+#[test]
+fn accepts_loop_bounded() {
+    // loop.bin counts r0/r1 to 10 via a back edge; widening converges
+    // and the exit r0 range covers the loop result.
+    let result = verify_fixture("loop.bin").expect("loop.bin should verify");
+    assert!(result.total_pc >= 6);
+}
+
+#[test]
+fn accepts_loop_1000_iters() {
+    let result = verify_fixture("loop_1000_iters.bin").expect("loop_1000_iters.bin should verify");
+    assert!(result.total_pc >= 6);
+}
+
+#[test]
+fn accepts_helper_prandom() {
+    verify_fixture("helper_prandom.bin").expect("helper_prandom.bin should verify");
+}
+
+#[test]
+fn accepts_helper_ktime() {
+    verify_fixture("helper_ktime.bin").expect("helper_ktime.bin should verify");
+}
+
+#[test]
+fn no_trace_verdict_matches() {
+    // `collect_trace = false` must not change accept/reject: same PCs,
+    // empty trace.
+    for name in ["mov_exit.bin", "loop.bin", "loop_1000_iters.bin", "helper_prandom.bin"] {
+        let insns = fixture(name);
+        let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+        let disasm = ebpf_disasm::disassemble(&insns);
+        let traced = verify(&insns, &cfg, &disasm).expect("should verify");
+        let config = ebpf_verifier::VerifyConfig { widening_threshold: 16, collect_trace: false };
+        let untraced = ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config)
+            .expect("should verify without trace");
+        assert_eq!(traced.total_pc, untraced.total_pc, "{name} pc count diverged");
+        assert!(untraced.trace.is_empty(), "{name} trace should be empty");
     }
 }
 
@@ -43,12 +88,6 @@ fn exit_requires_initialized_r0() {
     // ldimm.bin never writes r0; the kernel likewise requires a readable
     // return register at exit, so this is a rejection, not an acceptance.
     assert!(matches!(verify_fixture("ldimm.bin"), Err(VerifyError::UninitRegister { reg: 0, .. })));
-}
-
-#[test]
-fn rejects_loop_with_unsupported_loop() {
-    // loop.bin has a back edge; the DAG-only verifier rejects it outright.
-    assert!(matches!(verify_fixture("loop.bin"), Err(VerifyError::UnsupportedLoop { .. })));
 }
 
 #[test]

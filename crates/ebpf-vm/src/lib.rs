@@ -266,17 +266,17 @@ impl Vm {
         &self.insns
     }
 
+    #[cold]
     fn dispatch_helper(&mut self, func: u32) -> StepResult {
-        self.helpers
-            .0
-            .get(&func)
-            .copied()
-            .map_or(StepResult::Error(VmError::UnknownHelper { func }), |helper| helper(self))
+        self.helpers.0.get(&func).copied().map_or_else(
+            || StepResult::Error(VmError::UnknownHelper { func }),
+            |helper| helper(self),
+        )
     }
 
     /// Execute one instruction.
     ///
-    /// inline so the hot `run()` loop fuses with the dispatch
+    /// `inline` so the hot `run()` loop fuses with the dispatch
     /// match instead of paying call/ret per step.
     #[inline]
     pub fn step(&mut self) -> StepResult {

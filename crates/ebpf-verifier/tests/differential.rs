@@ -10,8 +10,18 @@ use ebpf_vm::{Vm, VmError};
 use proptest::prelude::*;
 use std::path::PathBuf;
 
-const ACCEPT_FIXTURES: &[&str] =
-    &["mov_exit", "arith", "branch", "branch_untaken", "diamond", "stack"];
+const ACCEPT_FIXTURES: &[&str] = &[
+    "mov_exit",
+    "arith",
+    "branch",
+    "branch_untaken",
+    "diamond",
+    "stack",
+    "loop",
+    "loop_1000_iters",
+    "helper_prandom",
+    "helper_ktime",
+];
 
 fn load_fixture(name: &str) -> Vec<ebpf_isa::Insn> {
     let path: PathBuf =

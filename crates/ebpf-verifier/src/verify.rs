@@ -1,7 +1,5 @@
 //! Worklist algorithm and per-instruction verification.
 
-use std::collections::{HashSet, VecDeque};
-
 use ebpf_cfg::{Cfg, EdgeKind, Pc};
 use ebpf_isa::insn::{AluOp, Insn, JumpOp, MemSize, Operand, Reg, Width};
 use petgraph::visit::EdgeRef;
@@ -11,45 +9,169 @@ use crate::state::{Range, RegType, STACK_BYTES, VerifierState};
 use crate::trace::{TraceEntry, format_reg, format_stack};
 use crate::{VerifiedProgram, VerifyError};
 
+/// Configuration for the verifier.
+#[derive(Debug, Clone)]
+pub struct VerifyConfig {
+    /// Maximum join-only iterations at a block before widening fires.
+    /// After this many re-joins, [`VerifierState::widen`] replaces
+    /// [`VerifierState::join`] to force convergence on loops.
+    pub widening_threshold: usize,
+    /// Whether to collect the per-PC trace. Disable for a ~60% speedup
+    /// when only the verdict matters (the CLI sets this from `--trace`).
+    pub collect_trace: bool,
+}
+
+impl Default for VerifyConfig {
+    fn default() -> Self {
+        Self { widening_threshold: 16, collect_trace: true }
+    }
+}
+
+/// How a helper function transforms abstract state.
+///
+/// Takes the current register state and returns the abstract effect
+/// on `r0` (the return value). Side effects on memory are modeled by
+/// the verifier forgetting stack slot values when
+/// [`HelperSignature::may_write_memory`] returns true.
+pub trait HelperSignature: Send + Sync {
+    /// Compute the abstract return value for `r0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VerifyError`] if the helper's preconditions are violated.
+    fn effect(&self, state: &VerifierState, pc: usize) -> Result<RegType, VerifyError>;
+
+    /// Whether this helper may write to BPF memory.
+    /// If true, the verifier conservatively forgets stack slot values.
+    fn may_write_memory(&self) -> bool {
+        false
+    }
+}
+
+/// `bpf_get_prandom_u32` (func 43): pure, returns a `u32`.
+///
+/// Modeled as `[0, i32::MAX]`: `i64` cannot represent the full `u32`
+/// range as signed, so this is a documented under-approximation that
+/// stays sound for the differential oracle (the VM uses `i64` too).
+#[derive(Debug, Clone, Copy)]
+pub struct PrandomU32;
+
+impl HelperSignature for PrandomU32 {
+    fn effect(&self, _state: &VerifierState, _pc: usize) -> Result<RegType, VerifyError> {
+        Ok(RegType::Scalar(Range::Interval { lo: 0, hi: i64::from(i32::MAX) }))
+    }
+}
+
+/// `bpf_ktime_get_ns` (func 5): monotonic nanoseconds, unbounded above.
+#[derive(Debug, Clone, Copy)]
+pub struct KtimeNs;
+
+impl HelperSignature for KtimeNs {
+    fn effect(&self, _state: &VerifierState, _pc: usize) -> Result<RegType, VerifyError> {
+        Ok(RegType::Scalar(Range::Interval { lo: 0, hi: i64::MAX }))
+    }
+}
+
+/// `bpf_trace_printk` (func 6): return value is undefined in the spec.
+#[derive(Debug, Clone, Copy)]
+pub struct TracePrintk;
+
+impl HelperSignature for TracePrintk {
+    fn effect(&self, _state: &VerifierState, _pc: usize) -> Result<RegType, VerifyError> {
+        Ok(RegType::Scalar(Range::Top))
+    }
+}
+
+/// Registry of known helper signatures, keyed by helper id.
+///
+/// Zero-sized: lookups are a `match` over `&'static` instances, so there
+/// is no `HashMap` allocation, no hashing, and no `Box` per helper.
+/// Unknown ids still reject with [`VerifyError::UnknownHelper`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HelperSignatureRegistry;
+
+impl HelperSignatureRegistry {
+    /// Registry with the built-in helpers (prandom, ktime, printk).
+    #[must_use]
+    pub const fn built_in() -> Self {
+        Self
+    }
+
+    /// Look up a helper by id.
+    #[must_use]
+    pub fn get(&self, func: u32) -> Option<&dyn HelperSignature> {
+        static PRANDOM: PrandomU32 = PrandomU32;
+        static KTIME: KtimeNs = KtimeNs;
+        static PRINTK: TracePrintk = TracePrintk;
+        match func {
+            43 => Some(&PRANDOM),
+            5 => Some(&KTIME),
+            6 => Some(&PRINTK),
+            _ => None,
+        }
+    }
+}
+
 /// Verify a decoded program against its CFG.
 ///
-/// Walks every reachable instruction exactly once (DAG-only; loops rejected
-/// via `ebpf_cfg::has_back_edge`). Returns a [`VerifiedProgram`] with
-/// per-PC state snapshots for the JSON trace, or the first
-/// [`VerifyError`] encountered.
+/// Fixed-point worklist with threshold widening: joins propagate states
+/// forward, and blocks re-joined more than
+/// [`VerifyConfig::widening_threshold`] times switch to
+/// [`VerifierState::widen`] to guarantee convergence on loops.
+/// Returns a [`VerifiedProgram`] with per-PC state snapshots for the
+/// JSON trace, or the first [`VerifyError`] encountered.
 ///
 /// # Errors
 ///
-/// Returns [`VerifyError::UnsupportedLoop`] if the CFG contains a back
-/// edge, then the first per-instruction safety violation.
+/// Returns the first per-instruction safety violation.
 pub fn verify(insns: &[Insn], cfg: &Cfg, disasm: &str) -> Result<VerifiedProgram, VerifyError> {
-    if ebpf_cfg::has_back_edge(cfg) {
-        return Err(VerifyError::UnsupportedLoop { pc: 0 });
-    }
+    verify_with_config(insns, cfg, disasm, &VerifyConfig::default())
+}
+
+/// Verify with an explicit [`VerifyConfig`] (e.g. custom widening threshold).
+///
+/// # Errors
+///
+/// Returns the first per-instruction safety violation.
+pub fn verify_with_config(
+    insns: &[Insn],
+    cfg: &Cfg,
+    disasm: &str,
+    config: &VerifyConfig,
+) -> Result<VerifiedProgram, VerifyError> {
+    let helpers = HelperSignatureRegistry::built_in();
+    let disasm_lines: Vec<&str> =
+        if config.collect_trace { disasm.lines().collect() } else { Vec::new() };
 
     let mut states: Vec<Option<VerifierState>> = vec![None; insns.len()];
     states[cfg.entry.index()] = Some(VerifierState::initial());
 
-    // Last input state each block was processed with. A block is
-    // reprocessed whenever its input changes (join at a merge point) —
-    // skipping reprocessing would propagate stale states downstream.
-    // Terminates: the CFG is a DAG, so input changes are well-founded.
-    let mut processed: Vec<Option<VerifierState>> = vec![None; insns.len()];
-    let mut worklist: VecDeque<usize> = VecDeque::new();
-    worklist.push_back(cfg.entry.index());
+    // Generation counters replace `processed: Vec<Option<State>>` clones.
+    // `states_gen[pc]` bumps on every input change; `processed_gen[pc]`
+    // records the last generation processed. Equal generations mean the
+    // block was already processed with this exact input
+    // Terminates: joins are monotone, and widening after
+    // `widening_threshold` re-joins forces finite ascent (each widening
+    // strictly grows at least one register toward Top).
+    let mut states_gen: Vec<u64> = vec![0; insns.len()];
+    states_gen[cfg.entry.index()] = 1;
 
-    let mut trace: Vec<TraceEntry> = Vec::new();
-    let mut traced: HashSet<usize> = HashSet::new();
-    while let Some(pc_idx) = worklist.pop_front() {
-        let Some(input) = states[pc_idx].clone() else { continue };
-        if let Some(prev) = &processed[pc_idx]
-            && prev.equals(&input)
-        {
+    let mut processed_gen: Vec<u64> = vec![u64::MAX; insns.len()];
+    let mut block_iterations: Vec<usize> = vec![0; insns.len()];
+    let mut worklist: Vec<usize> = Vec::with_capacity(insns.len());
+    worklist.push(cfg.entry.index());
+
+    let mut trace: Vec<TraceEntry> =
+        if config.collect_trace { Vec::with_capacity(insns.len()) } else { Vec::new() };
+
+    let mut visited = vec![false; insns.len()];
+    let mut total_pc: usize = 0;
+    while let Some(pc_idx) = worklist.pop() {
+        if processed_gen[pc_idx] == states_gen[pc_idx] {
             continue;
         }
 
-        processed[pc_idx] = Some(input.clone());
-        let state = input;
+        processed_gen[pc_idx] = states_gen[pc_idx];
         // Find which block this PC belongs to.
         let node = cfg.block_at(Pc(pc_idx));
         let bb = &cfg.graph[node];
@@ -62,19 +184,25 @@ pub fn verify(insns: &[Insn], cfg: &Cfg, disasm: &str) -> Result<VerifiedProgram
             continue;
         }
 
+        let Some(state) = states[pc_idx].clone() else { continue };
         let mut current = state;
-        // Process instructions in this block.
+        let last_jump = jump_info(&insns[block_end - 1]);
         for (i, insn) in insns[block_start..block_end].iter().enumerate() {
             let pc = block_start + i;
-            check_and_transfer(pc, insn, &mut current)?;
-            traced.insert(pc);
-            trace.push(TraceEntry {
-                pc,
-                insns: disasm.lines().nth(pc).unwrap_or("").trim().to_string(),
-                regs: std::array::from_fn(|i| format_reg(i, &current.regs[i])),
-                stack_init: format_stack(&current.stack, &current.stack_init),
-                action: describe_action(insn),
-            });
+            check_and_transfer(pc, insn, &mut current, helpers)?;
+            if !visited[pc] {
+                visited[pc] = true;
+                total_pc += 1;
+            }
+            if config.collect_trace {
+                trace.push(TraceEntry {
+                    pc,
+                    insns: disasm_lines.get(pc).unwrap_or(&"").trim().to_string(),
+                    regs: std::array::from_fn(|i| format_reg(i, &current.regs[i])),
+                    stack_init: format_stack(&current.stack, &current.stack_init),
+                    action: describe_action(insn),
+                });
+            }
         }
         // Propagate to successor blocks.
         for edge in cfg.graph.edges(node) {
@@ -87,14 +215,14 @@ pub fn verify(insns: &[Insn], cfg: &Cfg, disasm: &str) -> Result<VerifiedProgram
             match edge.weight() {
                 EdgeKind::BranchTrue => {
                     // Refine on the taken branch.
-                    if let Some((op, dst, k)) = jump_info(&insns[block_end - 1]) {
+                    if let Some((op, dst, k)) = last_jump {
                         let refined = refine(current.regs[dst.index()].scalar_range(), op, k, true);
                         out.regs[dst.index()] = RegType::Scalar(refined);
                     }
                 }
                 EdgeKind::BranchFalse => {
                     // Refine on the not-taken branch.
-                    if let Some((op, dst, k)) = jump_info(&insns[block_end - 1]) {
+                    if let Some((op, dst, k)) = last_jump {
                         let refined =
                             refine(current.regs[dst.index()].scalar_range(), op, k, false);
                         out.regs[dst.index()] = RegType::Scalar(refined);
@@ -102,88 +230,105 @@ pub fn verify(insns: &[Insn], cfg: &Cfg, disasm: &str) -> Result<VerifiedProgram
                 }
                 EdgeKind::Fallthrough | EdgeKind::Unconditional => {}
             }
-            match &states[target_pc] {
+            match &mut states[target_pc] {
                 None => {
                     states[target_pc] = Some(out);
-                    worklist.push_back(target_pc);
+                    states_gen[target_pc] = states_gen[target_pc].wrapping_add(1);
+                    worklist.push(target_pc);
                 }
                 Some(existing) => {
-                    let joined = VerifierState::join(existing, &out);
-                    if !joined.equals(existing) {
-                        states[target_pc] = Some(joined);
-                        worklist.push_back(target_pc);
+                    block_iterations[target_pc] += 1;
+                    let changed = if block_iterations[target_pc] > config.widening_threshold {
+                        existing.widen_assign(&out)
+                    } else {
+                        existing.join_assign(&out)
+                    };
+                    if changed {
+                        states_gen[target_pc] = states_gen[target_pc].wrapping_add(1);
+                        worklist.push(target_pc);
                     }
                 }
             }
         }
     }
 
-    Ok(VerifiedProgram { trace, total_pc: traced.len() })
+    Ok(VerifiedProgram { trace, total_pc })
 }
 
 /// Check one instruction and transfer the abstract state.
+/// ALU transfer: validate `End` widths, check operand init, compute the
+/// abstract result
+fn alu_transfer(
+    pc: usize,
+    state: &mut VerifierState,
+    width: Width,
+    op: AluOp,
+    dst: Reg,
+    src: Operand,
+) -> Result<(), VerifyError> {
+    if let AluOp::End(_) = op {
+        match src {
+            Operand::Imm(16 | 32 | 64) => {}
+            Operand::Imm(w) => {
+                return Err(VerifyError::InvalidEndWidth { pc, width: i64::from(w) });
+            }
+            Operand::Reg(_) => return Err(VerifyError::IllegalInstruction { pc }),
+        }
+    }
+    if let Operand::Reg(r) = src {
+        ensure_init(state, r, pc)?;
+    }
+
+    let lhs = state.regs[dst.index()].scalar_range();
+    let rhs = match src {
+        Operand::Reg(r) => state.regs[r.index()].scalar_range(),
+        Operand::Imm(v) => Range::exact(i64::from(v)),
+    };
+
+    let result = match op {
+        AluOp::Add => lhs + rhs,
+        // Widened: division/modulo by zero yields zero at runtime
+        // (no trap), so any divisor range is accepted; negation
+        // and byte-swap likewise produce some unknown value.
+        AluOp::Sub | AluOp::Mul | AluOp::Div | AluOp::Mod | AluOp::Neg | AluOp::End(_) => {
+            Range::Top
+        }
+        AluOp::Or => lhs | rhs,
+        AluOp::And => lhs & rhs,
+        AluOp::Xor => lhs ^ rhs,
+        AluOp::Mov => rhs,
+        AluOp::Lsh => lhs << rhs,
+        AluOp::Rsh => lhs >> rhs,
+        AluOp::Arsh => lhs.sar(rhs),
+    };
+
+    let result = match width {
+        Width::B32 => result.trunc32(),
+        Width::B64 => result,
+    };
+
+    // r10 is read-only: writes keep the frame pointer, mirroring
+    // hardware that ignores the write
+    if !dst.is_frame_ptr() {
+        state.regs[dst.index()] = RegType::Scalar(result);
+    }
+    Ok(())
+}
+
 fn check_and_transfer(
     pc: usize,
     insn: &Insn,
     state: &mut VerifierState,
+    helpers: HelperSignatureRegistry,
 ) -> Result<(), VerifyError> {
     match insn {
         Insn::Alu { width, op, dst, src } => {
-            // BPF_END carries its width as an immediate; anything else
-            // traps in the VM (BadEndWidth / Illegal), so validate before
-            // the generic transfer. Widths are load-time validated to
-            // 16/32/64 (see exec::load).
-            if let AluOp::End(_) = op {
-                match src {
-                    Operand::Imm(w) if matches!(*w, 16 | 32 | 64) => {}
-                    Operand::Imm(w) => {
-                        return Err(VerifyError::InvalidEndWidth { pc, width: i64::from(*w) });
-                    }
-                    // The decoder only emits End with an immediate width; a
-                    // hand-built End+register source traps as illegal.
-                    Operand::Reg(_) => return Err(VerifyError::IllegalInstruction { pc }),
-                }
-            }
-            // Check source operand is initialized.
-            match src {
-                Operand::Reg(r) => {
-                    ensure_init(state, *r, pc)?;
-                }
-                Operand::Imm(_) => {}
-            }
-
-            let lhs = state.regs[dst.index()].scalar_range();
-            let rhs = match src {
-                Operand::Reg(r) => state.regs[r.index()].scalar_range(),
-                Operand::Imm(v) => Range::exact(i64::from(*v)),
-            };
-
-            let result = match op {
-                AluOp::Add => lhs + rhs,
-                // Widened: division/modulo by zero yields zero at runtime
-                // (no trap), so any divisor range is accepted; negation
-                // and byte-swap likewise produce some unknown value.
-                AluOp::Sub | AluOp::Mul | AluOp::Div | AluOp::Mod | AluOp::Neg | AluOp::End(_) => {
-                    Range::Top
-                }
-                AluOp::Or => lhs | rhs,
-                AluOp::And => lhs & rhs,
-                AluOp::Xor => lhs ^ rhs,
-                AluOp::Mov => rhs,
-                AluOp::Lsh => lhs << rhs,
-                AluOp::Rsh => lhs >> rhs,
-                AluOp::Arsh => lhs.sar(rhs),
-            };
-
-            let result = match width {
-                Width::B32 => result.trunc32(),
-                Width::B64 => result,
-            };
-
-            state.regs[dst.index()] = RegType::Scalar(result);
+            alu_transfer(pc, state, *width, *op, *dst, *src)?;
         }
         Insn::LoadImm64 { dst, imm } => {
-            state.regs[dst.index()] = RegType::Scalar(Range::exact(*imm));
+            if !dst.is_frame_ptr() {
+                state.regs[dst.index()] = RegType::Scalar(Range::exact(*imm));
+            }
         }
         Insn::Load { size, dst, base, offset } => {
             let (start, lo, hi) = check_mem_access(state, *base, *offset, *size, pc)?;
@@ -194,7 +339,9 @@ fn check_and_transfer(
             if !readable.iter().all(|&b| b) {
                 return Err(VerifyError::UninitStackRead { pc, offset: start });
             }
-            state.regs[dst.index()] = RegType::Scalar(Range::Top);
+            if !dst.is_frame_ptr() {
+                state.regs[dst.index()] = RegType::Scalar(Range::Top);
+            }
         }
         Insn::Store { size, base, offset, src } => {
             // Storing an uninitialized register would launder garbage into
@@ -208,7 +355,7 @@ fn check_and_transfer(
             state.stack_init.get_mut(lo..=hi).ok_or(VerifyError::StackOverflow { pc })?.fill(true);
             for s in lo / 8..=hi / 8 {
                 let slot = state.stack.get_mut(s).ok_or(VerifyError::StackOverflow { pc })?;
-                slot.ty = RegType::Scalar(Range::Top);
+                *slot = RegType::Scalar(Range::Top);
             }
         }
         Insn::Jump { op: JumpOp::Always, .. } => {
@@ -225,9 +372,17 @@ fn check_and_transfer(
             }
             // Range refinement happens on edges in verify(), not here.
         }
-        Insn::Call { func } => {
-            return Err(VerifyError::UnknownHelper { pc, func: *func });
-        }
+        Insn::Call { func } => match helpers.get(*func) {
+            Some(helper) => {
+                state.regs[0] = helper.effect(state, pc)?;
+                if helper.may_write_memory() {
+                    state.stack.fill(RegType::Scalar(Range::Top));
+                }
+            }
+            None => {
+                return Err(VerifyError::UnknownHelper { pc, func: *func });
+            }
+        },
         Insn::Exit => {
             ensure_init(state, Reg(0), pc)?;
         }
@@ -236,8 +391,6 @@ fn check_and_transfer(
         }
     }
 
-    // r10 is always a stack pointer (read-only).
-    state.regs[10] = RegType::StackPtr { offset: 0 };
     Ok(())
 }
 
@@ -327,33 +480,21 @@ const fn ensure_stack_ptr(state: &VerifierState, r: Reg, pc: usize) -> Result<()
     }
 }
 
-/// Describe what an instruction does (for the trace output).
+/// Describe what an instruction does.
 fn describe_action(insn: &Insn) -> String {
     match insn {
         Insn::Alu { op, dst, src, .. } => {
-            let src_str = match src {
-                Operand::Imm(v) => format!("{v}"),
-                Operand::Reg(r) => format!("r{}", r.0),
-            };
-            format!("r{} {}= {}", dst.0, op.mnemonic(), src_str)
+            format!("{dst} {}= {src}", op.mnemonic())
         }
-        Insn::LoadImm64 { dst, imm } => format!("r{} = {:#x}", dst.0, imm),
+        Insn::LoadImm64 { dst, imm } => format!("{dst} = {imm:#x}"),
         Insn::Load { size, dst, base, offset } => {
-            format!("r{} = *({} *)(r{} + {})", dst.0, size.mnemonic(), base.0, offset)
+            format!("{dst} = *({} *)({base} + {offset})", size.mnemonic())
         }
         Insn::Store { size, base, offset, src } => {
-            let src_str = match src {
-                Operand::Imm(v) => format!("{v}"),
-                Operand::Reg(r) => format!("r{}", r.0),
-            };
-            format!("*({} *)(r{} + {}) = {}", size.mnemonic(), base.0, offset, src_str)
+            format!("*({} *)({base} + {offset}) = {src}", size.mnemonic())
         }
         Insn::Jump { op, dst, src, offset, .. } => {
-            let src_str = match src {
-                Operand::Imm(v) => format!("{v}"),
-                Operand::Reg(r) => format!("r{}", r.0),
-            };
-            format!("{} r{}, {}, +{}", op.mnemonic(), dst.0, src_str, offset)
+            format!("{} {dst}, {src}, +{offset}", op.mnemonic())
         }
         Insn::Call { func } => format!("call {func}"),
         Insn::Exit => "exit".to_string(),

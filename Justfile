@@ -30,6 +30,7 @@ bench-quick:
 
 fuzz-smoke:
     cargo +nightly fuzz run decode_program -- -max_total_time=60
+    cargo +nightly fuzz run verify_pipeline -- -max_total_time=60
 
 size:
     cargo build --release --locked

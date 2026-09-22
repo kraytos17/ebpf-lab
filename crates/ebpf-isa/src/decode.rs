@@ -34,10 +34,6 @@ pub fn decode_program(bytes: &[u8]) -> Result<Vec<Insn>, DecodeError> {
     let mut i = 0;
     while i < bytes.len() {
         let remaining = &bytes[i..];
-        if remaining.len() < RawInsn::SIZE {
-            return Err(DecodeError::Truncated { remaining: remaining.len() });
-        }
-
         let chunk: &[u8; RawInsn::SIZE] =
             remaining.first_chunk().ok_or(DecodeError::Truncated { remaining: remaining.len() })?;
         let raw = RawInsn::from_bytes(chunk);
