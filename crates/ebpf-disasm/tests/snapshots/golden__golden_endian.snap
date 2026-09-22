@@ -1,0 +1,9 @@
+---
+source: crates/ebpf-disasm/tests/golden.rs
+assertion_line: 65
+expression: "disasm_fixture(\"endian.bin\")"
+---
+0   mov r1, 305419896
+1   end r1, 32
+2   mov r0, r1
+3   exit

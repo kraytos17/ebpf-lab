@@ -16,6 +16,7 @@ tracing.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 insta.workspace = true
+proptest.workspace = true
 
 [[bench]]
 name = "decode"

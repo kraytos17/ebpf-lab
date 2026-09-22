@@ -5,15 +5,11 @@
 
 #![allow(clippy::unwrap_used)]
 
-use ebpf_verifier::{VerifyError, verify};
-use std::path::PathBuf;
+mod common;
 
-fn fixture(name: &str) -> Vec<ebpf_isa::Insn> {
-    let path: PathBuf =
-        [env!("CARGO_MANIFEST_DIR"), "..", "..", "tests", "fixtures", name].iter().collect();
-    let bytes = std::fs::read(path).unwrap();
-    ebpf_isa::decode_program(&bytes).unwrap()
-}
+use common::fixtures::decode_fixture as fixture;
+use common::maps::test_maps;
+use ebpf_verifier::{VerifyError, verify};
 
 fn verify_fixture(
     name: &str,
@@ -37,6 +33,8 @@ fn accepts_valid_fixtures() {
         "loop_1000_iters.bin",
         "helper_prandom.bin",
         "helper_ktime.bin",
+        "helper_printk.bin",
+        "endian.bin",
     ] {
         verify_fixture(name).unwrap_or_else(|e| panic!("{name} should verify: {e}"));
     }
@@ -67,6 +65,66 @@ fn accepts_helper_ktime() {
 }
 
 #[test]
+fn accepts_helper_printk() {
+    verify_fixture("helper_printk.bin").expect("helper_printk.bin should verify");
+}
+
+#[test]
+fn rejects_map_call_with_uninit_fd() {
+    // r1 never written: the fd cannot resolve.
+    let bytes = [
+        0x85u8, 0, 0, 0, 1, 0, 0, 0, // call 1
+        0x95, 0, 0, 0, 0, 0, 0, 0, // exit
+    ];
+    let insns = ebpf_isa::decode_program(&bytes).unwrap();
+    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+    let disasm = ebpf_disasm::disassemble(&insns);
+    let config = ebpf_verifier::VerifyConfig::with_maps(test_maps());
+    let err = ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config).unwrap_err();
+    assert!(matches!(err, VerifyError::UninitRegister { reg: 1, .. }), "unexpected: {err}");
+}
+
+#[test]
+fn rejects_map_call_with_pointer_fd() {
+    // r1 is a stack pointer, not a scalar fd.
+    let bytes = [
+        0xbfu8, 0xa1, 0, 0, 0, 0, 0, 0, // mov r1, r10
+        0x85, 0, 0, 0, 1, 0, 0, 0, // call 1
+        0x95, 0, 0, 0, 0, 0, 0, 0, // exit
+    ];
+    let insns = ebpf_isa::decode_program(&bytes).unwrap();
+    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+    let disasm = ebpf_disasm::disassemble(&insns);
+    let config = ebpf_verifier::VerifyConfig::with_maps(test_maps());
+    let err = ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config).unwrap_err();
+    assert!(matches!(err, VerifyError::TypeMismatch { .. }), "unexpected: {err}");
+}
+
+#[test]
+fn fuzzy_fd_degrades_to_top() {
+    // Diamond merges r1 = 1 and r1 = 2, so the fd is [1, 2]: lookup
+    // cannot tie to one descriptor and returns Top, which still verifies.
+    // r0 = Top at exit is initialized (Top is a value, not NotInit).
+    let bytes = [
+        0xb7u8, 0x02, 0, 0, 10, 0, 0, 0, // mov r2, 10
+        0x15, 0x02, 1, 0, 10, 0, 0, 0, // jeq r2, 10, +1 (taken)
+        0xb7, 0x01, 0, 0, 2, 0, 0, 0, // mov r1, 2 (fallthrough arm)
+        0xb7, 0x01, 0, 0, 1, 0, 0, 0, // mov r1, 1 (taken arm lands here)
+        0xbf, 0xa2, 0, 0, 0, 0, 0, 0, // mov r2, r10
+        0x07, 0x02, 0, 0, 0xf8, 0xff, 0xff, 0xff, // add r2, -8
+        0x62, 0x0a, 0xf8, 0xff, 1, 0, 0, 0, // stw [r10-8], 1 (key)
+        0x85, 0, 0, 0, 1, 0, 0, 0, // call 1
+        0x95, 0, 0, 0, 0, 0, 0, 0, // exit
+    ];
+    let insns = ebpf_isa::decode_program(&bytes).unwrap();
+    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+    let disasm = ebpf_disasm::disassemble(&insns);
+    let config = ebpf_verifier::VerifyConfig::with_maps(test_maps());
+    ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config)
+        .expect("fuzzy fd should degrade gracefully");
+}
+
+#[test]
 fn no_trace_verdict_matches() {
     // `collect_trace = false` must not change accept/reject: same PCs,
     // empty trace.
@@ -75,12 +133,97 @@ fn no_trace_verdict_matches() {
         let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
         let disasm = ebpf_disasm::disassemble(&insns);
         let traced = verify(&insns, &cfg, &disasm).expect("should verify");
-        let config = ebpf_verifier::VerifyConfig { widening_threshold: 16, collect_trace: false };
+        let config = ebpf_verifier::VerifyConfig {
+            widening_threshold: 16,
+            collect_trace: false,
+            maps: Vec::new(),
+        };
+
         let untraced = ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config)
             .expect("should verify without trace");
         assert_eq!(traced.total_pc, untraced.total_pc, "{name} pc count diverged");
         assert!(untraced.trace.is_empty(), "{name} trace should be empty");
     }
+}
+
+fn verify_fixture_with_maps(
+    name: &str,
+    maps: Vec<ebpf_verifier::MapDesc>,
+) -> Result<ebpf_verifier::VerifiedProgram, ebpf_verifier::VerifyError> {
+    let insns = fixture(name);
+    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+    let disasm = ebpf_disasm::disassemble(&insns);
+    let config = ebpf_verifier::VerifyConfig::with_maps(maps);
+    ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config)
+}
+
+#[test]
+fn accepts_map_hash_lookup() {
+    verify_fixture_with_maps("map_hash_lookup.bin", test_maps())
+        .expect("map_hash_lookup.bin should verify");
+}
+
+#[test]
+fn accepts_map_array_update() {
+    verify_fixture_with_maps("map_array_update.bin", test_maps())
+        .expect("map_array_update.bin should verify");
+}
+
+#[test]
+fn rejects_map_bad_fd() {
+    assert!(matches!(
+        verify_fixture_with_maps("map_bad_fd.bin", test_maps()),
+        Err(VerifyError::BadMapFd { fd: 99, .. })
+    ));
+}
+
+#[test]
+fn rejects_map_call_without_maps() {
+    // No descriptors installed: even fd 1 is unknown.
+    assert!(matches!(verify_fixture("map_hash_lookup.bin"), Err(VerifyError::BadMapFd { .. })));
+}
+
+#[test]
+fn rejects_map_lookup_with_uninit_key() {
+    // Key pointer never written: the VM would fault reading the key.
+    // Hand-built: ldimm r1, 1 / mov r2, r10 (no offset store) / call 1 / exit.
+    // r2 points at [r10+0], which is out of the stack window anyway;
+    // either StackOverflow or UninitStackRead is a sound rejection.
+    let bytes = [
+        0x18u8, 0x01, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // ldimm r1, 1
+        0xbf, 0xa2, 0, 0, 0, 0, 0, 0, // mov r2, r10
+        0x85, 0, 0, 0, 1, 0, 0, 0, // call 1
+        0x95, 0, 0, 0, 0, 0, 0, 0, // exit
+    ];
+    let insns = ebpf_isa::decode_program(&bytes).unwrap();
+    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+    let disasm = ebpf_disasm::disassemble(&insns);
+    let config = ebpf_verifier::VerifyConfig::with_maps(test_maps());
+    let err = ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config).unwrap_err();
+    assert!(
+        matches!(err, VerifyError::StackOverflow { .. } | VerifyError::UninitStackRead { .. }),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
+fn accepts_computed_stack_pointer() {
+    // Pointer arithmetic preserves stack-pointer-ness: r2 = r10 - 8 is a
+    // valid base for the store/load below. Before ptr tracking, r2
+    // degraded to Scalar(Top) and the store mis-reported TypeMismatch.
+    let bytes = [
+        0xb7u8, 0x00, 0, 0, 0, 0, 0, 0, // mov r0, 0 (exit code seed)
+        0xbf, 0xa2, 0, 0, 0, 0, 0, 0, // mov r2, r10
+        0x07, 0x02, 0, 0, 0xf8, 0xff, 0xff, 0xff, // add r2, -8
+        0x62, 0x02, 0, 0, 42, 0, 0, 0, // stw [r2+0], 42
+        0x61, 0x20, 0, 0, 0, 0, 0, 0, // ldxw r0, [r2+0]
+        0x95, 0, 0, 0, 0, 0, 0, 0, // exit
+    ];
+    let insns = ebpf_isa::decode_program(&bytes).unwrap();
+    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+    let disasm = ebpf_disasm::disassemble(&insns);
+    let result = verify(&insns, &cfg, &disasm).expect("computed pointer should verify");
+    assert_eq!(result.total_pc, 6);
 }
 
 #[test]

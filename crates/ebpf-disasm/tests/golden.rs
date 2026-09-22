@@ -46,3 +46,21 @@ fn golden_diamond() {
 fn golden_ldimm() {
     insta::assert_snapshot!(disasm_fixture("ldimm.bin"));
 }
+
+#[test]
+fn golden_loop() {
+    // Pins conditional-jump-back-edge rendering (`jlt` + negative offset).
+    insta::assert_snapshot!(disasm_fixture("loop.bin"));
+}
+
+#[test]
+fn golden_stack() {
+    // Pins memory-op rendering (`stxdw` / `ldxdw` with frame-pointer offsets).
+    insta::assert_snapshot!(disasm_fixture("stack.bin"));
+}
+
+#[test]
+fn golden_endian() {
+    // Pins `BPF_END` rendering.
+    insta::assert_snapshot!(disasm_fixture("endian.bin"));
+}

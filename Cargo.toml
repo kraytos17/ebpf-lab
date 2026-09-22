@@ -18,18 +18,18 @@ license = "MIT"
 repository = "https://github.com/kraytos17/ebpf-lab"
 homepage = "https://github.com/kraytos17/ebpf-lab"
 documentation = "https://docs.rs/ebpf-isa"
-version = "0.6.0"
+version = "0.7.0"
 
 [workspace.dependencies]
 # Dependency policy: every third-party version lives here exactly once and
 # crates inherit via `dep.workspace = true`. Bump with
 # `cargo update -p <pkg>` so Cargo.lock records the change for review.
-ebpf-isa = { version = "0.6.0", path = "crates/ebpf-isa" }
-ebpf-elf = { version = "0.6.0", path = "crates/ebpf-elf" }
-ebpf-disasm = { version = "0.6.0", path = "crates/ebpf-disasm" }
-ebpf-cfg = { version = "0.6.0", path = "crates/ebpf-cfg" }
-ebpf-vm = { version = "0.6.0", path = "crates/ebpf-vm" }
-ebpf-verifier = { version = "0.6.0", path = "crates/ebpf-verifier" }
+ebpf-isa = { version = "0.7.0", path = "crates/ebpf-isa" }
+ebpf-elf = { version = "0.7.0", path = "crates/ebpf-elf" }
+ebpf-disasm = { version = "0.7.0", path = "crates/ebpf-disasm" }
+ebpf-cfg = { version = "0.7.0", path = "crates/ebpf-cfg" }
+ebpf-vm = { version = "0.7.0", path = "crates/ebpf-vm" }
+ebpf-verifier = { version = "0.7.0", path = "crates/ebpf-verifier" }
 
 object = { version = "0.40.0", default-features = false, features = ["read", "std"] }
 petgraph = "0.8.3"

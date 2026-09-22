@@ -1,0 +1,9 @@
+---
+source: crates/ebpf-disasm/tests/golden.rs
+assertion_line: 59
+expression: "disasm_fixture(\"stack.bin\")"
+---
+0   mov r1, 42
+1   *(dw *)(r10 + -8) = r1
+2   r0 = *(dw *)(r10 + -8)
+3   exit

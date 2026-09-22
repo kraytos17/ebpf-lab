@@ -37,3 +37,9 @@ fn golden_arith_dot() {
 fn golden_ldimm_dot() {
     insta::assert_snapshot!(dot_fixture("ldimm.bin"));
 }
+
+#[test]
+fn golden_loop_dot() {
+    // Pins back-edge rendering: the only cyclic CFG in the corpus.
+    insta::assert_snapshot!(dot_fixture("loop.bin"));
+}

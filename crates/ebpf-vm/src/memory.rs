@@ -35,6 +35,15 @@ pub const STACK_BASE: i64 = 0x1_0000;
 /// Well clear of the stack so region classification never overlaps.
 pub const PACKET_BASE: i64 = 0x2_0000;
 
+/// Virtual address of the map-value scratch area.
+///
+/// `bpf_map_lookup_elem` copies the hit value here and returns this address.
+/// Well clear of stack and packet so classification never overlaps. The
+/// scratch holds exactly one value (the latest lookup); each lookup
+/// overwrites it, mirroring how kernel map-value pointers stay valid only
+/// until the next call in practice.
+pub const MAP_SCRATCH_BASE: i64 = 0x3_0000;
+
 /// Require natural alignment for multi-byte accesses.
 #[inline]
 fn check_alignment(addr: i64, size: MemSize) -> Result<(), MemError> {
@@ -99,6 +108,8 @@ pub enum MemRegion {
     Stack,
     /// `[PACKET_BASE, …)`.
     Packet,
+    /// `[MAP_SCRATCH_BASE, …)` (length-checked on access).
+    MapScratch,
     /// Outside every known region.
     Unknown,
 }
@@ -305,20 +316,26 @@ impl Default for StackMemory {
     }
 }
 
-/// The VM's view of memory: stack plus an optional packet buffer.
-///
-/// Map memory arrives with the map milestone.
+/// The VM's view of memory: stack, optional packet buffer, and the
+/// map-value scratch area (written by `bpf_map_lookup_elem`, read by
+/// direct loads through the returned pointer).
 #[derive(Debug, Clone)]
 pub struct MemoryView {
     stack: StackMemory,
     packet: Option<PacketBuffer>,
+    map_scratch: Vec<u8>,
     align_checks: bool,
 }
 
 impl Default for MemoryView {
-    /// Empty stack, no packet, alignment enforcement on.
+    /// Empty stack, no packet, empty scratch, alignment enforcement on.
     fn default() -> Self {
-        Self { stack: StackMemory::default(), packet: None, align_checks: true }
+        Self {
+            stack: StackMemory::default(),
+            packet: None,
+            map_scratch: Vec::new(),
+            align_checks: true,
+        }
     }
 }
 
@@ -332,12 +349,17 @@ impl MemoryView {
     /// counts as stack-shaped for the same reason. Packet-shaped addresses
     /// (at or above [`PACKET_BASE`]) classify as [`MemRegion::Packet`]
     /// whether or not a packet is currently loaded; the access itself
-    /// reports [`MemError::NoPacket`] when unset.
+    /// reports [`MemError::NoPacket`] when unset. Scratch-shaped addresses
+    /// (at or above [`MAP_SCRATCH_BASE`]) classify as
+    /// [`MemRegion::MapScratch`]; the access itself reports
+    /// [`MemError::OutOfBounds`] past the latest lookup's value.
     #[must_use]
     #[inline]
     pub const fn classify(addr: i64) -> MemRegion {
         if addr >= StackMemory::LOW && addr <= STACK_BASE {
             MemRegion::Stack
+        } else if addr >= MAP_SCRATCH_BASE {
+            MemRegion::MapScratch
         } else if addr >= PACKET_BASE {
             MemRegion::Packet
         } else {
@@ -359,6 +381,21 @@ impl MemoryView {
     #[must_use]
     pub fn packet_len(&self) -> Option<usize> {
         self.packet.as_ref().map(PacketBuffer::len)
+    }
+
+    /// Install the map-value scratch contents (replaces any previous one).
+    ///
+    /// Called by `bpf_map_lookup_elem` on a hit; the returned guest
+    /// pointer is [`MAP_SCRATCH_BASE`]. The scratch is always fully
+    /// readable (no init bitmap) until the next lookup overwrites it.
+    pub fn set_map_scratch(&mut self, value: Vec<u8>) {
+        self.map_scratch = value;
+    }
+
+    /// Length of the current scratch value (0 when no lookup has hit yet).
+    #[must_use]
+    pub const fn map_scratch_len(&self) -> usize {
+        self.map_scratch.len()
     }
 
     /// Enable or disable natural-alignment enforcement.
@@ -385,6 +422,8 @@ impl MemoryView {
     /// [`MemError::NoPacket`] for packet-range accesses with nothing loaded,
     /// [`MemError::Misaligned`] for unaligned multi-byte accesses, and
     /// [`MemError::UninitializedRead`] for stack bytes never written.
+    /// Scratch reads need no init tracking (a hit always fills the whole
+    /// value); past-the-value reads are [`MemError::OutOfBounds`].
     #[inline]
     pub fn load(&self, addr: i64, size: MemSize) -> Result<i64, MemError> {
         if (StackMemory::LOW..=STACK_BASE).contains(&addr) {
@@ -398,15 +437,38 @@ impl MemoryView {
                 };
                 packet.load(addr, size, self.align_checks)
             }
+            MemRegion::MapScratch => self.scratch_load(addr, size),
             MemRegion::Unknown => Err(MemError::OutOfBounds { addr, size: size.bytes() }),
         }
     }
 
+    /// Scratch load: bounds then alignment (mirroring [`load`](Self::load)'s
+    /// diagnostic priority), then a direct little-endian copy.
+    fn scratch_load(&self, addr: i64, size: MemSize) -> Result<i64, MemError> {
+        let width = usize::from(size.bytes());
+        let off = addr
+            .checked_sub(MAP_SCRATCH_BASE)
+            .and_then(|o| usize::try_from(o).ok())
+            .filter(|&o| o.checked_add(width).is_some_and(|end| end <= self.map_scratch.len()))
+            .ok_or_else(|| MemError::OutOfBounds { addr, size: size.bytes() })?;
+        if self.align_checks {
+            check_alignment(addr, size)?;
+        }
+
+        let mut v: i64 = 0;
+        for (i, b) in self.map_scratch[off..off + width].iter().enumerate() {
+            v |= i64::from(*b) << (8 * i);
+        }
+        Ok(v)
+    }
+
     /// Store the low `size` bytes of `value` at `addr`.
     ///
-    /// Packet memory is read-only in v0.4: stores there report
-    /// [`MemError::OutOfBounds`]. All other error cases mirror [`load`](Self::load);
-    /// a successful store marks the stack bytes initialized.
+    /// Packet memory is read-only: stores there report
+    /// [`MemError::OutOfBounds`]. Scratch memory is writable (it models a
+    /// kernel map value obtained through lookup). All other error cases
+    /// mirror [`load`](Self::load); a successful stack store marks the
+    /// stack bytes initialized.
     ///
     /// # Errors
     ///
@@ -418,10 +480,28 @@ impl MemoryView {
         }
         match Self::classify(addr) {
             MemRegion::Stack => self.stack.store(addr, size, value, self.align_checks),
+            MemRegion::MapScratch => self.scratch_store(addr, size, value),
             MemRegion::Packet | MemRegion::Unknown => {
                 Err(MemError::OutOfBounds { addr, size: size.bytes() })
             }
         }
+    }
+
+    /// Scratch store: same bounds-then-alignment order as the load path.
+    fn scratch_store(&mut self, addr: i64, size: MemSize, value: i64) -> Result<(), MemError> {
+        let width = usize::from(size.bytes());
+        let off = addr
+            .checked_sub(MAP_SCRATCH_BASE)
+            .and_then(|o| usize::try_from(o).ok())
+            .filter(|&o| o.checked_add(width).is_some_and(|end| end <= self.map_scratch.len()))
+            .ok_or_else(|| MemError::OutOfBounds { addr, size: size.bytes() })?;
+        if self.align_checks {
+            check_alignment(addr, size)?;
+        }
+
+        let le = value.to_le_bytes();
+        self.map_scratch[off..off + width].copy_from_slice(&le[..width]);
+        Ok(())
     }
 }
 
@@ -526,6 +606,40 @@ mod tests {
         mem.clear_packet();
         assert_eq!(mem.packet_len(), None);
         assert!(matches!(mem.load(PACKET_BASE, MemSize::B), Err(MemError::NoPacket)));
+    }
+
+    #[test]
+    fn scratch_roundtrip_and_bounds() {
+        let mut mem = MemoryView::default();
+        assert_eq!(mem.map_scratch_len(), 0);
+        // Empty scratch: every read is out of bounds.
+        assert!(matches!(
+            mem.load(MAP_SCRATCH_BASE, MemSize::B),
+            Err(MemError::OutOfBounds { .. })
+        ));
+        mem.set_map_scratch(vec![0x0A, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(mem.map_scratch_len(), 8);
+        assert_eq!(mem.load(MAP_SCRATCH_BASE, MemSize::B).unwrap(), 0x0A);
+        assert_eq!(mem.load(MAP_SCRATCH_BASE, MemSize::Dw).unwrap(), 0x0A);
+        // Past-the-value reads fault; stores work and are readable back.
+        assert!(matches!(
+            mem.load(MAP_SCRATCH_BASE + 8, MemSize::B),
+            Err(MemError::OutOfBounds { .. })
+        ));
+        mem.store(MAP_SCRATCH_BASE, MemSize::B, 0xFF).unwrap();
+        assert_eq!(mem.load(MAP_SCRATCH_BASE, MemSize::B).unwrap(), 0xFF);
+        // Misaligned multi-byte access faults (scratch base is 8-aligned).
+        assert!(matches!(
+            mem.load(MAP_SCRATCH_BASE + 1, MemSize::W),
+            Err(MemError::Misaligned { .. })
+        ));
+        // A fresh lookup overwrites the whole scratch.
+        mem.set_map_scratch(vec![1, 2]);
+        assert_eq!(mem.map_scratch_len(), 2);
+        assert!(matches!(
+            mem.load(MAP_SCRATCH_BASE + 2, MemSize::B),
+            Err(MemError::OutOfBounds { .. })
+        ));
     }
 
     use proptest::prelude::*;

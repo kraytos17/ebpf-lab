@@ -21,8 +21,14 @@ ebpf-vm.workspace = true
 ebpf-verifier.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Intentionally unused in code: pins the `lazy_static >= 1.4` floor
+# graph-wide via version unification (see the workspace-deps comment).
+# Do not remove — minimal-versions resolution would pick the uncompilable
+# `lazy_static 1.0.0` allowed by `sharded-slab 0.1.4` and break MSRV.
 lazy_static.workspace = true
 
 [lints]

@@ -2,6 +2,9 @@
 //! stack slots, and the per-PC machine state propagated by the worklist.
 
 use std::fmt;
+use std::rc::Rc;
+
+use ebpf_vm::maps::MapDesc;
 
 /// An interval abstract value forming a flat lattice:
 ///
@@ -83,24 +86,6 @@ impl Range {
                 Self::Interval { lo, hi }
             }
         }
-    }
-
-    /// Whether this range contains exactly one value.
-    #[must_use]
-    pub const fn is_exact(self) -> bool {
-        matches!(self, Self::Interval { lo, hi } if lo == hi)
-    }
-
-    /// Whether this is the `Bottom` element.
-    #[must_use]
-    pub const fn is_bottom(self) -> bool {
-        matches!(self, Self::Bottom)
-    }
-
-    /// Whether this is the `Top` element.
-    #[must_use]
-    pub const fn is_top(self) -> bool {
-        matches!(self, Self::Top)
     }
 
     /// Clamp to 32-bit range (for ALU32 zero-extension).
@@ -251,6 +236,15 @@ pub enum RegType {
         /// Constant byte offset from r10.
         offset: i32,
     },
+    /// A pointer to a map value, from `bpf_map_lookup_elem`.
+    ///
+    /// Carries the map fd so v0.8 can check accesses against `value_size`;
+    /// in v0.7 every load through it yields `Top` and every store is
+    /// accepted unchecked (the VM serves them from scratch).
+    MapPtr {
+        /// File descriptor of the map the pointer belongs to.
+        fd: i64,
+    },
 }
 
 impl RegType {
@@ -267,6 +261,13 @@ impl RegType {
                     Self::Scalar(Range::Top)
                 }
             }
+            (Self::MapPtr { fd: f1 }, Self::MapPtr { fd: f2 }) => {
+                if *f1 == *f2 {
+                    Self::MapPtr { fd: *f1 }
+                } else {
+                    Self::Scalar(Range::Top)
+                }
+            }
             _ => Self::Scalar(Range::Top),
         }
     }
@@ -275,6 +276,7 @@ impl RegType {
     ///
     /// Avoids allocating a fresh state on the hot merge path; the
     /// boolean carries the fixed-point signal without a second compare.
+    #[must_use]
     pub fn join_assign(&mut self, other: &Self) -> bool {
         let joined = Self::join(self, other);
         if *self == joined {
@@ -300,9 +302,16 @@ pub const STACK_SLOTS: usize = 64;
 /// Stack size in bytes.
 ///
 /// Pinned equal to `STACK_SLOTS * 8` by `stack_bytes_matches_slots`.
-/// The `usize` type keeps array lengths cast-free; sites needing signed
-/// arithmetic convert with `try_from` (total) rather than `as`.
+/// The `usize` type keeps array lengths cast-free; [`STACK_BYTES_I32`]
+/// is the signed twin for offset arithmetic.
 pub const STACK_BYTES: usize = 512;
+
+/// Stack size as `i32` for r10-relative offset arithmetic.
+///
+/// Same value as [`STACK_BYTES`], pinned by the same test. Prefer this
+/// over `i32::try_from(STACK_BYTES)` at runtime: the range is known at
+/// compile time, so a named const beats a fallible conversion.
+pub const STACK_BYTES_I32: i32 = 512;
 
 /// Abstract machine state at a single program counter.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -315,18 +324,65 @@ pub struct VerifierState {
     /// covers r10-relative offset `i - STACK_BYTES`. The single source
     /// of truth for readability; `stack` slots carry values only.
     pub stack_init: [bool; STACK_BYTES],
+    /// fd-indexed map table (index 0 always `None`). Immutable,
+    /// reference-counted configuration: set once from
+    /// [`VerifyConfig`](crate::verify::VerifyConfig), shared
+    /// across every worklist state — merges keep entries both sides agree
+    /// on. `Rc` makes the per-block state clone a refcount bump instead of
+    /// a deep descriptor copy.
+    pub maps: Rc<[Option<MapDesc>]>,
 }
 
 impl VerifierState {
     /// Initial state at function entry: everything unknown except r10.
     #[must_use]
     pub fn initial() -> Self {
+        Self::initial_with_maps(Vec::new())
+    }
+
+    /// Initial state with an fd-indexed map table installed.
+    #[must_use]
+    pub fn initial_with_maps(maps: Vec<Option<MapDesc>>) -> Self {
         let mut regs = std::array::from_fn(|_| RegType::NotInit);
         regs[10] = RegType::StackPtr { offset: 0 };
         Self {
             regs,
             stack: std::array::from_fn(|_| RegType::NotInit),
             stack_init: [false; STACK_BYTES],
+            maps: maps.into(),
+        }
+    }
+
+    /// Merge two fd tables: keep entries both sides agree on.
+    ///
+    /// Fast paths first: identical tables (the common case — the table is
+    /// immutable configuration, so most merges reunite the same `Rc`) and
+    /// double-empty tables share without allocating or comparing.
+    fn join_maps(a: &Rc<[Option<MapDesc>]>, b: &Rc<[Option<MapDesc>]>) -> Rc<[Option<MapDesc>]> {
+        if Rc::ptr_eq(a, b) || (a.is_empty() && b.is_empty()) {
+            return a.clone();
+        }
+
+        let len = a.len().max(b.len());
+        (0..len)
+            .map(|i| match (a.get(i).and_then(Option::as_ref), b.get(i).and_then(Option::as_ref)) {
+                (Some(x), Some(y)) if x == y => Some(x.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    /// Adopt a merged table, reporting whether it changed.
+    ///
+    /// Pointer equality short-circuits the deep compare: `join_maps`
+    /// returns a shared `Rc` whenever nothing changed.
+    fn adopt_maps(&mut self, maps: Rc<[Option<MapDesc>]>) -> bool {
+        if Rc::ptr_eq(&maps, &self.maps) || maps == self.maps {
+            false
+        } else {
+            self.maps = maps;
+            true
         }
     }
 
@@ -336,7 +392,8 @@ impl VerifierState {
         let regs = std::array::from_fn(|i| RegType::join(&a.regs[i], &b.regs[i]));
         let stack = std::array::from_fn(|i| RegType::join(&a.stack[i], &b.stack[i]));
         let stack_init = std::array::from_fn(|i| a.stack_init[i] && b.stack_init[i]);
-        Self { regs, stack, stack_init }
+        let maps = Self::join_maps(&a.maps, &b.maps);
+        Self { regs, stack, stack_init, maps }
     }
 
     /// Widen two states at a loop header: widen each scalar register,
@@ -348,15 +405,11 @@ impl VerifierState {
             (RegType::Scalar(r1), RegType::Scalar(r2)) => RegType::Scalar(r1.widen(*r2)),
             _ => RegType::join(&old.regs[i], &new.regs[i]),
         });
+
         let stack = std::array::from_fn(|i| RegType::join(&old.stack[i], &new.stack[i]));
         let stack_init = std::array::from_fn(|i| old.stack_init[i] && new.stack_init[i]);
-        Self { regs, stack, stack_init }
-    }
-
-    /// Whether this state equals another (for fixed-point detection).
-    #[must_use]
-    pub fn equals(&self, other: &Self) -> bool {
-        self == other
+        let maps = Self::join_maps(&old.maps, &new.maps);
+        Self { regs, stack, stack_init, maps }
     }
 
     /// Join `other` into `self` in place. Returns true if anything changed.
@@ -364,6 +417,7 @@ impl VerifierState {
     /// The merge-path fast path: mutates the stored state directly and
     /// reports the fixed-point signal without allocating a fresh state
     /// plus a second equality compare.
+    #[must_use]
     pub fn join_assign(&mut self, other: &Self) -> bool {
         let mut changed = false;
         for (a, b) in self.regs.iter_mut().zip(other.regs.iter()) {
@@ -379,6 +433,8 @@ impl VerifierState {
                 changed = true;
             }
         }
+
+        changed |= self.adopt_maps(Self::join_maps(&self.maps, &other.maps));
         changed
     }
 
@@ -386,6 +442,7 @@ impl VerifierState {
     ///
     /// Same in-place contract as [`Self::join_assign`], but scalar
     /// registers use [`Range::widen`] to force loop convergence.
+    #[must_use]
     pub fn widen_assign(&mut self, other: &Self) -> bool {
         let mut changed = false;
         for (a, b) in self.regs.iter_mut().zip(other.regs.iter()) {
@@ -408,6 +465,8 @@ impl VerifierState {
                 changed = true;
             }
         }
+
+        changed |= self.adopt_maps(Self::join_maps(&self.maps, &other.maps));
         changed
     }
 }
@@ -485,6 +544,27 @@ mod tests {
         }
 
         #[test]
+        fn widen_prop_idempotent(a in arb_range()) {
+            prop_assert_eq!(a.widen(a), a);
+        }
+
+        #[test]
+        fn widen_extends(a in arb_range(), b in arb_range()) {
+            // Every concrete point of either input must survive widening.
+            let w = a.widen(b);
+            for r in [a, b] {
+                match r {
+                    Range::Bottom => {}
+                    Range::Top => prop_assert_eq!(w, Range::Top),
+                    Range::Interval { lo, hi } => {
+                        prop_assert!(contains(w, lo), "{a:?} widen {b:?} lost {lo}");
+                        prop_assert!(contains(w, hi), "{a:?} widen {b:?} lost {hi}");
+                    }
+                }
+            }
+        }
+
+        #[test]
         fn add_sound(
             x in -1000i64..1000, dx in 0i64..100,
             y in -1000i64..1000, dy in 0i64..100,
@@ -546,10 +626,83 @@ mod tests {
     }
 
     #[test]
+    fn range_bitwise_extremes() {
+        let t = Range::Top;
+        let b = Range::Bottom;
+        let x = Range::exact(5);
+        assert_eq!(b & x, b);
+        assert_eq!(x & b, b);
+        assert_eq!(t & x, t);
+        assert_eq!(x | b, b);
+        assert_eq!(t | x, t);
+        assert_eq!(b ^ x, b);
+        assert_eq!(x ^ t, t);
+        assert_eq!(x << b, b);
+        assert_eq!(b << x, b);
+        assert_eq!(x >> b, b);
+        assert_eq!(x.sar(b), b);
+    }
+
+    #[test]
+    fn range_bitwise_intervals() {
+        let a = Range::Interval { lo: 0b1100, hi: 0b1100 };
+        let b = Range::Interval { lo: 0b1010, hi: 0b1010 };
+        assert_eq!(a & b, Range::exact(0b1000));
+        assert_eq!(a | b, Range::exact(0b1110));
+        // XOR always widens (not interval-shaped).
+        assert_eq!(a ^ b, Range::Top);
+        assert_eq!(a ^ a, Range::Top);
+    }
+
+    #[test]
+    fn range_shl_sound() {
+        let v = Range::Interval { lo: 1, hi: 3 };
+        assert_eq!(v << Range::exact(2), Range::Interval { lo: 4, hi: 12 });
+        // Out-of-range shift amount degrades to Top.
+        assert_eq!(v << Range::exact(64), Range::Top);
+        assert_eq!(v << Range::Top, Range::Top);
+        // Negative values degrade to Top.
+        assert_eq!(Range::Interval { lo: -1, hi: 3 } << Range::exact(1), Range::Top);
+        // Shr/sar are conservatively Top.
+        assert_eq!(v >> Range::exact(1), Range::Top);
+        assert_eq!(v.sar(Range::exact(1)), Range::Top);
+    }
+
+    #[test]
+    fn range_trunc32() {
+        assert_eq!(Range::Bottom.trunc32(), Range::Bottom);
+        assert_eq!(Range::Top.trunc32(), Range::Top);
+        assert_eq!(Range::exact(5).trunc32(), Range::exact(5));
+        // High bits are masked away.
+        assert_eq!(Range::exact(-1).trunc32(), Range::exact(0xFFFF_FFFF));
+    }
+
+    #[test]
+    fn range_debug_forms() {
+        assert_eq!(format!("{:?}", Range::Bottom), "⊥");
+        assert_eq!(format!("{:?}", Range::Top), "⊤");
+        assert_eq!(format!("{:?}", Range::exact(7)), "7");
+        assert_eq!(format!("{:?}", Range::Interval { lo: 1, hi: 2 }), "[1, 2]");
+    }
+
+    #[test]
     fn reg_join_notinit() {
         let a = RegType::NotInit;
         let b = RegType::Scalar(Range::exact(5));
         assert!(matches!(RegType::join(&a, &b), RegType::NotInit));
+    }
+
+    #[test]
+    fn map_ptr_join() {
+        let a = RegType::MapPtr { fd: 1 };
+        let b = RegType::MapPtr { fd: 1 };
+        assert_eq!(RegType::join(&a, &b), RegType::MapPtr { fd: 1 });
+        let c = RegType::MapPtr { fd: 2 };
+        assert_eq!(RegType::join(&a, &c), RegType::Scalar(Range::Top));
+        assert_eq!(
+            RegType::join(&a, &RegType::Scalar(Range::exact(0))),
+            RegType::Scalar(Range::Top)
+        );
     }
 
     #[test]
@@ -563,6 +716,7 @@ mod tests {
         // `STACK_BYTES` is the `usize` twin of `STACK_SLOTS * 8` so array
         // lengths stay cast-free; pin the two together here.
         assert_eq!(STACK_BYTES, STACK_SLOTS * 8);
+        assert_eq!(STACK_BYTES_I32, i32::try_from(STACK_BYTES).expect("512 fits in i32"));
     }
 
     #[test]

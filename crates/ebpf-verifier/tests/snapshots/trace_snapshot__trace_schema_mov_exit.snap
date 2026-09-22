@@ -1,0 +1,161 @@
+---
+source: crates/ebpf-verifier/tests/trace_snapshot.rs
+assertion_line: 23
+expression: "trace_json(\"mov_exit.bin\")"
+---
+[
+  {
+    "pc": 0,
+    "insns": "0   mov r0, 1",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          1
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "r0 mov= 1"
+  },
+  {
+    "pc": 1,
+    "insns": "1   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          1
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  }
+]

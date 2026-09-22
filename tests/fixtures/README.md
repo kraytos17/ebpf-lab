@@ -8,7 +8,7 @@ They load at compile time via `include_bytes!`, so they must exist before
 generation step. The fuzz seed corpus (`fuzz/corpus/`, gitignored) is
 staged *from* these files by `fuzz/build.rs`; fixtures are its upstream.
 
-## The sixteen programs
+## The twenty-one programs
 
 | File | Slots | Program | Exit | Exercises |
 |---|---|---|---|---|
@@ -22,6 +22,11 @@ staged *from* these files by `fuzz/build.rs`; fixtures are its upstream.
 | `loop_1000_iters.bin` | 6 | `r0 = 0; r1 = 0; add r0, 1; add r1, 1; jlt r1, 1000, -3; exit` | 1000 | Long loop; widening fires after threshold (v0.6) |
 | `helper_prandom.bin` | 4 | `call 43; stxdw [r10-8], r0; ldxdw r0, [r10-8]; exit` | nondet | Typed helper `bpf_get_prandom_u32` + stack roundtrip (v0.6) |
 | `helper_ktime.bin` | 2 | `call 5; exit` | nondet | Typed helper `bpf_ktime_get_ns` (v0.6) |
+| `helper_printk.bin` | 3 | `call 6; mov r0, 0; exit` | 0 | `bpf_trace_printk` returns `Top`, exit pinned (v0.7) |
+| `map_hash_lookup.bin` | 8 slots (7 insns) | `ldimm r1, 1; r2 = r10-8; stw [r10-8], 1; call 1; stxdw [r10-16], r0; exit` | ptr (`0x30000`) | Hash lookup hit → `MapPtr`, scratch pointer saved (v0.7) |
+| `map_array_update.bin` | 10 slots (10 insns) | `ldimm r1, 2; key@r10-8 = 0; val@r10-16 = 42; r4 = 0; call 2; exit` | 0 | Array update success path (v0.7) |
+| `map_bad_fd.bin` | 7 slots (6 insns) | `ldimm r1, 99; call 1; exit` | ❌ `BadMapFd` (fd 99) | Unknown-fd rejection (v0.7) |
+| `endian.bin` | 4 | `mov r1, 0x12345678; end64 le r1, 32; mov r0, r1; exit` | 0x12345678 | `BPF_END` acceptance path (v0.7) |
 | `stack.bin` | 4 | `mov r1, 42; stxdw [r10-8], r1; ldxdw r0, [r10-8]; exit` | 42 | Stack store/load roundtrip, frame pointer |
 | `uninit_read.bin` | 2 | `ldxdw r0, [r10-8]; exit` | ❌ `UninitializedRead` | Canonical unread-stack rejection (v0.5 verifier example) |
 | `oob_jump.bin` | 2 | `ja +100; exit` | ❌ `JumpOutOfBounds` (target 101) | Canonical bad-target rejection; lowers to `Trap` at load |
@@ -42,11 +47,13 @@ stack:     mov r1, 42 / *(dw *)(r10 + -8) = r1 / r0 = *(dw *)(r10 + -8) / exit
 
 ## Consumed by
 
-- `ebpf-disasm` golden snapshots: `mov_exit`, `arith`, `branch`, `branch_untaken`, `diamond`, `ldimm`
-- `ebpf-cfg` golden DOT snapshots: `branch`, `diamond` (merge shape), `arith`, `ldimm`
+- `ebpf-disasm` golden snapshots: `mov_exit`, `arith`, `branch`, `branch_untaken`, `diamond`, `ldimm`, `loop` (jump rendering), `stack` (memory ops), `endian` (`BPF_END`)
+- `ebpf-cfg` golden DOT snapshots: `branch`, `diamond` (merge shape), `arith`, `ldimm`, `loop` (back edge)
+- `ebpf-verifier` trace snapshots: `mov_exit`, `diamond`, `stack`, `loop` (widened intervals), `map_hash_lookup` (`MapPtr`)
 - `ebpf-vm` exec tests: all eight valid fixtures trap-free (`all_fixtures_trap_free`), exit codes pinned (`fixture_exit_codes`), rejections pinned at load (`invalid_fixtures_trap_at_load`) and runtime (`rejection_fixtures_fail_at_runtime`); `branch`/`loop`/`diamond` target resolution + CFG differential pin
 - `ebpf-verifier` fixture tests: valid fixtures verify (incl. loops via widening + typed helpers), rejections pin exact `VerifyError` variants
-- Fuzz seeds: all sixteen, via `fuzz/build.rs`
+- Fuzz seeds: all twenty-one, via `fuzz/build.rs`
+- `maps_example.json`: `--maps` demo (fd 1 hash + fd 2 array with initial values)
 
 ## Adding a fixture
 

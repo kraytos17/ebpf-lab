@@ -8,3 +8,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  # The fuzz crate is its own workspace (`fuzz/Cargo.toml` declares
+  # `[workspace]`, so `fuzz/Cargo.lock` is independent): without this
+  # entry its `libfuzzer-sys` pin would never be proposed for update.
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"

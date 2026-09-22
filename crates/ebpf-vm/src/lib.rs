@@ -3,7 +3,8 @@
 //! [`Vm`] executes a decoded [`Insn`] stream with real
 //! register, program-counter, and stack state. Memory goes through
 //! [`memory::MemoryView`]; helper calls dispatch through
-//! [`HelperRegistry`] (empty until the map milestone wires real helpers in).
+//! [`HelperRegistry`] (map helpers plus time/prandom built in,
+//! everything else faults with [`VmError::UnknownHelper`)).
 //!
 //! Semantic notes (kernel-faithful where it matters):
 //!
@@ -16,15 +17,19 @@
 //!   the slot-space translation for static analysis).
 
 pub mod exec;
+pub mod maps;
 pub mod memory;
 
-use ebpf_isa::insn::{AluOp, Endian, Insn, JumpOp, Reg, Width};
+use ebpf_isa::insn::{AluOp, Endian, Insn, JumpOp, MemSize, Reg, Width};
 use exec::{ExecInsn, load};
+use maps::build_stores;
 use std::collections::HashMap;
 use thiserror::Error;
 
+pub use maps::{MapDesc, MapError, MapStore, MapType};
 pub use memory::{
-    MemError, MemRegion, MemoryView, PACKET_BASE, PacketBuffer, STACK_BASE, STACK_SIZE,
+    MAP_SCRATCH_BASE, MemError, MemRegion, MemoryView, PACKET_BASE, PacketBuffer, STACK_BASE,
+    STACK_SIZE,
 };
 
 /// Number of general-purpose registers (`r0`–`r10`).
@@ -123,18 +128,114 @@ pub type HelperFn = fn(&mut Vm) -> StepResult;
 pub struct HelperRegistry(HashMap<u32, HelperFn>);
 
 impl HelperRegistry {
-    /// Empty registry. Real helpers (map lookup/update, time, …) arrive
-    /// with the map milestone (v0.7); until then every `call` faults with
-    /// [`VmError::UnknownHelper`].
+    /// Empty registry. Unknown helpers fault with [`VmError::UnknownHelper`].
     #[must_use]
     pub fn empty() -> Self {
         Self(HashMap::new())
+    }
+
+    /// Registry with the map helpers (`bpf_map_lookup_elem` = 1,
+    /// `bpf_map_update_elem` = 2, `bpf_map_delete_elem` = 3).
+    #[must_use]
+    pub fn with_map_helpers() -> Self {
+        let mut r = Self(HashMap::new());
+        r.insert(1, helper_map_lookup);
+        r.insert(2, helper_map_update);
+        r.insert(3, helper_map_delete);
+        r
     }
 
     /// Register one helper implementation.
     pub fn insert(&mut self, func: u32, helper: HelperFn) {
         self.0.insert(func, helper);
     }
+}
+
+/// `bpf_map_lookup_elem` (func 1): `r1` = fd, `r2` = key pointer.
+///
+/// Hit: value bytes are copied to the map scratch area and `r0` gets
+/// [`MAP_SCRATCH_BASE`]. Miss or bad fd: `r0 = 0` (NULL), kernel-style.
+/// Bad key pointers fault with [`VmError::Memory`].
+fn helper_map_lookup(vm: &mut Vm) -> StepResult {
+    let fd = vm.regs[Reg(1)];
+    let key_ptr = vm.regs[Reg(2)];
+    let Some(key_size) = vm.map_store(fd).map(|s| s.desc().key_size) else {
+        vm.regs[Reg(0)] = 0;
+        vm.pc += 1;
+        return StepResult::Continue;
+    };
+    let key = match vm.read_guest_bytes(key_ptr, key_size) {
+        Ok(key) => key,
+        Err(e) => return StepResult::Error(e),
+    };
+    let hit: Option<Vec<u8>> = vm
+        .map_store_mut(fd)
+        .and_then(|store| store.lookup(&key).ok().flatten())
+        .map(<[u8]>::to_vec);
+    match hit {
+        Some(value) => {
+            vm.memory.set_map_scratch(value);
+            vm.regs[Reg(0)] = MAP_SCRATCH_BASE;
+        }
+        None => vm.regs[Reg(0)] = 0,
+    }
+    vm.pc += 1;
+    StepResult::Continue
+}
+
+/// `bpf_map_update_elem` (func 2): `r1` = fd, `r2` = key pointer,
+/// `r3` = value pointer, `r4` = flags.
+///
+/// `r0 = 0` on success, `-1` on any failure (bad fd, width mismatch,
+/// full, flag violation), kernel-style. Bad guest pointers fault.
+fn helper_map_update(vm: &mut Vm) -> StepResult {
+    let fd = vm.regs[Reg(1)];
+    let key_ptr = vm.regs[Reg(2)];
+    let val_ptr = vm.regs[Reg(3)];
+    let flags = vm.regs[Reg(4)];
+    let Some((key_size, value_size)) =
+        vm.map_store(fd).map(|s| (s.desc().key_size, s.desc().value_size))
+    else {
+        vm.regs[Reg(0)] = -1;
+        vm.pc += 1;
+        return StepResult::Continue;
+    };
+    let key = match vm.read_guest_bytes(key_ptr, key_size) {
+        Ok(key) => key,
+        Err(e) => return StepResult::Error(e),
+    };
+    let value = match vm.read_guest_bytes(val_ptr, value_size) {
+        Ok(value) => value,
+        Err(e) => return StepResult::Error(e),
+    };
+
+    let flags = u64::try_from(flags).unwrap_or(u64::MAX);
+    let ok = vm.map_store_mut(fd).is_some_and(|store| store.update(&key, &value, flags).is_ok());
+    vm.regs[Reg(0)] = if ok { 0 } else { -1 };
+    vm.pc += 1;
+    StepResult::Continue
+}
+
+/// `bpf_map_delete_elem` (func 3): `r1` = fd, `r2` = key pointer.
+///
+/// Same `r0` convention as [`helper_map_update`].
+fn helper_map_delete(vm: &mut Vm) -> StepResult {
+    let fd = vm.regs[Reg(1)];
+    let key_ptr = vm.regs[Reg(2)];
+    let Some(key_size) = vm.map_store(fd).map(|s| s.desc().key_size) else {
+        vm.regs[Reg(0)] = -1;
+        vm.pc += 1;
+        return StepResult::Continue;
+    };
+    let key = match vm.read_guest_bytes(key_ptr, key_size) {
+        Ok(key) => key,
+        Err(e) => return StepResult::Error(e),
+    };
+
+    let ok = vm.map_store_mut(fd).is_some_and(|store| store.delete(&key).is_ok());
+    vm.regs[Reg(0)] = if ok { 0 } else { -1 };
+    vm.pc += 1;
+    StepResult::Continue
 }
 
 /// Register file `r0`–`r10`.
@@ -203,6 +304,7 @@ pub struct Vm {
     exec: Vec<ExecInsn>,
     memory: MemoryView,
     helpers: HelperRegistry,
+    maps: Vec<Option<MapStore>>,
 }
 
 impl Vm {
@@ -222,6 +324,37 @@ impl Vm {
             exec,
             memory: MemoryView::default(),
             helpers: HelperRegistry::empty(),
+            maps: Vec::new(),
+        }
+    }
+
+    /// New machine with map helpers registered and `descs` installed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MapError`] on duplicate fds or invalid descriptors.
+    pub fn new_with_maps(insns: Vec<Insn>, descs: Vec<MapDesc>) -> Result<Self, MapError> {
+        Ok(Self::new_with_stores(insns, build_stores(descs)?))
+    }
+
+    /// New machine with prebuilt map stores installed (plus map helpers).
+    ///
+    /// Prefer this over [`new_with_maps`](Self::new_with_maps) when running
+    /// several programs against one `--maps` file: descriptors are
+    /// validated once by the caller instead of per program. Each machine
+    /// still gets its own storage (cloned by the caller), so updates never
+    /// leak across programs.
+    #[must_use]
+    pub fn new_with_stores(insns: Vec<Insn>, maps: Vec<Option<MapStore>>) -> Self {
+        let exec = load(&insns);
+        Self {
+            regs: Regs::zeroed_with_frame_pointer(),
+            pc: 0,
+            insns,
+            exec,
+            memory: MemoryView::default(),
+            helpers: HelperRegistry::with_map_helpers(),
+            maps,
         }
     }
 
@@ -238,6 +371,7 @@ impl Vm {
             exec,
             memory: MemoryView::default(),
             helpers: HelperRegistry::empty(),
+            maps: Vec::new(),
         }
     }
 
@@ -272,6 +406,31 @@ impl Vm {
             || StepResult::Error(VmError::UnknownHelper { func }),
             |helper| helper(self),
         )
+    }
+
+    /// Resolve `fd` to its live store (shared by all map helpers).
+    fn map_store(&self, fd: i64) -> Option<&MapStore> {
+        usize::try_from(fd).ok().and_then(|i| self.maps.get(i)).and_then(Option::as_ref)
+    }
+
+    /// Mutable twin of [`map_store`](Self::map_store).
+    fn map_store_mut(&mut self, fd: i64) -> Option<&mut MapStore> {
+        usize::try_from(fd).ok().and_then(|i| self.maps.get_mut(i)).and_then(Option::as_mut)
+    }
+
+    /// Read `len` bytes from guest memory (byte-wise, so arbitrary key
+    /// pointers never trip alignment). Bad pointers fault honestly.
+    // `B` loads always return `0..=255`; the `as` is exact — neither
+    // truncating nor sign-losing.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn read_guest_bytes(&self, addr: i64, len: usize) -> Result<Vec<u8>, VmError> {
+        let mut out = Vec::with_capacity(len);
+        let mut a = addr;
+        for _ in 0..len {
+            out.push(self.memory.load(a, MemSize::B).map(|b| b as u8)?);
+            a = a.wrapping_add(1);
+        }
+        Ok(out)
     }
 
     /// Execute one instruction.
@@ -632,6 +791,110 @@ mod tests {
 
     const fn w(opcode: u8, dst: u8, src: u8, off: i16, imm: i32) -> [u8; 8] {
         ebpf_isa::RawInsn { opcode, regs: (src << 4) | dst, offset: off, imm }.to_bytes()
+    }
+
+    /// Single-entry hash for helper tests: fd 1, 4-byte keys, 8-byte
+    /// values, key `[1,0,0,0]` → value `10` (LE).
+    fn helper_test_maps() -> Vec<MapDesc> {
+        use std::collections::BTreeMap;
+        let mut initial = BTreeMap::new();
+        initial.insert("01000000".to_string(), "0A00000000000000".to_string());
+        vec![MapDesc {
+            fd: 1,
+            map_type: MapType::Hash,
+            key_size: 4,
+            value_size: 8,
+            max_entries: 8,
+            initial,
+        }]
+    }
+
+    /// Run with maps installed: `r1` = fd, `r2` = key pointer baked by the
+    /// caller, then `call func`, then exit. A value slot and zeroed flags
+    /// are always prepared so `update` (r3/r4) works too; lookup/delete
+    /// ignore the extras.
+    fn run_map_call(fd: i64, key_bytes: &[u8], func: u32) -> RunOutcome {
+        // stw keys little-endian into [r10-8); key len ≤ 8 in these tests.
+        assert!(key_bytes.len() <= 8);
+        let mut key_imm = [0u8; 4];
+        let n = key_bytes.len().min(4);
+        key_imm[..n].copy_from_slice(&key_bytes[..n]);
+        let key_lo = i32::from_le_bytes(key_imm);
+        let prog = [
+            w(0xb7, 1, 0, 0, i32::try_from(fd).expect("test fd fits")),
+            w(0xbf, 2, 10, 0, 0),                 // r2 = r10
+            w(0x07, 2, 0, 0, -8),                 // r2 -= 8
+            w(0x62, 10, 0, -8, key_lo),           // stw [r10-8], key
+            w(0xbf, 3, 10, 0, 0),                 // r3 = r10
+            w(0x07, 3, 0, 0, -16),                // r3 -= 16
+            w(0x62, 10, 0, -16, 42),              // stw [r10-16], 42 (value lo)
+            w(0x62, 10, 0, -12, 0),               // stw [r10-12], 0 (value hi)
+            w(0xb7, 4, 0, 0, 0),                  // r4 = 0 (BPF_ANY)
+            w(0x85, 0, 0, 0, func.cast_signed()), // call func
+            w(0x95, 0, 0, 0, 0),
+        ];
+        let bytes: Vec<u8> = prog.iter().flatten().copied().collect();
+        let insns = decode_program(&bytes).expect("test prog decodes");
+        Vm::new_with_maps(insns, helper_test_maps()).expect("maps install").run(10_000)
+    }
+
+    #[test]
+    fn map_lookup_hit_returns_scratch() {
+        assert_eq!(run_map_call(1, &[1, 0, 0, 0], 1), Ok(MAP_SCRATCH_BASE));
+    }
+
+    #[test]
+    fn map_lookup_miss_returns_null() {
+        assert_eq!(run_map_call(1, &[9, 0, 0, 0], 1), Ok(0));
+    }
+
+    #[test]
+    fn map_lookup_bad_fd_returns_null() {
+        assert_eq!(run_map_call(99, &[1, 0, 0, 0], 1), Ok(0));
+    }
+
+    #[test]
+    fn map_update_then_lookup_roundtrip() {
+        // Update key 7 → value is opaque to r0 (0 on success); a following
+        // lookup in the same VM would hit. Here we only pin the r0 = 0
+        // success convention plus bad-fd -1.
+        assert_eq!(run_map_call(1, &[7, 0, 0, 0], 2), Ok(0));
+        assert_eq!(run_map_call(99, &[7, 0, 0, 0], 2), Ok(-1));
+    }
+
+    #[test]
+    fn map_delete_missing_returns_neg1() {
+        assert_eq!(run_map_call(1, &[9, 0, 0, 0], 3), Ok(-1));
+        assert_eq!(run_map_call(99, &[9, 0, 0, 0], 3), Ok(-1));
+    }
+
+    #[test]
+    fn from_exec_matches_new() {
+        let prog = [w(0xb7, 0, 0, 0, 7), w(0x95, 0, 0, 0, 0)];
+        let bytes: Vec<u8> = prog.iter().flatten().copied().collect();
+        let insns = decode_program(&bytes).expect("test prog decodes");
+        let exec = exec::load(&insns);
+        let mut vm = Vm::from_exec(insns.clone(), exec);
+        assert_eq!(vm.run(10_000), Ok(7));
+        // Same program through the normal constructor agrees.
+        assert_eq!(Vm::new(insns).run(10_000), Ok(7));
+    }
+
+    #[test]
+    fn with_helpers_serves_registered_call() {
+        use crate::StepResult;
+        fn ret42(vm: &mut Vm) -> StepResult {
+            vm.regs[Reg(0)] = 42;
+            vm.pc += 1;
+            StepResult::Continue
+        }
+        let prog = [w(0x85, 0, 0, 0, 9), w(0x95, 0, 0, 0, 0)];
+        let bytes: Vec<u8> = prog.iter().flatten().copied().collect();
+        let insns = decode_program(&bytes).expect("test prog decodes");
+        let mut registry = HelperRegistry::empty();
+        registry.insert(9, ret42);
+        let mut vm = Vm::new(insns).with_helpers(registry);
+        assert_eq!(vm.run(10_000), Ok(42));
     }
 
     #[test]

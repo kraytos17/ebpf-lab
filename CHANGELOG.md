@@ -5,6 +5,78 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-23
+
+### Added
+
+- Map simulator (`ebpf-vm::maps`): `MapType` (Hash/Array/LruArray),
+  `MapDesc` (fd, sizes, capacity, hex `initial` values), `MapStore`
+  (CRUD with `BPF_ANY`/`NOEXIST`/`EXIST` flags, LRU eviction),
+  `MapError`, fd-indexed `build_stores`. VM gains `maps` storage,
+  `new_with_maps`, and `bpf_map_lookup_elem`/`update`/`delete_elem`
+  impls (kernel `r0` conventions: pointer-or-NULL, 0-or-`-1`).
+  Lookup hits copy the value to a new `MapScratch` memory region
+  (`MAP_SCRATCH_BASE`, always readable, alignment-checked).
+- Verifier map support: `RegType::MapPtr { fd }` (join keeps same-fd,
+  else `Top`), `VerifierState::maps` table, `VerifyConfig.maps` +
+  `with_maps`, `MapLookup`/`MapUpdate`/`MapDelete` signatures,
+  `VerifyError::BadMapFd`. Loads through `MapPtr` yield `Top`;
+  stores are accepted; both enforce alignment.
+- CLI: `verify`/`run --maps <file>` (JSON descriptors).
+- Fixtures: `map_hash_lookup.bin`, `map_array_update.bin`,
+  `map_bad_fd.bin`, `endian.bin`, `helper_printk.bin`, plus
+  `maps_example.json` demo.
+- Tests: CLI integration suite (`cli.rs`, 17 tests over every subcommand),
+  decode proptests (wire roundtrip, never-panics, slot stability),
+  `Range` op unit tests, `refine` complement coverage, map-helper VM
+  conventions (9 `maps` unit tests, hit/miss/bad-fd/delete codes),
+  scratch/packet memory tests, ELF error paths, trace snapshots
+  (`mov_exit`, `diamond`, `stack`), verifier fixture tests (incl.
+  no-maps rejection, uninit-key, fuzzy-fd, computed-ptr), map
+  differential oracle; coverage 82% → 90% lines.
+- Test hygiene: shared `tests/common/{fixtures,maps}` helpers replace
+  three copy-pasted loaders/descriptor builders across the verifier
+  integration targets; `endian.bin` joins the differential oracle.
+- Fuzzing: `verify_pipeline` installs test maps (fd 1/2) so random
+  `call 1/2/3` bytes exercise transfer paths instead of always hitting
+  `BadMapFd`; CLI `--maps` error paths (missing file, malformed JSON)
+  pinned by integration tests.
+- CI: fuzz triggers on `ebpf-vm` changes too (map/memory feed the
+  pipeline target); fuzz workflow shares CI's cancel-in-progress
+  concurrency; dependabot covers the independent `fuzz/Cargo.lock`.
+- Snapshots: disasm golden for `loop`/`stack`/`endian` (new mnemonic
+  coverage), CFG DOT for `loop` (back-edge rendering), trace snapshots
+  for `loop` (widened intervals) and `map_hash_lookup` (`MapPtr`).
+- Benches: `decode/mixed_512_slots` (cross-class dispatch), verifier
+  `wide_500` scaling case (linear: ~7.8 ns/insn verdict); memory bench
+  isolates setup via `iter_batched` (old ~500 ps was a folding artifact,
+  honest number is ~45 ns); verify bench shares `test_maps` via path
+  include instead of a fourth copy.
+- `ebpf-vm`: fixture lists refreshed to all 21 programs
+  (`all_fixtures_trap_free`), exit codes pinned for 9 fixtures;
+  removed the empty `tests/` scaffold (coverage lives in unit tests).
+- Verifier soundness: map helpers now validate key/value pointers
+  (stack-pointer base + fully initialized range, mirroring `Load`);
+  uninit or non-stack key memory rejects instead of faulting in the VM.
+- Verifier precision: `mov`/`add`/`sub` preserve 64-bit stack-pointer
+  arithmetic (`r2 = r10 - 8` stays `StackPtr`), so computed stack
+- Benches: new `verify` bench (arith/loop/map × trace/verdict);
+  `bench-quick` and CI cover all four benches.
+- Cleanup: deleted dead `Range::{is_exact, is_bottom, is_top}`;
+  `format_stack` takes only the init bitmap (value rendering was dead —
+  stores always write `Top`).
+- Rust idioms: `TryFrom<u64> for UpdateFlags`, `first_chunk::<4>` in
+  `array_index`, `Option`-returning `map_fd` (no `i64::MIN` sentinel),
+  `Reg`-typed `check_map_ptr`, `Vm::new_with_stores` so `--maps` files
+  validate once per run instead of per program.
+- Cleanup: deleted dead `ElfProgram::slot_count` (unused since v0.1);
+  removed redundant `ebpf-vm` dev-dep from `ebpf-verifier` (already a
+  regular dep); corrected `Relocation.kind` docs (object-crate
+  discriminant, not the raw ELF `r_type`).
+- Verifier performance: the fd table is now `Rc`-shared instead of
+  deep-cloned per worklist visit (measured: maps overhead on
+  `loop_1000_iters` 44µs → ~1µs, within noise of no-maps).
+
 ## [0.6.0] - 2026-09-22
 
 ### Added
@@ -239,3 +311,4 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 [0.4.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.4.0
 [0.5.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.5.0
 [0.6.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.6.0
+[0.7.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.7.0

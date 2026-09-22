@@ -1,0 +1,330 @@
+---
+source: crates/ebpf-verifier/tests/trace_snapshot.rs
+assertion_line: 35
+expression: "trace_json(\"stack.bin\")"
+---
+[
+  {
+    "pc": 0,
+    "insns": "0   mov r1, 42",
+    "regs": [
+      {
+        "r": 0,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          42,
+          42
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "r1 mov= 42"
+  },
+  {
+    "pc": 1,
+    "insns": "1   *(dw *)(r10 + -8) = r1",
+    "regs": [
+      {
+        "r": 0,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          42,
+          42
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [
+      {
+        "offset": -8,
+        "value": "unknown"
+      }
+    ],
+    "action": "*(dw *)(r10 + -8) = r1"
+  },
+  {
+    "pc": 2,
+    "insns": "2   r0 = *(dw *)(r10 + -8)",
+    "regs": [
+      {
+        "r": 0,
+        "type": "unknown",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          42,
+          42
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [
+      {
+        "offset": -8,
+        "value": "unknown"
+      }
+    ],
+    "action": "r0 = *(dw *)(r10 + -8)"
+  },
+  {
+    "pc": 3,
+    "insns": "3   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "unknown",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          42,
+          42
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [
+      {
+        "offset": -8,
+        "value": "unknown"
+      }
+    ],
+    "action": "exit"
+  }
+]

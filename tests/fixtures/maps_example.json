@@ -1,0 +1,23 @@
+[
+  {
+    "fd": 1,
+    "type": "hash",
+    "key_size": 4,
+    "value_size": 8,
+    "max_entries": 256,
+    "initial": {
+      "01000000": "0A00000000000000"
+    }
+  },
+  {
+    "fd": 2,
+    "type": "array",
+    "key_size": 4,
+    "value_size": 4,
+    "max_entries": 16,
+    "initial": {
+      "00000000": "2A000000",
+      "01000000": "54000000"
+    }
+  }
+]

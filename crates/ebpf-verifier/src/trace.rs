@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::state::{RegType, STACK_BYTES, STACK_SLOTS, StackSlot};
+use crate::state::{RegType, STACK_BYTES, STACK_BYTES_I32};
 
 /// A per-PC state snapshot in the verification trace.
 #[derive(Debug, Serialize)]
@@ -60,39 +60,30 @@ pub const fn format_reg(index: usize, reg: &RegType) -> RegSummary {
         RegType::StackPtr { offset } => {
             RegSummary { r: index, ty: "stack_ptr", range: None, offset: Some(*offset) }
         }
+        RegType::MapPtr { .. } => RegSummary { r: index, ty: "map_ptr", range: None, offset: None },
     }
 }
 
 /// Format the initialized stack slots for JSON output.
 ///
 /// One entry per 8-byte slot whose bytes are *all* initialized; the
-/// offset is the slot's start relative to the frame pointer.
+/// offset is the slot's start relative to the frame pointer. Values
+/// render as `unknown`: stores write `Top`, so the slot carries
+/// init-tracking metadata, not a range (exact-value rendering arrives
+/// with v0.9 value tracking).
 #[must_use]
-pub fn format_stack(
-    slots: &[StackSlot; STACK_SLOTS],
-    init: &[bool; STACK_BYTES],
-) -> Vec<StackSummary> {
+pub fn format_stack(init: &[bool; STACK_BYTES]) -> Vec<StackSummary> {
     let mut out = Vec::new();
-    // r10-relative start offset of slot 0; no casts: `i32::try_from`
-    // cannot fail for these magnitudes, and `unwrap_or` keeps this
-    // display-only helper total (a wrong offset here affects only
-    // the trace, never soundness).
-    let mut offset = -i32::try_from(STACK_BYTES).unwrap_or(512);
+    // r10-relative start offset of slot 0. `STACK_BYTES_I32` is the
+    // compile-time signed twin, so this is a plain negation — no
+    // `try_from`/`unwrap_or` around a value known since v0.4.
+    let base = -STACK_BYTES_I32;
     let (chunks, _) = init.as_chunks::<8>();
-    for (slot, bytes) in slots.iter().zip(chunks) {
+    for (i, bytes) in chunks.iter().enumerate() {
         if bytes.iter().all(|&b| b) {
-            let value = match slot {
-                RegType::Scalar(crate::state::Range::Interval { lo, hi }) if lo == hi => {
-                    format!("{lo:#x}")
-                }
-                RegType::Scalar(crate::state::Range::Interval { lo, hi }) => {
-                    format!("[{lo:#x}, {hi:#x}]")
-                }
-                _ => "unknown".into(),
-            };
-            out.push(StackSummary { offset, value });
+            let offset = base + i32::try_from(i).unwrap_or(0) * 8;
+            out.push(StackSummary { offset, value: "unknown".into() });
         }
-        offset += 8;
     }
     out
 }

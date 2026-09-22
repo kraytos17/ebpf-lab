@@ -4,13 +4,13 @@
 [![fuzz](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml/badge.svg)](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml)
 [![msrv](https://img.shields.io/badge/MSRV-1.98-blue)](https://github.com/kraytos17/ebpf-lab)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-113-blue)](https://github.com/kraytos17/ebpf-lab)
-[![fixtures](https://img.shields.io/badge/fixtures-16-orange)](tests/fixtures/)
+[![tests](https://img.shields.io/badge/tests-189-blue)](https://github.com/kraytos17/ebpf-lab)
+[![fixtures](https://img.shields.io/badge/fixtures-21-orange)](tests/fixtures/)
 
 An eBPF laboratory in Rust: inspect, verify, execute, and optimize eBPF programs.
 
-Currently implements the **decode → disassemble → CFG → VM → verify** pipeline with basic  memory model
-(uninitialized-stack detection, alignment enforcement, packet region), 16 hand-assembled fixtures,
+Currently implements the **decode → disassemble → CFG → VM → verify** pipeline with basic memory model
+(uninitialized-stack detection, alignment enforcement, packet region), 21 hand-assembled fixtures,
 libFuzzer harnesses, and property-based tests.
 
 ## Quickstart
@@ -35,6 +35,7 @@ cargo build --workspace
 | `verify` | Statically verify (interval analysis, widening for loops) | `ebpf-lab verify program.bin` |
 | `verify --trace` | Per-PC abstract-state trace as JSON | `ebpf-lab verify --trace program.bin` |
 | `verify --max-iterations N` | Widening threshold for loops (default 16) | `ebpf-lab verify --max-iterations 32 program.bin` |
+| `verify/run --maps M` | Map descriptors with initial values (JSON) | `ebpf-lab verify --maps maps.json program.bin` |
 
 Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
 
@@ -52,9 +53,9 @@ Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
           ▼           ▼             ▼             ▼
      ┌─────────┐ ┌─────────┐ ┌─────────────┐ ┌──────────────┐
      │ebpf-cfg │ │ebpf-vm  │ │ebpf-verifier│ │future:       │
-     │build_cfg│ │step/run │ │Range lattice│ │maps, XDP,    │
-     │to_dot   │ │memory   │ │worklist+join│ │SSA, opt      │
-     │Pc / Slot│ │exec     │ │JSON trace   │ │              │
+     │build_cfg│ │step/run │ │Range lattice│ │XDP, SSA,     │
+     │to_dot   │ │memory   │ │worklist+join│ │opt           │
+     │Pc / Slot│ │maps     │ │JSON trace   │ │              │
      └─────────┘ └─────────┘ └─────────────┘ └──────────────┘
 ```
 
@@ -66,8 +67,8 @@ Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
 | [`ebpf-elf`](crates/ebpf-elf) | ELF `.o` parsing, section extraction | `ElfProgram`, `ProgType`, `SectionKind` |
 | [`ebpf-disasm`](crates/ebpf-disasm) | Bytecode → human-readable text | `disassemble`, `Display for Insn` |
 | [`ebpf-cfg`](crates/ebpf-cfg) | Control-flow graph construction | `BasicBlock`, `Cfg`, `Pc`, `Slot`, `to_dot` |
-| [`ebpf-vm`](crates/ebpf-vm) | Concrete interpreter + v0.4 memory | `Vm`, `ExecInsn`, `MemoryView`, `MemError` |
-| [`ebpf-verifier`](crates/ebpf-verifier) | Static verifier (interval lattice, widening, typed helpers) | `verify`, `verify_with_config`, `Range`, `VerifierState`, `VerifyError`, `HelperSignature` |
+| [`ebpf-vm`](crates/ebpf-vm) | Interpreter + memory + map simulator | `Vm`, `ExecInsn`, `MemoryView`, `MemError`, `MapStore`, `MapDesc` |
+| [`ebpf-verifier`](crates/ebpf-verifier) | Static verifier (interval lattice, widening, typed + map helpers) | `verify`, `verify_with_config`, `Range`, `VerifierState`, `VerifyError`, `HelperSignature`, `MapPtr` |
 | [`ebpf-lab-cli`](crates/ebpf-lab-cli) | `ebpf-lab` binary | clap derive, tracing |
 
 ## Memory model (v0.4)
@@ -81,13 +82,15 @@ The interpreter's `MemoryView` routes every load/store through a single chokepoi
 | Misaligned access | `Misaligned` | Natural alignment enforced, togglable |
 | Packet with no buffer | `NoPacket` | Read-only region at `PACKET_BASE` |
 | Packet OOB | `OutOfBounds` | Same variant for unknown regions |
+| Map scratch OOB | `OutOfBounds` | Readable scratch at `MAP_SCRATCH_BASE` (latest lookup value) |
+| Map scratch misaligned | `Misaligned` | Natural alignment enforced, togglable |
 
 Bounds are checked **before** alignment, so a straddling access reports the
 range fault — matching the kernel verifier's diagnostic priority.
 
 ## Test fixtures
 
-16 hand-assembled `.bin` programs exercising the happy path *and* canonical
+21 hand-assembled `.bin` programs exercising the happy path *and* canonical
 rejections. See [`tests/fixtures/README.md`](tests/fixtures/README.md) for
 the full table (bytes, assembly, exit code, what each exercises).
 
@@ -103,6 +106,9 @@ Highlights:
 | `loop_1000_iters.bin` | Long loop, widening fires after threshold |
 | `helper_prandom.bin` | Typed helper `bpf_get_prandom_u32` + stack roundtrip |
 | `helper_ktime.bin` | Typed helper `bpf_ktime_get_ns` |
+| `map_hash_lookup.bin` | Hash lookup hit → scratch pointer |
+| `map_array_update.bin` | Array update, exit 0 |
+| `map_bad_fd.bin` | `BadMapFd` rejection |
 | `uninit_read.bin` | `UninitializedRead` rejection |
 | `join_uninit.bin` | Merge-point rejection (fixed-point regression test) |
 | `misaligned.bin` | `Misaligned` rejection (v0.4 path) |
@@ -157,17 +163,22 @@ just verify   # equivalent of fmt + clippy + test + doc
 cargo bench -p ebpf-isa --bench decode
 cargo bench -p ebpf-cfg --bench cfg
 cargo bench -p ebpf-vm --bench vm
+cargo bench -p ebpf-verifier --bench verify
 ```
 
 Baselines (current main, `profile.release`, criterion):
 
 | Benchmark | Result |
 |-----------|--------|
-| `decode/4096_slots` | ~25 µs (~1.2 GiB/s) |
+| `decode/4096_slots` | ~26 µs (~1.2 GiB/s) |
+| `decode/mixed_512_slots` | ~3.0 µs (cross-class dispatch) |
 | `cfg/4096_slots` | ~98 µs (~42 Melem/s) |
 | `vm/straight_1000_adds` | ~3.2 µs (~312 Melem/s) |
 | `vm/loop_1000_iters` | ~6.9 µs (~437 Melem/s) |
-| `memory/store_load` | ~500 ps per access |
+| `memory/store_load` | ~45 ns per access (setup-isolated; the old ~500 ps was a folding artifact) |
+| `verify/arith/verdict` | ~240 ns |
+| `verify/wide_500/verdict` | ~3.9 µs (~7.8 ns/insn, linear) |
+| `verify/wide_500/trace` | ~119 µs (trace building dominates: ~30× verdict) |
 
 No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 
@@ -190,7 +201,7 @@ No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 - [x] **v0.4** — Memory model (stack init bitmap, packet region, alignment, 12 fixtures)
 - [x] **v0.5** — Verifier (interval lattice, worklist + joins, JSON trace, CLI wired, differential oracle, lattice laws)
 - [x] **v0.6** — Widening + typed helpers (loop convergence, 3 built-in helpers, extensible registry)
-- **v0.7** — Map simulator (HASH, ARRAY, LRU, ring buffer)
+- [x] **v0.7** — Map simulator (HASH, ARRAY, LRU_ARRAY, `--maps` JSON, `MapPtr`)
 - **v0.8** — Packet/XDP simulator
 - **v0.9** — SSA construction + optimization passes
 - **v1.0** — Real-world compatibility (BTF, relocs, bounded loops)
@@ -199,7 +210,7 @@ No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 
 1. `git clone` → `cargo build --workspace`
 2. Add fixtures to `tests/fixtures/` (see [the guide](tests/fixtures/README.md))
-3. Run `just verify` — all 113 tests + clippy + doc must be green
+3. Run `just verify` — all 189 tests + clippy + doc must be green
 4. Run `cargo insta review` after disassembler/CFG changes to accept new snapshots
 5. Run `just fuzz-smoke` before touching the decoder or verifier
 

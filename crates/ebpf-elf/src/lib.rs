@@ -111,13 +111,17 @@ impl From<&str> for ProgType {
 }
 
 /// A relocation entry inside a program section.
+///
+/// Informational in v0.7 (collected, never consumed): map-fd and
+/// subprogram resolution arrive with v1.0 relocations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relocation {
     /// Byte offset of the instruction slot to fix up.
     pub offset: u64,
     /// Symbol index / name the relocation refers to, when known.
     pub symbol: Option<String>,
-    /// Raw relocation type code from the object file.
+    /// `object`-crate `RelocationKind` discriminant (variant order, NOT the
+    /// ELF `r_type` code — raw type codes arrive with v1.0 resolution).
     pub kind: u8,
 }
 
@@ -132,15 +136,6 @@ pub struct ElfProgram {
     pub bytes: Vec<u8>,
     /// Relocations that must be resolved before execution.
     pub relocations: Vec<Relocation>,
-}
-
-impl ElfProgram {
-    /// Number of 8-byte instruction slots (wide `ld_imm_dw` counts as two here;
-    /// the decoded [`ebpf_isa::Insn`] stream is authoritative).
-    #[must_use]
-    pub const fn slot_count(&self) -> usize {
-        self.bytes.len() / ebpf_isa::RawInsn::SIZE
-    }
 }
 
 /// ELF loading errors.
@@ -240,6 +235,8 @@ pub fn load_raw_bytes(path: &Path) -> Result<ElfProgram, ElfError> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
@@ -272,8 +269,45 @@ mod tests {
     }
 
     #[test]
+    fn prog_type_display() {
+        assert_eq!(ProgType::Xdp.to_string(), "xdp");
+        assert_eq!(ProgType::Kprobe.to_string(), "kprobe");
+        assert_eq!(ProgType::Tc.to_string(), "tc");
+        assert_eq!(ProgType::Socket.to_string(), "socket");
+        assert_eq!(ProgType::Tracepoint.to_string(), "tracepoint");
+        assert_eq!(ProgType::Other("my_prog".into()).to_string(), "my_prog");
+        assert_eq!(ProgType::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
     fn rejects_empty_object() {
         let err = load_bytes(&[], "empty").unwrap_err();
         assert!(matches!(err, ElfError::Parse(_)));
+    }
+
+    #[test]
+    fn raw_bytes_roundtrip_and_length_check() {
+        let dir = std::env::temp_dir().join("ebpf-lab-elf-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let valid = dir.join("valid.bin");
+        std::fs::write(&valid, [0x95u8, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        let prog = load_raw_bytes(&valid).unwrap();
+        assert_eq!(prog.bytes.len(), 8);
+        assert_eq!(prog.prog_type, ProgType::Unknown);
+        assert!(prog.relocations.is_empty());
+
+        let bad = dir.join("bad.bin");
+        std::fs::write(&bad, [0x95u8, 0, 0]).unwrap();
+        let err = load_raw_bytes(&bad).unwrap_err();
+        assert!(matches!(err, ElfError::BadRawLength(3)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_file_is_io_error() {
+        let err = load_raw_bytes(Path::new("/nonexistent/ebpf-lab-test.bin")).unwrap_err();
+        assert!(matches!(err, ElfError::Io { .. }));
+        let err = load_object(Path::new("/nonexistent/ebpf-lab-test.o")).unwrap_err();
+        assert!(matches!(err, ElfError::Io { .. }));
     }
 }

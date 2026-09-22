@@ -326,7 +326,15 @@ mod tests {
             include_bytes!("../../../tests/fixtures/diamond.bin").as_slice(),
             include_bytes!("../../../tests/fixtures/ldimm.bin").as_slice(),
             include_bytes!("../../../tests/fixtures/loop.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/loop_1000_iters.bin").as_slice(),
             include_bytes!("../../../tests/fixtures/stack.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/endian.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/helper_prandom.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/helper_ktime.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/helper_printk.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/map_hash_lookup.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/map_array_update.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/map_bad_fd.bin").as_slice(),
         ] {
             let exec = load(&decode_bytes(bytes));
             assert!(!exec.iter().any(|e| matches!(e, ExecInsn::Trap(_))), "trap lowered");
@@ -338,8 +346,19 @@ mod tests {
         // branch_untaken.bin: r1=9, jeq falls through -> r0=2.
         // diamond.bin: r1=5, jeq falls through, merge at exit -> r0=1.
         let run = |bytes: &[u8]| Vm::new(decode_bytes(bytes)).run(100);
+        assert_eq!(run(include_bytes!("../../../tests/fixtures/mov_exit.bin")), Ok(1));
+        assert_eq!(run(include_bytes!("../../../tests/fixtures/arith.bin")), Ok(30));
+        assert_eq!(run(include_bytes!("../../../tests/fixtures/branch.bin")), Ok(1));
         assert_eq!(run(include_bytes!("../../../tests/fixtures/branch_untaken.bin")), Ok(2));
         assert_eq!(run(include_bytes!("../../../tests/fixtures/diamond.bin")), Ok(1));
+        assert_eq!(run(include_bytes!("../../../tests/fixtures/loop.bin")), Ok(10));
+        assert_eq!(run(include_bytes!("../../../tests/fixtures/stack.bin")), Ok(42));
+        assert_eq!(run(include_bytes!("../../../tests/fixtures/endian.bin")), Ok(0x1234_5678));
+        assert_eq!(
+            Vm::new(decode_bytes(include_bytes!("../../../tests/fixtures/loop_1000_iters.bin")))
+                .run(10_000),
+            Ok(1000)
+        );
     }
 
     #[test]

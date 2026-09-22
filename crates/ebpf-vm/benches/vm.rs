@@ -66,12 +66,17 @@ fn bench_memory(c: &mut Criterion) {
     group.throughput(Throughput::Elements(2));
     for size in [MemSize::B, MemSize::H, MemSize::W, MemSize::Dw] {
         group.bench_with_input(format!("store_load_{}", size.mnemonic()), &size, |b, &size| {
-            b.iter(|| {
-                let mut mem = MemoryView::default();
-                mem.store(STACK_BASE - 8, size, black_box(0x0102_0304_0506_0708))
-                    .expect("in bounds");
-                black_box(mem.load(STACK_BASE - 8, size).expect("in bounds"))
-            });
+            // Fresh memory per iteration (setup): measures access, not
+            // construction — the view itself is stack-resident.
+            b.iter_batched(
+                MemoryView::default,
+                |mut mem| {
+                    mem.store(STACK_BASE - 8, size, black_box(0x0102_0304_0506_0708))
+                        .expect("in bounds");
+                    black_box(mem.load(STACK_BASE - 8, size).expect("in bounds"))
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
     group.finish();

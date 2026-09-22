@@ -2,6 +2,7 @@
 
 use ebpf_cfg::{Cfg, EdgeKind, Pc};
 use ebpf_isa::insn::{AluOp, Insn, JumpOp, MemSize, Operand, Reg, Width};
+use ebpf_vm::maps::MapDesc;
 use petgraph::visit::EdgeRef;
 
 use crate::refine::refine;
@@ -19,11 +20,22 @@ pub struct VerifyConfig {
     /// Whether to collect the per-PC trace. Disable for a ~60% speedup
     /// when only the verdict matters (the CLI sets this from `--trace`).
     pub collect_trace: bool,
+    /// Map descriptors (from `--maps` JSON). Empty means no maps: any
+    /// map-helper call rejects with [`VerifyError::BadMapFd`].
+    pub maps: Vec<MapDesc>,
 }
 
 impl Default for VerifyConfig {
     fn default() -> Self {
-        Self { widening_threshold: 16, collect_trace: true }
+        Self { widening_threshold: 16, collect_trace: true, maps: Vec::new() }
+    }
+}
+
+impl VerifyConfig {
+    /// Config with default widening/trace settings and `maps` installed.
+    #[must_use]
+    pub const fn with_maps(maps: Vec<MapDesc>) -> Self {
+        Self { widening_threshold: 16, collect_trace: true, maps }
     }
 }
 
@@ -82,6 +94,113 @@ impl HelperSignature for TracePrintk {
     }
 }
 
+/// Resolve `r1` to an exact fd, rejecting uninitialized registers.
+///
+/// Returns `Ok(None)` when the fd is a non-exact range that cannot be tied
+/// to a descriptor (callers degrade to `Top`); `Ok(Some(fd))` for a single
+/// concrete value, as produced by `ldimm64` in practice.
+fn map_fd(state: &VerifierState, pc: usize) -> Result<Option<i64>, VerifyError> {
+    match &state.regs[Reg(1).index()] {
+        RegType::Scalar(Range::Interval { lo, hi }) if lo == hi => Ok(Some(*lo)),
+        RegType::Scalar(_) => Ok(None),
+        RegType::NotInit => Err(VerifyError::UninitRegister { pc, reg: 1 }),
+        RegType::StackPtr { .. } | RegType::MapPtr { .. } => Err(VerifyError::TypeMismatch {
+            pc,
+            register: 1,
+            expected: "scalar file descriptor",
+            found: "pointer",
+        }),
+    }
+}
+
+/// Look up `fd` in the state's map table.
+fn map_desc(state: &VerifierState, fd: i64) -> Option<&MapDesc> {
+    usize::try_from(fd).ok().and_then(|i| state.maps.get(i)).and_then(Option::as_ref)
+}
+
+/// Validate a map key/value pointer: it must be a stack pointer whose
+/// `size` bytes are all initialized.
+///
+/// Mirrors the [`Insn::Load`] path: the VM reads these bytes unconditionally
+/// (faulting on unwritten stack), so the verifier must prove readability
+/// or reject. Non-stack pointers reject conservatively (the VM would serve
+/// scratch reads, but narrowing that is v0.8 work — reject is the sound
+/// direction for the accept-implies-safe oracle).
+fn check_map_ptr(state: &VerifierState, r: Reg, size: usize, pc: usize) -> Result<(), VerifyError> {
+    ensure_stack_ptr(state, r, pc)?;
+    let base_off = state.regs[r.index()].stack_offset().unwrap_or(0);
+    let width = u8::try_from(size).map_err(|_| VerifyError::StackOverflow { pc })?;
+    let (start, lo, hi) = byte_range(base_off, 0, width, pc)?;
+    let readable = state.stack_init.get(lo..=hi).ok_or(VerifyError::StackOverflow { pc })?;
+    if !readable.iter().all(|&b| b) {
+        return Err(VerifyError::UninitStackRead { pc, offset: start });
+    }
+    Ok(())
+}
+
+/// `bpf_map_lookup_elem` (func 1): `r1` = fd, `r2` = key pointer.
+///
+/// Returns [`RegType::MapPtr`] on a known fd. A non-exact fd range cannot
+/// be tied to a descriptor, so it degrades to `Top` (sound: the caller
+/// can do nothing precise with it). Unknown exact fds reject.
+#[derive(Debug, Clone, Copy)]
+pub struct MapLookup;
+
+impl HelperSignature for MapLookup {
+    fn effect(&self, state: &VerifierState, pc: usize) -> Result<RegType, VerifyError> {
+        let Some(fd) = map_fd(state, pc)? else {
+            return Ok(RegType::Scalar(Range::Top));
+        };
+        let Some(desc) = map_desc(state, fd) else {
+            return Err(VerifyError::BadMapFd { pc, fd });
+        };
+        check_map_ptr(state, Reg(2), desc.key_size, pc)?;
+        Ok(RegType::MapPtr { fd })
+    }
+}
+
+/// `bpf_map_update_elem` (func 2): `r1` = fd, `r2` = key, `r3` = value.
+///
+/// Returns exact `0` (success is modeled; width mismatches and flag
+/// violations are runtime `r0 = -1` in the VM, which the verifier
+/// over-approximates by accepting the call shape only).
+#[derive(Debug, Clone, Copy)]
+pub struct MapUpdate;
+
+impl HelperSignature for MapUpdate {
+    fn effect(&self, state: &VerifierState, pc: usize) -> Result<RegType, VerifyError> {
+        let Some(fd) = map_fd(state, pc)? else {
+            return Ok(RegType::Scalar(Range::Top));
+        };
+        let Some(desc) = map_desc(state, fd) else {
+            return Err(VerifyError::BadMapFd { pc, fd });
+        };
+
+        check_map_ptr(state, Reg(2), desc.key_size, pc)?;
+        check_map_ptr(state, Reg(3), desc.value_size, pc)?;
+        Ok(RegType::Scalar(Range::exact(0)))
+    }
+}
+
+/// `bpf_map_delete_elem` (func 3): `r1` = fd, `r2` = key.
+///
+/// Same contract as [`MapUpdate`].
+#[derive(Debug, Clone, Copy)]
+pub struct MapDelete;
+
+impl HelperSignature for MapDelete {
+    fn effect(&self, state: &VerifierState, pc: usize) -> Result<RegType, VerifyError> {
+        let Some(fd) = map_fd(state, pc)? else {
+            return Ok(RegType::Scalar(Range::Top));
+        };
+        let Some(desc) = map_desc(state, fd) else {
+            return Err(VerifyError::BadMapFd { pc, fd });
+        };
+        check_map_ptr(state, Reg(2), desc.key_size, pc)?;
+        Ok(RegType::Scalar(Range::exact(0)))
+    }
+}
+
 /// Registry of known helper signatures, keyed by helper id.
 ///
 /// Zero-sized: lookups are a `match` over `&'static` instances, so there
@@ -91,7 +210,8 @@ impl HelperSignature for TracePrintk {
 pub struct HelperSignatureRegistry;
 
 impl HelperSignatureRegistry {
-    /// Registry with the built-in helpers (prandom, ktime, printk).
+    /// Registry with the built-in helpers (map lookup/update/delete,
+    /// prandom, ktime, printk).
     #[must_use]
     pub const fn built_in() -> Self {
         Self
@@ -103,7 +223,13 @@ impl HelperSignatureRegistry {
         static PRANDOM: PrandomU32 = PrandomU32;
         static KTIME: KtimeNs = KtimeNs;
         static PRINTK: TracePrintk = TracePrintk;
+        static LOOKUP: MapLookup = MapLookup;
+        static UPDATE: MapUpdate = MapUpdate;
+        static DELETE: MapDelete = MapDelete;
         match func {
+            1 => Some(&LOOKUP),
+            2 => Some(&UPDATE),
+            3 => Some(&DELETE),
             43 => Some(&PRANDOM),
             5 => Some(&KTIME),
             6 => Some(&PRINTK),
@@ -128,6 +254,27 @@ pub fn verify(insns: &[Insn], cfg: &Cfg, disasm: &str) -> Result<VerifiedProgram
     verify_with_config(insns, cfg, disasm, &VerifyConfig::default())
 }
 
+/// Build the fd-indexed map table (index 0 always `None`).
+///
+/// Duplicate fds were rejected when the descriptors were built, so a
+/// second claim here keeps the first (defensive; unreachable through
+/// [`build_stores`](ebpf_vm::maps::build_stores)).
+fn build_map_table(config: &VerifyConfig) -> Vec<Option<MapDesc>> {
+    let max_fd = config.maps.iter().map(|d| d.fd).max().unwrap_or(0);
+    let table_len = usize::try_from(max_fd.max(0)).unwrap_or(0) + 1;
+    let mut table: Vec<Option<MapDesc>> = Vec::with_capacity(table_len);
+    table.resize_with(table_len, || None);
+    for desc in &config.maps {
+        if let Ok(i) = usize::try_from(desc.fd)
+            && i < table_len
+            && table[i].is_none()
+        {
+            table[i] = Some(desc.clone());
+        }
+    }
+    table
+}
+
 /// Verify with an explicit [`VerifyConfig`] (e.g. custom widening threshold).
 ///
 /// # Errors
@@ -143,10 +290,10 @@ pub fn verify_with_config(
     let disasm_lines: Vec<&str> =
         if config.collect_trace { disasm.lines().collect() } else { Vec::new() };
 
+    let map_table = build_map_table(config);
     let mut states: Vec<Option<VerifierState>> = vec![None; insns.len()];
-    states[cfg.entry.index()] = Some(VerifierState::initial());
+    states[cfg.entry.index()] = Some(VerifierState::initial_with_maps(map_table));
 
-    // Generation counters replace `processed: Vec<Option<State>>` clones.
     // `states_gen[pc]` bumps on every input change; `processed_gen[pc]`
     // records the last generation processed. Equal generations mean the
     // block was already processed with this exact input
@@ -199,7 +346,7 @@ pub fn verify_with_config(
                     pc,
                     insns: disasm_lines.get(pc).unwrap_or(&"").trim().to_string(),
                     regs: std::array::from_fn(|i| format_reg(i, &current.regs[i])),
-                    stack_init: format_stack(&current.stack, &current.stack_init),
+                    stack_init: format_stack(&current.stack_init),
                     action: describe_action(insn),
                 });
             }
@@ -278,6 +425,52 @@ fn alu_transfer(
     if let Operand::Reg(r) = src {
         ensure_init(state, r, pc)?;
     }
+    // Pointer arithmetic (64-bit only; ALU32 truncates pointers to Top
+    // via the generic path below): `mov` copies stack-pointer-ness and
+    // `add`/`sub` by a constant shift the offset. Without this,
+    // `r2 = r10; r2 -= 8` degrades to `Scalar(Top)` and every later
+    // stack access through `r2` mis-reports `TypeMismatch`.
+    if matches!(width, Width::B64) {
+        match op {
+            AluOp::Mov => {
+                if let Operand::Reg(r) = src
+                    && let RegType::StackPtr { offset } = state.regs[r.index()]
+                    && !dst.is_frame_ptr()
+                {
+                    state.regs[dst.index()] = RegType::StackPtr { offset };
+                    return Ok(());
+                }
+            }
+            AluOp::Add | AluOp::Sub => {
+                if let RegType::StackPtr { offset } = state.regs[dst.index()] {
+                    let delta: Option<i32> = match src {
+                        Operand::Imm(v) => Some(v),
+                        Operand::Reg(r) => match state.regs[r.index()] {
+                            RegType::Scalar(Range::Interval { lo, hi }) if lo == hi => {
+                                i32::try_from(lo).ok()
+                            }
+                            _ => None,
+                        },
+                    };
+                    if let Some(k) = delta {
+                        // Overflow (`sub` of `i32::MIN`) degrades to Top.
+                        let k = if matches!(op, AluOp::Sub) { k.checked_neg() } else { Some(k) };
+                        let next = k
+                            .and_then(|k| offset.checked_add(k))
+                            .map_or(RegType::Scalar(Range::Top), |off| RegType::StackPtr {
+                                offset: off,
+                            });
+                        if !dst.is_frame_ptr() {
+                            state.regs[dst.index()] = next;
+                        }
+                        return Ok(());
+                    }
+                    // Non-constant shift: fall through to Top below.
+                }
+            }
+            _ => {}
+        }
+    }
 
     let lhs = state.regs[dst.index()].scalar_range();
     let rhs = match src {
@@ -331,13 +524,21 @@ fn check_and_transfer(
             }
         }
         Insn::Load { size, dst, base, offset } => {
-            let (start, lo, hi) = check_mem_access(state, *base, *offset, *size, pc)?;
-            // Every spanned byte must be initialized — a partial store
-            // must not satisfy a later wide load (the VM faults there).
-            let readable =
-                state.stack_init.get(lo..=hi).ok_or(VerifyError::StackOverflow { pc })?;
-            if !readable.iter().all(|&b| b) {
-                return Err(VerifyError::UninitStackRead { pc, offset: start });
+            if matches!(state.regs[base.index()], RegType::MapPtr { .. }) {
+                // Map value memory: the VM serves it from scratch, so any
+                // in-bounds read succeeds. Bounds need `value_size` (v0.8);
+                // alignment is checkable now (scratch base is 8-aligned, so
+                // relative alignment coincides, as with the stack).
+                check_map_align(*offset, *size, pc)?;
+            } else {
+                let (start, lo, hi) = check_mem_access(state, *base, *offset, *size, pc)?;
+                // Every spanned byte must be initialized — a partial store
+                // must not satisfy a later wide load (the VM faults there).
+                let readable =
+                    state.stack_init.get(lo..=hi).ok_or(VerifyError::StackOverflow { pc })?;
+                if !readable.iter().all(|&b| b) {
+                    return Err(VerifyError::UninitStackRead { pc, offset: start });
+                }
             }
             if !dst.is_frame_ptr() {
                 state.regs[dst.index()] = RegType::Scalar(Range::Top);
@@ -350,12 +551,21 @@ fn check_and_transfer(
                 Operand::Reg(r) => ensure_init(state, *r, pc)?,
                 Operand::Imm(_) => {}
             }
-
-            let (_, lo, hi) = check_mem_access(state, *base, *offset, *size, pc)?;
-            state.stack_init.get_mut(lo..=hi).ok_or(VerifyError::StackOverflow { pc })?.fill(true);
-            for s in lo / 8..=hi / 8 {
-                let slot = state.stack.get_mut(s).ok_or(VerifyError::StackOverflow { pc })?;
-                *slot = RegType::Scalar(Range::Top);
+            if matches!(state.regs[base.index()], RegType::MapPtr { .. }) {
+                // Scratch is always readable/writable; alignment still
+                // enforced to match the VM.
+                check_map_align(*offset, *size, pc)?;
+            } else {
+                let (_, lo, hi) = check_mem_access(state, *base, *offset, *size, pc)?;
+                state
+                    .stack_init
+                    .get_mut(lo..=hi)
+                    .ok_or(VerifyError::StackOverflow { pc })?
+                    .fill(true);
+                for s in lo / 8..=hi / 8 {
+                    let slot = state.stack.get_mut(s).ok_or(VerifyError::StackOverflow { pc })?;
+                    *slot = RegType::Scalar(Range::Top);
+                }
             }
         }
         Insn::Jump { op: JumpOp::Always, .. } => {
@@ -400,6 +610,24 @@ fn jump_info(insn: &Insn) -> Option<(JumpOp, Reg, i64)> {
         Insn::Jump { op, dst, src: Operand::Imm(k), .. } => Some((*op, *dst, i64::from(*k))),
         _ => None,
     }
+}
+
+/// Alignment check for map-scratch accesses.
+///
+/// The scratch base is 8-aligned, so the instruction offset's alignment
+/// coincides with the absolute address's (same argument as the stack
+/// path in [`check_mem_access`]). Bounds need `value_size` and arrive
+/// in v0.8; the VM faults past-the-value reads as `OutOfBounds`.
+fn check_map_align(offset: i16, size: MemSize, pc: usize) -> Result<(), VerifyError> {
+    let width = i64::from(size.bytes());
+    if width > 1 && i64::from(offset).rem_euclid(width) != 0 {
+        return Err(VerifyError::MisalignedAccess {
+            pc,
+            offset: i32::from(offset),
+            size: size.bytes(),
+        });
+    }
+    Ok(())
 }
 
 /// Shared memory-access prologue for `Load`/`Store`.
@@ -477,6 +705,12 @@ const fn ensure_stack_ptr(state: &VerifierState, r: Reg, pc: usize) -> Result<()
             expected: "stack pointer",
             found: "scalar",
         }),
+        RegType::MapPtr { .. } => Err(VerifyError::TypeMismatch {
+            pc,
+            register: r.0,
+            expected: "stack pointer",
+            found: "map pointer",
+        }),
     }
 }
 
@@ -503,11 +737,11 @@ fn describe_action(insn: &Insn) -> String {
 }
 
 impl RegType {
-    /// Extract the scalar range, or Top for non-scalar types.
+    /// Extract the scalar range, or Top for pointer types.
     const fn scalar_range(&self) -> Range {
         match self {
             Self::Scalar(r) => *r,
-            Self::StackPtr { .. } => Range::Top,
+            Self::StackPtr { .. } | Self::MapPtr { .. } => Range::Top,
             Self::NotInit => Range::Bottom,
         }
     }

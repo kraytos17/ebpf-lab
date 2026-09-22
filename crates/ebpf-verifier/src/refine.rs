@@ -77,4 +77,39 @@ mod tests {
         let refined = refine(r, JumpOp::Lt, 10, true);
         assert_eq!(refined, Range::Bottom);
     }
+
+    #[test]
+    fn complements_normalize() {
+        let r = Range::Top;
+        // Ne taken ⟺ Eq untaken (inexpressible → unchanged).
+        assert_eq!(refine(r, JumpOp::Ne, 10, true), r);
+        assert_eq!(refine(r, JumpOp::Ne, 10, false), Range::exact(10));
+        // Ge taken ⟺ Lt untaken.
+        assert_eq!(refine(r, JumpOp::Ge, 10, true), Range::Interval { lo: 10, hi: i64::MAX });
+        assert_eq!(refine(r, JumpOp::Ge, 10, false), Range::Interval { lo: i64::MIN, hi: 9 });
+        // Gt taken ⟺ Le untaken.
+        assert_eq!(refine(r, JumpOp::Gt, 10, true), Range::Interval { lo: 11, hi: i64::MAX });
+        assert_eq!(refine(r, JumpOp::Gt, 10, false), Range::Interval { lo: i64::MIN, hi: 10 });
+        // Signed twins normalize the same way.
+        assert_eq!(refine(r, JumpOp::Sge, 10, true), Range::Interval { lo: 10, hi: i64::MAX });
+        assert_eq!(refine(r, JumpOp::Sgt, 10, false), Range::Interval { lo: i64::MIN, hi: 10 });
+    }
+
+    #[test]
+    fn inexpressible_keeps_range() {
+        let r = Range::Interval { lo: 0, hi: 200 };
+        assert_eq!(refine(r, JumpOp::Eq, 10, false), r);
+        assert_eq!(refine(r, JumpOp::Set, 10, true), r);
+        assert_eq!(refine(r, JumpOp::Set, 10, false), r);
+        assert_eq!(refine(r, JumpOp::Always, 0, true), r);
+    }
+
+    #[test]
+    fn le_sle_arms() {
+        let r = Range::Top;
+        assert_eq!(refine(r, JumpOp::Le, 10, true), Range::Interval { lo: i64::MIN, hi: 10 });
+        assert_eq!(refine(r, JumpOp::Le, 10, false), Range::Interval { lo: 11, hi: i64::MAX });
+        assert_eq!(refine(r, JumpOp::Slt, 10, true), Range::Interval { lo: i64::MIN, hi: 9 });
+        assert_eq!(refine(r, JumpOp::Sle, 10, false), Range::Interval { lo: 11, hi: i64::MAX });
+    }
 }

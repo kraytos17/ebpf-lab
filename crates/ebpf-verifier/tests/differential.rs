@@ -8,7 +8,10 @@
 
 use ebpf_vm::{Vm, VmError};
 use proptest::prelude::*;
-use std::path::PathBuf;
+
+mod common;
+
+use common::maps::test_maps;
 
 const ACCEPT_FIXTURES: &[&str] = &[
     "mov_exit",
@@ -21,20 +24,31 @@ const ACCEPT_FIXTURES: &[&str] = &[
     "loop_1000_iters",
     "helper_prandom",
     "helper_ktime",
+    "helper_printk",
+    "endian",
 ];
 
 fn load_fixture(name: &str) -> Vec<ebpf_isa::Insn> {
-    let path: PathBuf =
-        [env!("CARGO_MANIFEST_DIR"), "..", "..", "tests", "fixtures", &format!("{name}.bin")]
-            .iter()
-            .collect();
-    let bytes = std::fs::read(path).unwrap();
-    ebpf_isa::decode_program(&bytes).unwrap()
+    common::fixtures::decode_fixture(&format!("{name}.bin"))
 }
 
 fn vm_memory_clean(insns: &[ebpf_isa::Insn]) -> bool {
     let mut vm = Vm::new(insns.to_vec());
     !matches!(vm.run(10_000), Err(VmError::Memory(_)))
+}
+
+#[test]
+fn map_fixtures_verify_and_run_memory_clean() {
+    for name in ["map_hash_lookup", "map_array_update"] {
+        let insns = load_fixture(name);
+        let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+        let disasm = ebpf_disasm::disassemble(&insns);
+        let config = ebpf_verifier::VerifyConfig::with_maps(test_maps());
+        ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config)
+            .unwrap_or_else(|e| panic!("{name} should verify: {e}"));
+        let mut vm = Vm::new_with_maps(insns, test_maps()).unwrap();
+        assert!(!matches!(vm.run(10_000), Err(VmError::Memory(_))), "{name} faulted with MemError");
+    }
 }
 
 #[test]
@@ -94,6 +108,16 @@ fn arb_raw() -> impl Strategy<Value = Raw> {
         2 => (arb_reg(), arb_reg())
             .prop_map(|(dst, src)| Raw { op: 0x0f, dst, src, off: 0, imm: 0 }),
         2 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0x07, dst, src: 0, off: 0, imm }),
+        // Bitwise ALU (reg + imm): exercises the verifier's BitAnd/BitOr/
+        // BitXor transfer paths, previously reachable only by hand-written
+        // fixtures. Opcodes: ALU64 class, Or=0x4 / And=0x5 / Xor=0xa nibble.
+        1 => (arb_reg(), arb_reg())
+            .prop_map(|(dst, src)| Raw { op: 0x4f, dst, src, off: 0, imm: 0 }),
+        1 => (arb_reg(), arb_reg())
+            .prop_map(|(dst, src)| Raw { op: 0x5f, dst, src, off: 0, imm: 0 }),
+        1 => (arb_reg(), arb_reg())
+            .prop_map(|(dst, src)| Raw { op: 0xaf, dst, src, off: 0, imm: 0 }),
+        1 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0x47, dst, src: 0, off: 0, imm }),
         1 => (arb_reg(), arb_mem_base(), arb_stack_off())
             .prop_map(|(dst, base, off)| Raw { op: 0x79, dst, src: base, off, imm: 0 }),
         1 => (arb_mem_base(), arb_reg(), arb_stack_off())

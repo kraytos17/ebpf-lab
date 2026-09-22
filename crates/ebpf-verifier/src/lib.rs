@@ -27,12 +27,13 @@ mod verify;
 
 use thiserror::Error;
 
+pub use ebpf_vm::maps::{MapDesc, MapError, MapType};
 pub use refine::refine;
 pub use state::{Range, RegType, StackSlot, VerifierState};
 pub use trace::{RegSummary, StackSummary, TraceEntry};
 pub use verify::{
-    HelperSignature, HelperSignatureRegistry, KtimeNs, PrandomU32, TracePrintk, VerifyConfig,
-    verify, verify_with_config,
+    HelperSignature, HelperSignatureRegistry, KtimeNs, MapDelete, MapLookup, MapUpdate, PrandomU32,
+    TracePrintk, VerifyConfig, verify, verify_with_config,
 };
 
 /// A successfully verified program with per-PC state snapshots.
@@ -45,7 +46,11 @@ pub struct VerifiedProgram {
 }
 
 /// Verification failure.
+///
+/// `#[non_exhaustive]` so future verifier stages (pointer bounds,
+/// resource tracking) can add variants without breaking matches.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum VerifyError {
     /// Register used before initialization.
     #[error("uninitialized register r{reg} at pc {pc}")]
@@ -92,6 +97,15 @@ pub enum VerifyError {
         pc: usize,
         /// Helper function id.
         func: u32,
+    },
+
+    /// Map file descriptor is unknown (not in the `--maps` table).
+    #[error("bad map fd {fd} at pc {pc}")]
+    BadMapFd {
+        /// PC of the call instruction.
+        pc: usize,
+        /// Offending descriptor value.
+        fd: i64,
     },
 
     /// Multi-byte access at a naturally-unaligned address.

@@ -5,7 +5,10 @@
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use tracing::info;
 
 /// An eBPF laboratory: inspect, verify, execute, optimize.
@@ -51,6 +54,9 @@ enum Command {
         /// Print each step (instruction plus changed registers).
         #[arg(long)]
         trace: bool,
+        /// Path to a `--maps` JSON file (map descriptors with initial values).
+        #[arg(long)]
+        maps: Option<PathBuf>,
     },
     /// Verify the program statically (interval analysis, widening for loops).
     Verify {
@@ -63,6 +69,9 @@ enum Command {
         /// Widening threshold: max loop-header re-joins before widening fires.
         #[arg(long, default_value_t = 16)]
         max_iterations: usize,
+        /// Path to a `--maps` JSON file (map descriptors with initial values).
+        #[arg(long)]
+        maps: Option<PathBuf>,
     },
 }
 
@@ -72,6 +81,18 @@ enum Command {
 struct ProgramInput {
     /// Path to a `.o` ELF object or a flat `.bin` of raw instructions.
     path: PathBuf,
+}
+
+/// Load map descriptors from a `--maps` JSON file.
+///
+/// Returns an empty vec when `path` is `None` (no maps: map-helper calls
+/// reject). Validation (duplicate fds, bad sizes) happens when the table
+/// is built downstream, so errors there name the real problem.
+fn load_maps(path: Option<&PathBuf>) -> anyhow::Result<Vec<ebpf_vm::MapDesc>> {
+    let Some(path) = path else { return Ok(Vec::new()) };
+    let json = fs::read_to_string(path)
+        .with_context(|| format!("reading maps file `{}`", path.display()))?;
+    serde_json::from_str(&json).with_context(|| format!("parsing maps file `{}`", path.display()))
 }
 
 /// Load programs from `path`, accepting either ELF `.o` or flat `.bin`.
@@ -153,9 +174,18 @@ fn cmd_cfg(path: &Path, dot: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn cmd_verify(path: &Path, trace: bool, max_iterations: usize) -> anyhow::Result<()> {
-    let config =
-        ebpf_verifier::VerifyConfig { widening_threshold: max_iterations, collect_trace: trace };
+fn cmd_verify(
+    path: &Path,
+    trace: bool,
+    max_iterations: usize,
+    maps: Option<&PathBuf>,
+) -> anyhow::Result<()> {
+    let config = ebpf_verifier::VerifyConfig {
+        widening_threshold: max_iterations,
+        collect_trace: trace,
+        maps: load_maps(maps)?,
+    };
+
     for prog in &load_decoded(path)? {
         let insns = &prog.insns;
         let cfg = ebpf_cfg::build_cfg(insns)
@@ -182,10 +212,22 @@ fn cmd_verify(path: &Path, trace: bool, max_iterations: usize) -> anyhow::Result
 /// Default step budget for `run` (bounds infinite loops).
 const DEFAULT_MAX_STEPS: usize = 1_000_000;
 
-fn cmd_run(path: &Path, trace: bool) -> anyhow::Result<()> {
+fn cmd_run(path: &Path, trace: bool, maps: Option<&PathBuf>) -> anyhow::Result<()> {
     use ebpf_vm::StepResult;
+    let descs = load_maps(maps)?;
+    let stores = if descs.is_empty() {
+        Vec::new()
+    } else {
+        ebpf_vm::maps::build_stores(descs).with_context(|| "installing maps")?
+    };
+
     for prog in load_decoded(path)? {
-        let mut vm = ebpf_vm::Vm::new(prog.insns);
+        let mut vm = if stores.is_empty() {
+            ebpf_vm::Vm::new(prog.insns)
+        } else {
+            ebpf_vm::Vm::new_with_stores(prog.insns, stores.clone())
+        };
+
         if !trace {
             match vm.run(DEFAULT_MAX_STEPS) {
                 Ok(code) => println!("exit: {code}"),
@@ -240,9 +282,9 @@ fn main() -> anyhow::Result<()> {
         Command::Inspect { input } => cmd_inspect(&input.path),
         Command::Disasm { input } => cmd_disasm(&input.path),
         Command::Cfg { input, dot } => cmd_cfg(&input.path, *dot),
-        Command::Run { input, trace } => cmd_run(&input.path, *trace),
-        Command::Verify { input, trace, max_iterations } => {
-            cmd_verify(&input.path, *trace, *max_iterations)
+        Command::Run { input, trace, maps } => cmd_run(&input.path, *trace, maps.as_ref()),
+        Command::Verify { input, trace, max_iterations, maps } => {
+            cmd_verify(&input.path, *trace, *max_iterations, maps.as_ref())
         }
     }
 }

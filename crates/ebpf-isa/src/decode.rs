@@ -128,6 +128,7 @@ fn decode_operand(raw: RawInsn) -> Result<Operand, DecodeError> {
 mod tests {
     use super::*;
     use crate::insn::{AluOp, JumpOp, MemSize};
+    use proptest::prelude::*;
 
     fn word(opcode: u8, regs: u8, offset: i16, imm: i32) -> [u8; 8] {
         RawInsn { opcode, regs, offset, imm }.to_bytes()
@@ -210,5 +211,46 @@ mod tests {
     #[test]
     fn rejects_truncated_tail() {
         assert!(matches!(decode_program(&[0xb7, 0x00, 0]), Err(DecodeError::Truncated { .. })));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// Wire format roundtrip: bytes survive decode-agnostic encode.
+        #[test]
+        fn raw_bytes_roundtrip(b in prop::array::uniform8(0u8..)) {
+            let raw = RawInsn::from_bytes(&b);
+            let back: [u8; 8] = raw.into();
+            prop_assert_eq!(back, b);
+        }
+
+        /// The fuzz target's contract, pinned as a unit test: arbitrary
+        /// bytes decode to `Ok` or `Err`, never panic. Single slots only
+        /// (multi-slot `ld_imm_dw` needs 16 aligned bytes).
+        #[test]
+        fn decode_never_panics(b in prop::array::uniform8(0u8..)) {
+            let _ = decode_program(&b);
+        }
+
+        /// Decoded single-slot programs re-encode to identical length:
+        /// no instruction silently consumes a second slot.
+        #[test]
+        fn single_slot_length_stable(
+            op in 0u8..,
+            regs in 0u8..,
+            off in prop::num::i16::ANY,
+            imm in prop::num::i32::ANY,
+        ) {
+            let b = [op, regs, off.to_le_bytes()[0], off.to_le_bytes()[1],
+                     imm.to_le_bytes()[0], imm.to_le_bytes()[1],
+                     imm.to_le_bytes()[2], imm.to_le_bytes()[3]];
+            // ld_imm_dw takes two slots; everything else takes one.
+            if op == opcode::LD_IMM_DW {
+                return Ok(());
+            }
+            if let Ok(insns) = decode_program(&b) {
+                prop_assert_eq!(insns.len(), 1);
+            }
+        }
     }
 }

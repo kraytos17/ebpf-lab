@@ -11,6 +11,7 @@ documentation = "https://docs.rs/ebpf-vm"
 
 [dependencies]
 ebpf-isa.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

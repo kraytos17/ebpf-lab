@@ -1,6 +1,6 @@
 [package]
 name = "ebpf-verifier"
-description = "Academic-clean eBPF verifier (interval lattice, widening, typed helpers)"
+description = "Academic-clean eBPF verifier (interval lattice, widening, typed + map helpers)"
 keywords = ["ebpf", "bpf", "verifier", "abstract-interpretation"]
 version.workspace = true
 edition.workspace = true
@@ -14,14 +14,20 @@ documentation = "https://docs.rs/ebpf-verifier"
 ebpf-isa.workspace = true
 ebpf-cfg.workspace = true
 ebpf-disasm.workspace = true
+ebpf-vm.workspace = true
 petgraph.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-ebpf-vm.workspace = true
+criterion.workspace = true
+insta.workspace = true
 proptest.workspace = true
+
+[[bench]]
+name = "verify"
+harness = false
 
 [lints]
 workspace = true

@@ -2,15 +2,19 @@ name: fuzz
 on:
   push:
     branches: [main]
-    paths: ["crates/ebpf-isa/**", "crates/ebpf-cfg/**", "crates/ebpf-disasm/**", "crates/ebpf-verifier/**", "fuzz/**"]
+    paths: ["crates/ebpf-isa/**", "crates/ebpf-cfg/**", "crates/ebpf-disasm/**", "crates/ebpf-verifier/**", "crates/ebpf-vm/**", "fuzz/**"]
   pull_request:
-    paths: ["crates/ebpf-isa/**", "crates/ebpf-cfg/**", "crates/ebpf-disasm/**", "crates/ebpf-verifier/**", "fuzz/**"]
+    paths: ["crates/ebpf-isa/**", "crates/ebpf-cfg/**", "crates/ebpf-disasm/**", "crates/ebpf-verifier/**", "crates/ebpf-vm/**", "fuzz/**"]
   schedule:
     - cron: "0 4 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
