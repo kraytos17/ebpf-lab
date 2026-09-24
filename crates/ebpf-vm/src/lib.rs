@@ -452,6 +452,12 @@ impl Vm {
     // truncating nor sign-losing.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn read_guest_bytes(&self, addr: i64, len: usize) -> Result<Vec<u8>, VmError> {
+        // Fast path: 8-byte aligned, exactly 8 bytes -> single Dw load.
+        if len == 8 && addr.trailing_zeros() >= 3 {
+            let v: u64 = self.memory.load(addr, MemSize::Dw)?.cast_unsigned();
+            return Ok(v.to_le_bytes()[..len].to_vec());
+        }
+
         let mut out = Vec::with_capacity(len);
         let mut a = addr;
         for _ in 0..len {

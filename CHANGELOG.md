@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [0.9.0] - 2026-09-25
 
 ### Added
 
@@ -31,6 +31,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   CLI accept/reject/run pins for the new fixtures (incl. the misaligned
   diagnostic); shared `verify_map_bytes` harness for the inline map
   tests; verify bench now measures the guarded map access.
+- `Display` impls for ISA types (`Width`, `MemSize`, `AluOp`, `JumpOp`,
+  `Endian`), CFG types (`Pc`, `Slot`), and verifier types (`Range`,
+  `RegType`). `Insn::Display` simplified to use these traits directly.
 
 ### Changed
 
@@ -82,6 +85,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Bench methodology tightened: README baselines now use `--measurement-time
   3 --sample-size 200 --warm-up-time 1` (was 1s/10/0.1s); CI widths
   dropped from ±10–15% to ±0.5–2%.
+- Verifier worklist: RPO initial seeding (precomputed in `Cfg`), FIFO
+  propagation via `VecDeque`; `states_gen`/`processed_gen` narrowed to
+  `u32`. **verify/arith/verdict: ~175 ns** (stable).
+- `Range::Shr`: precise interval for constant shifts (was unconditionally
+  `Top`). `Range::widen` made `const`; returns `Top` when both bounds
+  hit extremes.
+- `decode_one`: three equality compares replaced by single `match`.
+- `read_guest_bytes`: aligned 8-byte `Dw` fast path for 8-byte keys.
+- `DiGraph::with_capacity` pre-allocates in `build_cfg`.
 
 ## [0.7.0] - 2026-09-23
 
@@ -390,3 +402,4 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 [0.5.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.5.0
 [0.6.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.6.0
 [0.7.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.7.0
+[0.9.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.9.0

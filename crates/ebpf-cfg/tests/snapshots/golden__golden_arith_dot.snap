@@ -1,5 +1,6 @@
 ---
 source: crates/ebpf-cfg/tests/golden.rs
+assertion_line: 33
 expression: "dot_fixture(\"arith.bin\")"
 ---
 digraph cfg {
