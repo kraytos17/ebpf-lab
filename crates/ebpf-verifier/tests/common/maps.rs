@@ -13,7 +13,7 @@
 pub fn test_maps() -> Vec<ebpf_verifier::MapDesc> {
     use std::collections::BTreeMap;
     let mut initial = BTreeMap::new();
-    initial.insert("01000000".to_string(), "0A00000000000000".to_string());
+    initial.insert(vec![1, 0, 0, 0], vec![10, 0, 0, 0, 0, 0, 0, 0]);
     vec![
         ebpf_verifier::MapDesc {
             fd: 1,

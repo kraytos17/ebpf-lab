@@ -12,8 +12,10 @@ mod fixtures;
 fn trace_json(name: &str) -> String {
     let insns = fixtures::decode_fixture(name);
     let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
-    let disasm = ebpf_disasm::disassemble(&insns);
-    ebpf_verifier::verify(&insns, &cfg, &disasm).unwrap().to_json().unwrap()
+    ebpf_verifier::verify_traced(&insns, &cfg, &ebpf_verifier::VerifyConfig::default())
+        .unwrap()
+        .to_json()
+        .unwrap()
 }
 
 fn trace_json_maps(name: &str) -> String {
@@ -21,9 +23,8 @@ fn trace_json_maps(name: &str) -> String {
     mod maps;
     let insns = fixtures::decode_fixture(name);
     let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
-    let disasm = ebpf_disasm::disassemble(&insns);
     let config = ebpf_verifier::VerifyConfig::with_maps(maps::test_maps());
-    ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config).unwrap().to_json().unwrap()
+    ebpf_verifier::verify_traced(&insns, &cfg, &config).unwrap().to_json().unwrap()
 }
 
 #[test]
@@ -52,6 +53,14 @@ fn trace_schema_loop() {
 
 #[test]
 fn trace_schema_map_ptr() {
-    // Pins `map_ptr` register rendering (r0 after a hash lookup hit).
+    // Pins `maybe_map_ptr` register rendering (r0 after a hash lookup,
+    // before any null check).
     insta::assert_snapshot!(trace_json_maps("map_hash_lookup.bin"));
+}
+
+#[test]
+fn trace_schema_map_guarded() {
+    // Pins both nullable and proven states: `maybe_map_ptr` after lookup,
+    // scalar zero on the null edge, `map_ptr` on the guarded access path.
+    insta::assert_snapshot!(trace_json_maps("map_guarded_value_access.bin"));
 }

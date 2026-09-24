@@ -5,6 +5,63 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Verifier nullable map pointers: `bpf_map_lookup_elem` returns
+  `RegType::MaybeMapPtr { fd }`; immediate `== 0` / `!= 0` checks refine it
+  to a scalar zero or a proven `RegType::MapPtr { fd }` on each edge.
+  Dereferencing without a null check rejects with the new
+  `VerifyError::NullMapPtrAccess`. Joins weaken correctly (proven +
+  nullable stays nullable); trace renders `maybe_map_ptr` vs `map_ptr`.
+- Verifier map-value bounds: loads/stores through a proven `MapPtr` are
+  checked against the descriptor's `value_size` (checked conversion and
+  addition, no `as` casts), bounds before alignment to mirror the VM, with
+  the new `VerifyError::MapValueOutOfBounds`. `MisalignedAccess` docs now
+  say pointer-relative instead of r10-relative.
+- Fixtures: `map_guarded_value_access.bin` (accepted, exit 4660),
+  `map_lookup_null_load.bin`, `map_value_oob.bin`,
+  `map_value_misaligned.bin`; verifier/VM agreement pinned per fixture
+  (each rejection faults with the matching `MemError`).
+- Tests: nullable join/refinement/merge unit and integration coverage,
+  `refine_reg` truth-table unit tests (Eq/Ne-vs-zero edges, untouched
+  comparisons, proven-pointer preservation, scalar interval meet),
+  bounds-before-alignment ordering pin (access failing both checks must
+  report `MapValueOutOfBounds`), `jne`-guard acceptance, nullable-merge
+  rejection, negative-offset rejection, guarded trace snapshot,
+  CLI accept/reject/run pins for the new fixtures (incl. the misaligned
+  diagnostic); shared `verify_map_bytes` harness for the inline map
+  tests; verify bench now measures the guarded map access.
+
+### Changed
+
+- **BREAKING** `ebpf_verifier::verify` / `verify_with_config` no longer
+  take a `disasm: &str`: the trace's disassembly is rendered and split
+  once inside the verifier from the same instruction stream it checks
+  (callers can no longer feed a mismatched string; verdict-only runs
+  build none). Workspace callers, benches, fuzz, and doctests updated.
+- **BREAKING** `MapDesc.initial` is now `BTreeMap<Vec<u8>, Vec<u8>>` —
+  raw bytes in the domain type, hex↔bytes codec at the serde boundary
+  only (`hex_map`, validating `from_hex` at parse time). The `--maps`
+  JSON shape is unchanged (hex strings in listed byte order).
+- **BREAKING** `VerifyConfig` slims to semantics only
+  (`widening_threshold`, `maps`): the `collect_trace` flag is gone —
+  trace collection is an entry-point choice. New `verify_traced(insns,
+  cfg, config)` builds the per-PC trace; `verify_with_config` (and
+  default-config `verify`) are verdict-only with an empty trace. CLI
+  `--trace` behavior and the JSON schema are unchanged.
+- VM helper dispatch: `HelperRegistry` keeps built-in ids `0..=3` in
+  dense slots (direct index — no hashing on the dispatch path); ids
+  `>= 4` still hash. `empty`/`with_map_helpers`/`insert` semantics are
+  unchanged, including overriding a built-in id.
+- `MapStore::LruArray` recency index: a `BTreeMap<u64, Vec<u8>>` stamp
+  order plus a `HashMap` reverse index replace the `VecDeque`, turning
+  the O(n)-per-hit `touch`/`touch_remove` scans into O(log n) and
+  keeping eviction O(log n).
+- Verifier worklist propagation extracted into `refine_edge` /
+  `merge_successor`; the final successor edge **moves** the block-exit
+  state instead of cloning it (a single-successor visit propagates with
+  zero state clones — one fewer full-state copy per visit).
+
 ## [0.7.0] - 2026-09-23
 
 ### Added

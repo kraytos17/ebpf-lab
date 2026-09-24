@@ -11,7 +11,6 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4.13"
 ebpf-isa = { path = "../crates/ebpf-isa" }
 ebpf-cfg = { path = "../crates/ebpf-cfg" }
-ebpf-disasm = { path = "../crates/ebpf-disasm" }
 ebpf-verifier = { path = "../crates/ebpf-verifier" }
 
 [[bin]]

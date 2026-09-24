@@ -150,6 +150,64 @@ fn verify_maps_bad_fd_rejected() {
 }
 
 #[test]
+fn verify_maps_guarded_value_access() {
+    let out = run_ok(&[
+        "verify",
+        "--maps",
+        &fixture("maps_example.json").to_string_lossy(),
+        &fixture("map_guarded_value_access.bin").to_string_lossy(),
+    ]);
+    assert!(out.contains("verified:"), "out: {out}");
+}
+
+#[test]
+fn verify_maps_null_deref_rejected() {
+    let out = run_ok(&[
+        "verify",
+        "--maps",
+        &fixture("maps_example.json").to_string_lossy(),
+        &fixture("map_lookup_null_load.bin").to_string_lossy(),
+    ]);
+    assert!(out.contains("rejected:"), "out: {out}");
+    assert!(out.contains("null map pointer access"), "out: {out}");
+}
+
+#[test]
+fn verify_maps_value_oob_rejected() {
+    let out = run_ok(&[
+        "verify",
+        "--maps",
+        &fixture("maps_example.json").to_string_lossy(),
+        &fixture("map_value_oob.bin").to_string_lossy(),
+    ]);
+    assert!(out.contains("rejected:"), "out: {out}");
+    assert!(out.contains("map value out of bounds"), "out: {out}");
+}
+
+#[test]
+fn verify_maps_misaligned_rejected() {
+    let out = run_ok(&[
+        "verify",
+        "--maps",
+        &fixture("maps_example.json").to_string_lossy(),
+        &fixture("map_value_misaligned.bin").to_string_lossy(),
+    ]);
+    assert!(out.contains("rejected:"), "out: {out}");
+    assert!(out.contains("misaligned 4-byte access"), "out: {out}");
+}
+
+#[test]
+fn run_maps_guarded_value_access() {
+    let out = run_ok(&[
+        "run",
+        "--maps",
+        &fixture("maps_example.json").to_string_lossy(),
+        &fixture("map_guarded_value_access.bin").to_string_lossy(),
+    ]);
+    assert!(out.contains("exit: 4660"), "out: {out}");
+}
+
+#[test]
 fn run_maps_update_exits_zero() {
     let out = run_ok(&[
         "run",

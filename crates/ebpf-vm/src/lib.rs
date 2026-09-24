@@ -124,30 +124,55 @@ pub type RunOutcome = Result<i64, VmError>;
 pub type HelperFn = fn(&mut Vm) -> StepResult;
 
 /// Registry of helper implementations, keyed by helper id.
+///
+/// Ids `0..=3` (the kernel's built-in range) live in dense slots — a
+/// direct index, no hashing on the dispatch path — while higher ids hash
+/// as before. [`insert`](Self::insert) routes by id, so overriding a
+/// built-in id behaves exactly like the previous single-map registry.
 #[derive(Debug, Default)]
-pub struct HelperRegistry(HashMap<u32, HelperFn>);
+pub struct HelperRegistry {
+    /// Dense slots for ids `0..=3` (`None` = unknown helper).
+    low: [Option<HelperFn>; 4],
+    /// Custom helpers for ids `>= 4`.
+    high: HashMap<u32, HelperFn>,
+}
 
 impl HelperRegistry {
     /// Empty registry. Unknown helpers fault with [`VmError::UnknownHelper`].
     #[must_use]
     pub fn empty() -> Self {
-        Self(HashMap::new())
+        Self::default()
     }
 
     /// Registry with the map helpers (`bpf_map_lookup_elem` = 1,
     /// `bpf_map_update_elem` = 2, `bpf_map_delete_elem` = 3).
     #[must_use]
     pub fn with_map_helpers() -> Self {
-        let mut r = Self(HashMap::new());
+        let mut r = Self::default();
         r.insert(1, helper_map_lookup);
         r.insert(2, helper_map_update);
         r.insert(3, helper_map_delete);
         r
     }
 
+    /// Look up a helper implementation (direct index for ids `0..=3`,
+    /// hashed for the rest).
+    #[must_use]
+    pub fn get(&self, func: u32) -> Option<HelperFn> {
+        usize::try_from(func)
+            .ok()
+            .filter(|&i| i < self.low.len())
+            .map_or_else(|| self.high.get(&func).copied(), |i| self.low[i])
+    }
+
     /// Register one helper implementation.
     pub fn insert(&mut self, func: u32, helper: HelperFn) {
-        self.0.insert(func, helper);
+        match usize::try_from(func) {
+            Ok(i) if i < self.low.len() => self.low[i] = Some(helper),
+            _ => {
+                self.high.insert(func, helper);
+            }
+        }
     }
 }
 
@@ -402,7 +427,9 @@ impl Vm {
 
     #[cold]
     fn dispatch_helper(&mut self, func: u32) -> StepResult {
-        self.helpers.0.get(&func).copied().map_or_else(
+        // Dense slot for built-in ids 0..=3 (no hashing), hash only for
+        // custom ids — see `HelperRegistry::get`.
+        self.helpers.get(func).map_or_else(
             || StepResult::Error(VmError::UnknownHelper { func }),
             |helper| helper(self),
         )
@@ -798,7 +825,7 @@ mod tests {
     fn helper_test_maps() -> Vec<MapDesc> {
         use std::collections::BTreeMap;
         let mut initial = BTreeMap::new();
-        initial.insert("01000000".to_string(), "0A00000000000000".to_string());
+        initial.insert(vec![1, 0, 0, 0], vec![10, 0, 0, 0, 0, 0, 0, 0]);
         vec![MapDesc {
             fd: 1,
             map_type: MapType::Hash,

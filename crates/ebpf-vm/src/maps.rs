@@ -11,7 +11,7 @@
 //! re-checks them so a hand-built store cannot be misused.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use thiserror::Error;
 
@@ -52,10 +52,50 @@ pub struct MapDesc {
     pub value_size: usize,
     /// Capacity (entries for hashes, slots for arrays).
     pub max_entries: usize,
-    /// Pre-populated entries: hex key → hex value (both zero-padded to
-    /// `key_size` / `value_size`). Absent means empty.
-    #[serde(default)]
-    pub initial: BTreeMap<String, String>,
+    /// Pre-populated entries: raw key bytes → raw value bytes (both sized
+    /// `key_size` / `value_size`). Absent means empty. In `--maps` JSON
+    /// these are hex strings in listed byte order; the hex↔bytes codec
+    /// lives at the serde boundary (`hex_map`), never in the domain type.
+    #[serde(default, with = "hex_map")]
+    pub initial: BTreeMap<Vec<u8>, Vec<u8>>,
+}
+
+/// Serde codec for [`MapDesc::initial`]: JSON hex strings (listed byte
+/// order, the eBPF little-endian spelling) ↔ raw byte keys and values.
+mod hex_map {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _, ser::SerializeMap as _};
+
+    use super::{from_hex, to_hex};
+
+    /// Serialize bytes as hex strings.
+    pub fn serialize<S: Serializer>(
+        map: &BTreeMap<Vec<u8>, Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut ser = serializer.serialize_map(Some(map.len()))?;
+        for (k, v) in map {
+            ser.serialize_entry(&to_hex(k), &to_hex(v))?;
+        }
+        ser.end()
+    }
+
+    /// Decode hex strings, rejecting bad digits/odd lengths at the
+    /// boundary (fail fast — `MapStore::new` still checks widths).
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, D::Error> {
+        let raw = BTreeMap::<String, String>::deserialize(deserializer)?;
+        raw.into_iter()
+            .map(|(k, v)| {
+                Ok((
+                    from_hex(&k).map_err(D::Error::custom)?,
+                    from_hex(&v).map_err(D::Error::custom)?,
+                ))
+            })
+            .collect()
+    }
 }
 
 impl fmt::Display for MapDesc {
@@ -178,6 +218,18 @@ const fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
+/// Encode bytes as uppercase hex (inverse of [`from_hex`]; the listed
+/// byte order JSON spells out — eBPF is little-endian on the wire).
+fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02X}");
+    }
+    out
+}
+
 /// Runtime map storage.
 #[derive(Debug, Clone)]
 pub enum MapStore {
@@ -201,8 +253,14 @@ pub enum MapStore {
         desc: MapDesc,
         /// Live entries.
         data: HashMap<Vec<u8>, Vec<u8>>,
-        /// Insertion/access order (front = oldest).
-        order: VecDeque<Vec<u8>>,
+        /// Recency index: stamp → key, ordered (lowest stamp = oldest,
+        /// the next eviction victim).
+        stamps: BTreeMap<u64, Vec<u8>>,
+        /// Reverse index: key → stamp, so touch/remove hit the tree
+        /// directly instead of scanning (was O(n) per lookup hit).
+        stamp_of: HashMap<Vec<u8>, u64>,
+        /// Next recency stamp (monotonically increasing; see `lru_touch`).
+        seq: u64,
     },
 }
 
@@ -232,9 +290,7 @@ impl MapStore {
         }
 
         let mut initial: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(desc.initial.len());
-        for (k_hex, v_hex) in &desc.initial {
-            let k = from_hex(k_hex)?;
-            let v = from_hex(v_hex)?;
+        for (k, v) in &desc.initial {
             if k.len() != desc.key_size {
                 return Err(MapError::KeySizeMismatch { expected: desc.key_size, got: k.len() });
             }
@@ -244,7 +300,7 @@ impl MapStore {
                     got: v.len(),
                 });
             }
-            initial.push((k, v));
+            initial.push((k.clone(), v.clone()));
         }
         if initial.len() > desc.max_entries {
             return Err(MapError::Full { max_entries: desc.max_entries });
@@ -264,12 +320,16 @@ impl MapStore {
             }
             MapType::LruArray => {
                 let mut data = HashMap::with_capacity(desc.max_entries);
-                let mut order = VecDeque::with_capacity(desc.max_entries);
+                let mut stamps = BTreeMap::new();
+                let mut stamp_of = HashMap::with_capacity(desc.max_entries);
+                let mut seq = 0u64;
                 for (k, v) in initial {
-                    order.push_back(k.clone());
+                    stamps.insert(seq, k.clone());
+                    stamp_of.insert(k.clone(), seq);
                     data.insert(k, v);
+                    seq += 1;
                 }
-                Ok(Self::LruArray { desc, data, order })
+                Ok(Self::LruArray { desc, data, stamps, stamp_of, seq })
             }
         }
     }
@@ -329,10 +389,10 @@ impl MapStore {
                 let idx = array_index(key, desc.max_entries)?;
                 Ok(Some(data[idx].as_slice()))
             }
-            Self::LruArray { data, order, .. } => {
+            Self::LruArray { data, stamps, stamp_of, seq, .. } => {
                 if data.contains_key(key) {
-                    // Touch: move to the back (most recent).
-                    touch(order, key);
+                    // Touch: stamp as most recent.
+                    lru_touch(stamps, stamp_of, seq, key);
                     Ok(data.get(key).map(Vec::as_slice))
                 } else {
                     Ok(None)
@@ -376,23 +436,21 @@ impl MapStore {
                 data[idx] = value.to_vec();
                 Ok(())
             }
-            Self::LruArray { desc, data, order } => {
+            Self::LruArray { desc, data, stamps, stamp_of, seq } => {
                 let present = data.contains_key(key);
                 match flag {
                     UpdateFlags::NoExist if present => return Err(MapError::KeyExists),
                     UpdateFlags::Exist if !present => return Err(MapError::KeyNotFound),
                     _ => {}
                 }
-                if present {
-                    touch(order, key);
-                } else {
-                    if data.len() >= desc.max_entries
-                        && let Some(old) = order.pop_front()
-                    {
-                        data.remove(&old);
-                    }
-                    order.push_back(key.to_vec());
+                if !present
+                    && data.len() >= desc.max_entries
+                    && let Some((_, old)) = stamps.pop_first()
+                {
+                    data.remove(&old);
+                    stamp_of.remove(&old);
                 }
+                lru_touch(stamps, stamp_of, seq, key);
                 data.insert(key.to_vec(), value.to_vec());
                 Ok(())
             }
@@ -414,11 +472,13 @@ impl MapStore {
                 data[idx] = vec![0u8; desc.value_size];
                 Ok(())
             }
-            Self::LruArray { data, order, .. } => {
+            Self::LruArray { data, stamps, stamp_of, .. } => {
                 if data.remove(key).is_none() {
                     return Err(MapError::KeyNotFound);
                 }
-                touch_remove(order, key);
+                if let Some(old) = stamp_of.remove(key) {
+                    stamps.remove(&old);
+                }
                 Ok(())
             }
         }
@@ -443,20 +503,24 @@ impl MapStore {
     }
 }
 
-/// Move `key` to the back of the LRU order (most recent). No-op when
-/// absent; never panics (a missing position just means nothing to move).
-fn touch(order: &mut VecDeque<Vec<u8>>, key: &[u8]) {
-    let pos = order.iter().position(|k| k.as_slice() == key);
-    if let Some(k) = pos.and_then(|p| order.remove(p)) {
-        order.push_back(k);
+/// Stamp `key` as most-recently-used in the LRU recency index: drop the
+/// stale stamp (if any), then insert a fresh one. O(log n) via the
+/// `stamps` tree plus the `stamp_of` reverse index — no linear scan (the
+/// old `VecDeque`-based touch walked the whole order per hit).
+/// `seq` only grows, so a stamp collision would need 2^64 touches.
+fn lru_touch(
+    stamps: &mut BTreeMap<u64, Vec<u8>>,
+    stamp_of: &mut HashMap<Vec<u8>, u64>,
+    seq: &mut u64,
+    key: &[u8],
+) {
+    if let Some(old) = stamp_of.remove(key) {
+        stamps.remove(&old);
     }
-}
-
-/// Remove `key` from the LRU order, if present.
-fn touch_remove(order: &mut VecDeque<Vec<u8>>, key: &[u8]) {
-    if let Some(pos) = order.iter().position(|k| k.as_slice() == key) {
-        order.remove(pos);
-    }
+    let stamp = *seq;
+    *seq += 1;
+    stamp_of.insert(key.to_vec(), stamp);
+    stamps.insert(stamp, key.to_vec());
 }
 
 /// Array key bytes → slot index (first 4 bytes, little-endian).
@@ -662,11 +726,31 @@ mod tests {
         assert_eq!(from_hex("01000000").unwrap(), vec![1, 0, 0, 0]);
         assert!(from_hex("abc").is_err());
         assert!(from_hex("zz").is_err());
+        assert_eq!(to_hex(&[1, 0, 0, 0]), "01000000");
+        assert_eq!(to_hex(&[10, 0, 0, 0, 0, 0, 0, 0]), "0A00000000000000");
+
         let mut initial = BTreeMap::new();
-        initial.insert("01000000".to_string(), "0A00000000000000".to_string());
+        initial.insert(vec![1, 0, 0, 0], vec![10, 0, 0, 0, 0, 0, 0, 0]);
         let desc = MapDesc { initial, ..hash_desc() };
         let mut m = MapStore::new(desc).unwrap();
         assert_eq!(m.lookup(&[1, 0, 0, 0]).unwrap(), Some([10, 0, 0, 0, 0, 0, 0, 0].as_slice()));
+    }
+
+    /// The `--maps` JSON contract: hex strings in listed byte order.
+    /// Deserialize validates at the boundary; serialize normalizes to
+    /// the fixture spelling (uppercase).
+    #[test]
+    fn initial_json_hex_codec() {
+        let mut initial = BTreeMap::new();
+        initial.insert(vec![1, 0, 0, 0], vec![10, 0, 0, 0, 0, 0, 0, 0]);
+        let desc = MapDesc { initial, ..hash_desc() };
+        let json = serde_json::to_string(&desc).unwrap();
+        assert!(json.contains("\"01000000\":\"0A00000000000000\""), "{json}");
+        let back: MapDesc = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, desc);
+        let bad = r#"{"fd":1,"type":"hash","key_size":4,"value_size":8,
+                     "max_entries":2,"initial":{"zz":""}}"#;
+        assert!(serde_json::from_str::<MapDesc>(bad).is_err());
     }
 
     #[test]

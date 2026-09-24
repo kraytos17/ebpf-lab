@@ -21,6 +21,7 @@ ebpf-cfg.workspace = true
 petgraph.workspace = true
 insta.workspace = true
 proptest.workspace = true
+serde_json.workspace = true
 
 [[bench]]
 name = "vm"

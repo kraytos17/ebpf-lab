@@ -335,6 +335,10 @@ mod tests {
             include_bytes!("../../../tests/fixtures/map_hash_lookup.bin").as_slice(),
             include_bytes!("../../../tests/fixtures/map_array_update.bin").as_slice(),
             include_bytes!("../../../tests/fixtures/map_bad_fd.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/map_guarded_value_access.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/map_lookup_null_load.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/map_value_oob.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/map_value_misaligned.bin").as_slice(),
         ] {
             let exec = load(&decode_bytes(bytes));
             assert!(!exec.iter().any(|e| matches!(e, ExecInsn::Trap(_))), "trap lowered");

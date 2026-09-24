@@ -16,8 +16,18 @@ fn verify_fixture(
 ) -> Result<ebpf_verifier::VerifiedProgram, ebpf_verifier::VerifyError> {
     let insns = fixture(name);
     let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
-    let disasm = ebpf_disasm::disassemble(&insns);
-    verify(&insns, &cfg, &disasm)
+    verify(&insns, &cfg)
+}
+
+/// Verify hand-assembled bytes with the shared test maps installed.
+///
+/// The inline map tests differ only in their byte payload; the
+/// decode → cfg → `with_maps` harness lives here once.
+fn verify_map_bytes(bytes: &[u8]) -> Result<ebpf_verifier::VerifiedProgram, VerifyError> {
+    let insns = ebpf_isa::decode_program(bytes).unwrap();
+    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+    let config = ebpf_verifier::VerifyConfig::with_maps(test_maps());
+    ebpf_verifier::verify_with_config(&insns, &cfg, &config)
 }
 
 #[test]
@@ -76,11 +86,7 @@ fn rejects_map_call_with_uninit_fd() {
         0x85u8, 0, 0, 0, 1, 0, 0, 0, // call 1
         0x95, 0, 0, 0, 0, 0, 0, 0, // exit
     ];
-    let insns = ebpf_isa::decode_program(&bytes).unwrap();
-    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
-    let disasm = ebpf_disasm::disassemble(&insns);
-    let config = ebpf_verifier::VerifyConfig::with_maps(test_maps());
-    let err = ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config).unwrap_err();
+    let err = verify_map_bytes(&bytes).unwrap_err();
     assert!(matches!(err, VerifyError::UninitRegister { reg: 1, .. }), "unexpected: {err}");
 }
 
@@ -92,11 +98,7 @@ fn rejects_map_call_with_pointer_fd() {
         0x85, 0, 0, 0, 1, 0, 0, 0, // call 1
         0x95, 0, 0, 0, 0, 0, 0, 0, // exit
     ];
-    let insns = ebpf_isa::decode_program(&bytes).unwrap();
-    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
-    let disasm = ebpf_disasm::disassemble(&insns);
-    let config = ebpf_verifier::VerifyConfig::with_maps(test_maps());
-    let err = ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config).unwrap_err();
+    let err = verify_map_bytes(&bytes).unwrap_err();
     assert!(matches!(err, VerifyError::TypeMismatch { .. }), "unexpected: {err}");
 }
 
@@ -116,32 +118,22 @@ fn fuzzy_fd_degrades_to_top() {
         0x85, 0, 0, 0, 1, 0, 0, 0, // call 1
         0x95, 0, 0, 0, 0, 0, 0, 0, // exit
     ];
-    let insns = ebpf_isa::decode_program(&bytes).unwrap();
-    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
-    let disasm = ebpf_disasm::disassemble(&insns);
-    let config = ebpf_verifier::VerifyConfig::with_maps(test_maps());
-    ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config)
-        .expect("fuzzy fd should degrade gracefully");
+    verify_map_bytes(&bytes).expect("fuzzy fd should degrade gracefully");
 }
 
 #[test]
 fn no_trace_verdict_matches() {
-    // `collect_trace = false` must not change accept/reject: same PCs,
-    // empty trace.
+    // The trace entry point must not change accept/reject: same PCs,
+    // populated vs empty trace.
     for name in ["mov_exit.bin", "loop.bin", "loop_1000_iters.bin", "helper_prandom.bin"] {
         let insns = fixture(name);
         let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
-        let disasm = ebpf_disasm::disassemble(&insns);
-        let traced = verify(&insns, &cfg, &disasm).expect("should verify");
-        let config = ebpf_verifier::VerifyConfig {
-            widening_threshold: 16,
-            collect_trace: false,
-            maps: Vec::new(),
-        };
-
-        let untraced = ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config)
-            .expect("should verify without trace");
+        let traced =
+            ebpf_verifier::verify_traced(&insns, &cfg, &ebpf_verifier::VerifyConfig::default())
+                .expect("should verify");
+        let untraced = verify(&insns, &cfg).expect("should verify without trace");
         assert_eq!(traced.total_pc, untraced.total_pc, "{name} pc count diverged");
+        assert!(!traced.trace.is_empty(), "{name} trace should be populated");
         assert!(untraced.trace.is_empty(), "{name} trace should be empty");
     }
 }
@@ -152,15 +144,44 @@ fn verify_fixture_with_maps(
 ) -> Result<ebpf_verifier::VerifiedProgram, ebpf_verifier::VerifyError> {
     let insns = fixture(name);
     let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
-    let disasm = ebpf_disasm::disassemble(&insns);
     let config = ebpf_verifier::VerifyConfig::with_maps(maps);
-    ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config)
+    ebpf_verifier::verify_with_config(&insns, &cfg, &config)
 }
 
 #[test]
 fn accepts_map_hash_lookup() {
     verify_fixture_with_maps("map_hash_lookup.bin", test_maps())
         .expect("map_hash_lookup.bin should verify");
+}
+
+#[test]
+fn accepts_map_guarded_value_access() {
+    verify_fixture_with_maps("map_guarded_value_access.bin", test_maps())
+        .expect("map_guarded_value_access.bin should verify");
+}
+
+#[test]
+fn rejects_map_null_load() {
+    assert!(matches!(
+        verify_fixture_with_maps("map_lookup_null_load.bin", test_maps()),
+        Err(VerifyError::NullMapPtrAccess { register: 0, fd: 1, .. })
+    ));
+}
+
+#[test]
+fn rejects_map_value_oob() {
+    assert!(matches!(
+        verify_fixture_with_maps("map_value_oob.bin", test_maps()),
+        Err(VerifyError::MapValueOutOfBounds { fd: 1, offset: 8, size: 8, value_size: 8, .. })
+    ));
+}
+
+#[test]
+fn rejects_map_value_misaligned() {
+    assert!(matches!(
+        verify_fixture_with_maps("map_value_misaligned.bin", test_maps()),
+        Err(VerifyError::MisalignedAccess { .. })
+    ));
 }
 
 #[test]
@@ -195,15 +216,90 @@ fn rejects_map_lookup_with_uninit_key() {
         0x85, 0, 0, 0, 1, 0, 0, 0, // call 1
         0x95, 0, 0, 0, 0, 0, 0, 0, // exit
     ];
-    let insns = ebpf_isa::decode_program(&bytes).unwrap();
-    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
-    let disasm = ebpf_disasm::disassemble(&insns);
-    let config = ebpf_verifier::VerifyConfig::with_maps(test_maps());
-    let err = ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config).unwrap_err();
+    let err = verify_map_bytes(&bytes).unwrap_err();
     assert!(
         matches!(err, VerifyError::StackOverflow { .. } | VerifyError::UninitStackRead { .. }),
         "unexpected: {err}"
     );
+}
+
+#[test]
+fn rejects_map_value_oob_before_misaligned() {
+    // The access at offset 9/size 4 fails BOTH checks (end 13 > 8 and
+    // 9 % 4 != 0): the error must be `MapValueOutOfBounds`, pinning the
+    // bounds-before-alignment diagnostic order the VM uses.
+    let bytes = [
+        0x18u8, 0x01, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // ldimm r1, 1
+        0xbf, 0xa2, 0, 0, 0, 0, 0, 0, // mov r2, r10
+        0x07, 0x02, 0, 0, 0xf8, 0xff, 0xff, 0xff, // add r2, -8
+        0x62, 0x0a, 0xf8, 0xff, 1, 0, 0, 0, // stw [r10-8], 1 (key)
+        0x85, 0, 0, 0, 1, 0, 0, 0, // call 1
+        0x15, 0x00, 0x01, 0x00, 0, 0, 0, 0, // jeq r0, 0, +1 (null guard)
+        0x61, 0x03, 0x09, 0x00, 0, 0, 0, 0, // ldxw r3, [r0+9] (OOB and misaligned)
+        0x95, 0, 0, 0, 0, 0, 0, 0, // exit
+    ];
+    let err = verify_map_bytes(&bytes).unwrap_err();
+    assert!(
+        matches!(err, VerifyError::MapValueOutOfBounds { offset: 9, size: 4, value_size: 8, .. }),
+        "unexpected: {err}"
+    );
+}
+
+#[test]
+fn accepts_guarded_map_value_load_jne() {
+    // `jne r0, 0` proves non-null on the taken edge: the fallthrough is
+    // the null exit, the jump target dereferences a proven `MapPtr`.
+    let bytes = [
+        0x18u8, 0x01, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // ldimm r1, 1
+        0xbf, 0xa2, 0, 0, 0, 0, 0, 0, // mov r2, r10
+        0x07, 0x02, 0, 0, 0xf8, 0xff, 0xff, 0xff, // add r2, -8
+        0x62, 0x0a, 0xf8, 0xff, 1, 0, 0, 0, // stw [r10-8], 1 (key)
+        0x85, 0, 0, 0, 1, 0, 0, 0, // call 1
+        0x55, 0x00, 0x01, 0x00, 0, 0, 0, 0, // jne r0, 0, +1 (non-null target)
+        0x95, 0, 0, 0, 0, 0, 0, 0, // exit (null path, r0 = 0)
+        0x79, 0x03, 0x00, 0x00, 0, 0, 0, 0, // ldxdw r3, [r0+0] (guarded)
+        0xb7, 0x00, 0, 0, 0, 0, 0, 0, // mov r0, 0
+        0x95, 0, 0, 0, 0, 0, 0, 0, // exit
+    ];
+    verify_map_bytes(&bytes).expect("jne-guarded map load should verify");
+}
+
+#[test]
+fn rejects_map_access_after_nullable_merge() {
+    // One path guards the lookup, the other reaches the load unguarded:
+    // the merge is still nullable, so the shared load must reject.
+    let bytes = [
+        0x18u8, 0x01, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // ldimm r1, 1
+        0xbf, 0xa2, 0, 0, 0, 0, 0, 0, // mov r2, r10
+        0x07, 0x02, 0, 0, 0xf8, 0xff, 0xff, 0xff, // add r2, -8
+        0x62, 0x0a, 0xf8, 0xff, 1, 0, 0, 0, // stw [r10-8], 1 (key)
+        0x85, 0, 0, 0, 1, 0, 0, 0, // call 1
+        0x15, 0x02, 0x02, 0x00, 10, 0, 0, 0, // jeq r2, 10, +2 (taken: skip guard)
+        0x15, 0x00, 0x02, 0x00, 0, 0, 0, 0, // jeq r0, 0, +2 (null -> exit)
+        0x05, 0x00, 0x00, 0x00, 0, 0, 0, 0, // ja +0 (guarded path to load)
+        0x79, 0x03, 0x00, 0x00, 0, 0, 0, 0, // ldxdw r3, [r0+0] (merged)
+        0x95, 0, 0, 0, 0, 0, 0, 0, // exit
+    ];
+    let err = verify_map_bytes(&bytes).unwrap_err();
+    assert!(matches!(err, VerifyError::NullMapPtrAccess { .. }), "unexpected: {err}");
+}
+
+#[test]
+fn rejects_map_value_negative_offset() {
+    // Guarded lookup, but the store starts before the value: negative
+    // offsets reject as out-of-bounds, not as misalignment.
+    let bytes = [
+        0x18u8, 0x01, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // ldimm r1, 1
+        0xbf, 0xa2, 0, 0, 0, 0, 0, 0, // mov r2, r10
+        0x07, 0x02, 0, 0, 0xf8, 0xff, 0xff, 0xff, // add r2, -8
+        0x62, 0x0a, 0xf8, 0xff, 1, 0, 0, 0, // stw [r10-8], 1 (key)
+        0x85, 0, 0, 0, 1, 0, 0, 0, // call 1
+        0x15, 0x00, 0x01, 0x00, 0, 0, 0, 0, // jeq r0, 0, +1 (null guard)
+        0x62, 0x00, 0xfc, 0xff, 0, 0, 0, 0, // stw [r0-4], 0 (before value)
+        0x95, 0, 0, 0, 0, 0, 0, 0, // exit
+    ];
+    let err = verify_map_bytes(&bytes).unwrap_err();
+    assert!(matches!(err, VerifyError::MapValueOutOfBounds { .. }), "unexpected: {err}");
 }
 
 #[test]
@@ -221,8 +317,7 @@ fn accepts_computed_stack_pointer() {
     ];
     let insns = ebpf_isa::decode_program(&bytes).unwrap();
     let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
-    let disasm = ebpf_disasm::disassemble(&insns);
-    let result = verify(&insns, &cfg, &disasm).expect("computed pointer should verify");
+    let result = verify(&insns, &cfg).expect("computed pointer should verify");
     assert_eq!(result.total_pc, 6);
 }
 

@@ -1,8 +1,8 @@
 //! Abstract state for the verifier: interval lattice, register types,
 //! stack slots, and the per-PC machine state propagated by the worklist.
 
-use std::fmt;
 use std::rc::Rc;
+use std::{array, fmt};
 
 use ebpf_vm::maps::MapDesc;
 
@@ -238,10 +238,19 @@ pub enum RegType {
     },
     /// A pointer to a map value, from `bpf_map_lookup_elem`.
     ///
-    /// Carries the map fd so v0.8 can check accesses against `value_size`;
-    /// in v0.7 every load through it yields `Top` and every store is
-    /// accepted unchecked (the VM serves them from scratch).
+    /// Non-null by construction: the only way to obtain it is a successful
+    /// null check on a [`RegType::MaybeMapPtr`]. Carries the map fd so
+    /// accesses are checked against `value_size`.
     MapPtr {
+        /// File descriptor of the map the pointer belongs to.
+        fd: i64,
+    },
+    /// A possibly-null pointer to a map value, from `bpf_map_lookup_elem`.
+    ///
+    /// A miss returns `0` at runtime, so this state can never back a
+    /// load/store directly: an immediate `== 0` / `!= 0` check refines it
+    /// to a scalar zero or a [`RegType::MapPtr`].
+    MaybeMapPtr {
         /// File descriptor of the map the pointer belongs to.
         fd: i64,
     },
@@ -264,6 +273,17 @@ impl RegType {
             (Self::MapPtr { fd: f1 }, Self::MapPtr { fd: f2 }) => {
                 if *f1 == *f2 {
                     Self::MapPtr { fd: *f1 }
+                } else {
+                    Self::Scalar(Range::Top)
+                }
+            }
+            (
+                Self::MaybeMapPtr { fd: f1 } | Self::MapPtr { fd: f1 },
+                Self::MaybeMapPtr { fd: f2 },
+            )
+            | (Self::MaybeMapPtr { fd: f2 }, Self::MapPtr { fd: f1 }) => {
+                if *f1 == *f2 {
+                    Self::MaybeMapPtr { fd: *f1 }
                 } else {
                     Self::Scalar(Range::Top)
                 }
@@ -343,11 +363,11 @@ impl VerifierState {
     /// Initial state with an fd-indexed map table installed.
     #[must_use]
     pub fn initial_with_maps(maps: Vec<Option<MapDesc>>) -> Self {
-        let mut regs = std::array::from_fn(|_| RegType::NotInit);
+        let mut regs = array::from_fn(|_| RegType::NotInit);
         regs[10] = RegType::StackPtr { offset: 0 };
         Self {
             regs,
-            stack: std::array::from_fn(|_| RegType::NotInit),
+            stack: array::from_fn(|_| RegType::NotInit),
             stack_init: [false; STACK_BYTES],
             maps: maps.into(),
         }
@@ -389,9 +409,9 @@ impl VerifierState {
     /// Join two states at a CFG merge point.
     #[must_use]
     pub fn join(a: &Self, b: &Self) -> Self {
-        let regs = std::array::from_fn(|i| RegType::join(&a.regs[i], &b.regs[i]));
-        let stack = std::array::from_fn(|i| RegType::join(&a.stack[i], &b.stack[i]));
-        let stack_init = std::array::from_fn(|i| a.stack_init[i] && b.stack_init[i]);
+        let regs = array::from_fn(|i| RegType::join(&a.regs[i], &b.regs[i]));
+        let stack = array::from_fn(|i| RegType::join(&a.stack[i], &b.stack[i]));
+        let stack_init = array::from_fn(|i| a.stack_init[i] && b.stack_init[i]);
         let maps = Self::join_maps(&a.maps, &b.maps);
         Self { regs, stack, stack_init, maps }
     }
@@ -401,13 +421,13 @@ impl VerifierState {
     /// be initialized on *every* path to stay marked).
     #[must_use]
     pub fn widen(old: &Self, new: &Self) -> Self {
-        let regs = std::array::from_fn(|i| match (&old.regs[i], &new.regs[i]) {
+        let regs = array::from_fn(|i| match (&old.regs[i], &new.regs[i]) {
             (RegType::Scalar(r1), RegType::Scalar(r2)) => RegType::Scalar(r1.widen(*r2)),
             _ => RegType::join(&old.regs[i], &new.regs[i]),
         });
 
-        let stack = std::array::from_fn(|i| RegType::join(&old.stack[i], &new.stack[i]));
-        let stack_init = std::array::from_fn(|i| old.stack_init[i] && new.stack_init[i]);
+        let stack = array::from_fn(|i| RegType::join(&old.stack[i], &new.stack[i]));
+        let stack_init = array::from_fn(|i| old.stack_init[i] && new.stack_init[i]);
         let maps = Self::join_maps(&old.maps, &new.maps);
         Self { regs, stack, stack_init, maps }
     }
@@ -701,6 +721,22 @@ mod tests {
         assert_eq!(RegType::join(&a, &c), RegType::Scalar(Range::Top));
         assert_eq!(
             RegType::join(&a, &RegType::Scalar(Range::exact(0))),
+            RegType::Scalar(Range::Top)
+        );
+    }
+
+    #[test]
+    fn maybe_map_ptr_join() {
+        // Nullable lookup results weaken correctly at merges: a proven
+        // pointer joined with a possibly-null one stays possibly-null.
+        let maybe = RegType::MaybeMapPtr { fd: 1 };
+        let proven = RegType::MapPtr { fd: 1 };
+        assert_eq!(RegType::join(&maybe, &maybe), RegType::MaybeMapPtr { fd: 1 });
+        assert_eq!(RegType::join(&proven, &maybe), RegType::MaybeMapPtr { fd: 1 });
+        assert_eq!(RegType::join(&maybe, &proven), RegType::MaybeMapPtr { fd: 1 });
+        assert_eq!(RegType::join(&maybe, &RegType::MapPtr { fd: 2 }), RegType::Scalar(Range::Top));
+        assert_eq!(
+            RegType::join(&maybe, &RegType::Scalar(Range::exact(0))),
             RegType::Scalar(Range::Top)
         );
     }

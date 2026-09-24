@@ -1,7 +1,7 @@
 ---
 source: crates/ebpf-verifier/tests/trace_snapshot.rs
-assertion_line: 57
-expression: "trace_json_maps(\"map_hash_lookup.bin\")"
+assertion_line: 64
+expression: "trace_json_maps(\"map_guarded_value_access.bin\")"
 ---
 [
   {
@@ -391,7 +391,7 @@ expression: "trace_json_maps(\"map_hash_lookup.bin\")"
   },
   {
     "pc": 5,
-    "insns": "6   *(dw *)(r10 + -16) = r0",
+    "insns": "6   jeq r0, 0, +3",
     "regs": [
       {
         "r": 0,
@@ -463,21 +463,96 @@ expression: "trace_json_maps(\"map_hash_lookup.bin\")"
         "offset": 0
       }
     ],
-    "stack_init": [
+    "stack_init": [],
+    "action": "jeq r0, 0, +3"
+  },
+  {
+    "pc": 9,
+    "insns": "10  exit",
+    "regs": [
       {
-        "offset": -16,
-        "value": "unknown"
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          0,
+          0
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          1,
+          1
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": -8
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
       }
     ],
-    "action": "*(dw *)(r10 + -16) = r0"
+    "stack_init": [],
+    "action": "exit"
   },
   {
     "pc": 6,
-    "insns": "7   exit",
+    "insns": "7   *(w *)(r0 + 4) = 4660",
     "regs": [
       {
         "r": 0,
-        "type": "maybe_map_ptr",
+        "type": "map_ptr",
         "range": null,
         "offset": null
       },
@@ -545,12 +620,238 @@ expression: "trace_json_maps(\"map_hash_lookup.bin\")"
         "offset": 0
       }
     ],
-    "stack_init": [
+    "stack_init": [],
+    "action": "*(w *)(r0 + 4) = 4660"
+  },
+  {
+    "pc": 7,
+    "insns": "8   r3 = *(w *)(r0 + 4)",
+    "regs": [
       {
-        "offset": -16,
-        "value": "unknown"
+        "r": 0,
+        "type": "map_ptr",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          1,
+          1
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": -8
+      },
+      {
+        "r": 3,
+        "type": "unknown",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
       }
     ],
+    "stack_init": [],
+    "action": "r3 = *(w *)(r0 + 4)"
+  },
+  {
+    "pc": 8,
+    "insns": "9   mov r0, r3",
+    "regs": [
+      {
+        "r": 0,
+        "type": "unknown",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          1,
+          1
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": -8
+      },
+      {
+        "r": 3,
+        "type": "unknown",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "r0 mov= r3"
+  },
+  {
+    "pc": 9,
+    "insns": "10  exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "unknown",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          1,
+          1
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": -8
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
     "action": "exit"
   }
 ]

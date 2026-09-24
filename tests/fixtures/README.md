@@ -1,14 +1,14 @@
 # Test fixtures
 
 Hand-assembled eBPF programs (flat `.bin`: raw little-endian 8-byte words,
-no ELF wrapper). Total ~200 bytes.
+no ELF wrapper). Total ~1.1 KB.
 
 They load at compile time via `include_bytes!`, so they must exist before
 `cargo test` runs — another reason they live in git rather than behind a
 generation step. The fuzz seed corpus (`fuzz/corpus/`, gitignored) is
 staged *from* these files by `fuzz/build.rs`; fixtures are its upstream.
 
-## The twenty-one programs
+## The twenty-five programs
 
 | File | Slots | Program | Exit | Exercises |
 |---|---|---|---|---|
@@ -26,6 +26,10 @@ staged *from* these files by `fuzz/build.rs`; fixtures are its upstream.
 | `map_hash_lookup.bin` | 8 slots (7 insns) | `ldimm r1, 1; r2 = r10-8; stw [r10-8], 1; call 1; stxdw [r10-16], r0; exit` | ptr (`0x30000`) | Hash lookup hit → `MapPtr`, scratch pointer saved (v0.7) |
 | `map_array_update.bin` | 10 slots (10 insns) | `ldimm r1, 2; key@r10-8 = 0; val@r10-16 = 42; r4 = 0; call 2; exit` | 0 | Array update success path (v0.7) |
 | `map_bad_fd.bin` | 7 slots (6 insns) | `ldimm r1, 99; call 1; exit` | ❌ `BadMapFd` (fd 99) | Unknown-fd rejection (v0.7) |
+| `map_guarded_value_access.bin` | 11 slots (10 insns) | `ldimm r1, 1; key@r10-8 = 1; call 1; jeq r0, 0, +3; stw [r0+4], 0x1234; ldxw r3, [r0+4]; mov r0, r3; exit` | 4660 | Guarded lookup → `MapPtr`, descriptor-bounded store/load roundtrip (v0.8) |
+| `map_lookup_null_load.bin` | 8 slots (7 insns) | `ldimm r1, 1; key@r10-8 = 2 (absent); call 1; ldxdw r3, [r0+0]; exit` | ❌ `NullMapPtrAccess` (VM: `OutOfBounds` @0x0) | Unguarded dereference of a lookup miss (v0.8) |
+| `map_value_oob.bin` | 9 slots (8 insns) | `ldimm r1, 1; key@r10-8 = 1; call 1; jeq r0, 0, +1; ldxdw r3, [r0+8]; exit` | ❌ `MapValueOutOfBounds` (VM: `OutOfBounds` @0x30008) | `value_size` bounds checked before alignment (v0.8) |
+| `map_value_misaligned.bin` | 9 slots (8 insns) | `ldimm r1, 1; key@r10-8 = 1; call 1; jeq r0, 0, +1; ldxw r3, [r0+1]; exit` | ❌ `Misaligned` (@0x30001, needs 4) | In-range but unaligned map-value access (v0.8) |
 | `endian.bin` | 4 | `mov r1, 0x12345678; end64 le r1, 32; mov r0, r1; exit` | 0x12345678 | `BPF_END` acceptance path (v0.7) |
 | `stack.bin` | 4 | `mov r1, 42; stxdw [r10-8], r1; ldxdw r0, [r10-8]; exit` | 42 | Stack store/load roundtrip, frame pointer |
 | `uninit_read.bin` | 2 | `ldxdw r0, [r10-8]; exit` | ❌ `UninitializedRead` | Canonical unread-stack rejection (v0.5 verifier example) |
@@ -49,10 +53,11 @@ stack:     mov r1, 42 / *(dw *)(r10 + -8) = r1 / r0 = *(dw *)(r10 + -8) / exit
 
 - `ebpf-disasm` golden snapshots: `mov_exit`, `arith`, `branch`, `branch_untaken`, `diamond`, `ldimm`, `loop` (jump rendering), `stack` (memory ops), `endian` (`BPF_END`)
 - `ebpf-cfg` golden DOT snapshots: `branch`, `diamond` (merge shape), `arith`, `ldimm`, `loop` (back edge)
-- `ebpf-verifier` trace snapshots: `mov_exit`, `diamond`, `stack`, `loop` (widened intervals), `map_hash_lookup` (`MapPtr`)
-- `ebpf-vm` exec tests: all eight valid fixtures trap-free (`all_fixtures_trap_free`), exit codes pinned (`fixture_exit_codes`), rejections pinned at load (`invalid_fixtures_trap_at_load`) and runtime (`rejection_fixtures_fail_at_runtime`); `branch`/`loop`/`diamond` target resolution + CFG differential pin
-- `ebpf-verifier` fixture tests: valid fixtures verify (incl. loops via widening + typed helpers), rejections pin exact `VerifyError` variants
-- Fuzz seeds: all twenty-one, via `fuzz/build.rs`
+- `ebpf-verifier` trace snapshots: `mov_exit`, `diamond`, `stack`, `loop` (widened intervals), `map_hash_lookup` (`maybe_map_ptr`), `map_guarded_value_access` (`maybe_map_ptr` → `map_ptr` across the null guard)
+- `ebpf-vm` exec tests: all twenty-five fixtures trap-free at load (`all_fixtures_trap_free`), exit codes pinned (`fixture_exit_codes`), rejections pinned at load (`invalid_fixtures_trap_at_load`) and runtime (`rejection_fixtures_fail_at_runtime`); `branch`/`loop`/`diamond` target resolution + CFG differential pin
+- `ebpf-verifier` fixture tests: valid fixtures verify (incl. loops via widening + typed helpers + guarded map access), rejections pin exact `VerifyError` variants (incl. `NullMapPtrAccess`, `MapValueOutOfBounds`)
+- `ebpf-verifier` differential tests: accepted map fixtures run `MemError`-free with pinned exit codes; rejected map-value fixtures fault in the VM with the matching `MemError` variant
+- Fuzz seeds: all twenty-five, via `fuzz/build.rs`
 - `maps_example.json`: `--maps` demo (fd 1 hash + fd 2 array with initial values)
 
 ## Adding a fixture

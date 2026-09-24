@@ -180,18 +180,20 @@ fn cmd_verify(
     max_iterations: usize,
     maps: Option<&PathBuf>,
 ) -> anyhow::Result<()> {
-    let config = ebpf_verifier::VerifyConfig {
-        widening_threshold: max_iterations,
-        collect_trace: trace,
-        maps: load_maps(maps)?,
-    };
+    let config =
+        ebpf_verifier::VerifyConfig { widening_threshold: max_iterations, maps: load_maps(maps)? };
 
     for prog in &load_decoded(path)? {
         let insns = &prog.insns;
         let cfg = ebpf_cfg::build_cfg(insns)
             .with_context(|| format!("building CFG for `{}`", prog.meta.name))?;
-        let disasm = ebpf_disasm::disassemble(insns);
-        match ebpf_verifier::verify_with_config(insns, &cfg, &disasm, &config) {
+        let outcome = if trace {
+            ebpf_verifier::verify_traced(insns, &cfg, &config)
+        } else {
+            ebpf_verifier::verify_with_config(insns, &cfg, &config)
+        };
+
+        match outcome {
             Ok(result) => {
                 if trace {
                     println!("{}", result.to_json()?);

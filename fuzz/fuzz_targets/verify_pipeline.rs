@@ -4,13 +4,14 @@
 //!
 //! Contract under test: every stage is total — malformed input must surface
 //! as `DecodeError`/`CfgError`/`VerifyError`, never as a panic, hang, or
-//! OOM. Uses `collect_trace: false` (verdict only) to keep iterations fast;
+//! OOM. Uses the verdict-only `verify_with_config` (no trace) to keep
+//! iterations fast;
 //! the trace path is covered by unit tests. Seed corpus lives in
 //! `fuzz/corpus/verify_pipeline/` — gitignored, staged from
 //! `tests/fixtures/*.bin` by `fuzz/build.rs` on every fixture change.
 //!
 //! Maps are installed (fd 1 hash, fd 2 array, no initial values) so random
-//! `call 1/2/3` bytes exercise the map-helper transfer paths (`MapPtr`
+//! `call 1/2/3` bytes exercise the map-helper transfer paths (`MaybeMapPtr`
 //! creation, key-pointer validation, fd joins) instead of always hitting
 //! the `BadMapFd` early exit. The empty-maps configuration is covered by
 //! every non-map seed plus the unit tests.
@@ -52,11 +53,9 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let Ok(cfg) = ebpf_cfg::build_cfg(&insns) else { return };
-    let disasm = ebpf_disasm::disassemble(&insns);
     let config = ebpf_verifier::VerifyConfig {
         widening_threshold: 16,
-        collect_trace: false,
         maps: test_maps(),
     };
-    let _ = ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config);
+    let _ = ebpf_verifier::verify_with_config(&insns, &cfg, &config);
 });

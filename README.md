@@ -4,13 +4,13 @@
 [![fuzz](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml/badge.svg)](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml)
 [![msrv](https://img.shields.io/badge/MSRV-1.98-blue)](https://github.com/kraytos17/ebpf-lab)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-189-blue)](https://github.com/kraytos17/ebpf-lab)
-[![fixtures](https://img.shields.io/badge/fixtures-21-orange)](tests/fixtures/)
+[![tests](https://img.shields.io/badge/tests-205-blue)](https://github.com/kraytos17/ebpf-lab)
+[![fixtures](https://img.shields.io/badge/fixtures-25-orange)](tests/fixtures/)
 
 An eBPF laboratory in Rust: inspect, verify, execute, and optimize eBPF programs.
 
 Currently implements the **decode → disassemble → CFG → VM → verify** pipeline with basic memory model
-(uninitialized-stack detection, alignment enforcement, packet region), 21 hand-assembled fixtures,
+(uninitialized-stack detection, alignment enforcement, packet region), 25 hand-assembled fixtures,
 libFuzzer harnesses, and property-based tests.
 
 ## Quickstart
@@ -68,7 +68,7 @@ Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
 | [`ebpf-disasm`](crates/ebpf-disasm) | Bytecode → human-readable text | `disassemble`, `Display for Insn` |
 | [`ebpf-cfg`](crates/ebpf-cfg) | Control-flow graph construction | `BasicBlock`, `Cfg`, `Pc`, `Slot`, `to_dot` |
 | [`ebpf-vm`](crates/ebpf-vm) | Interpreter + memory + map simulator | `Vm`, `ExecInsn`, `MemoryView`, `MemError`, `MapStore`, `MapDesc` |
-| [`ebpf-verifier`](crates/ebpf-verifier) | Static verifier (interval lattice, widening, typed + map helpers) | `verify`, `verify_with_config`, `Range`, `VerifierState`, `VerifyError`, `HelperSignature`, `MapPtr` |
+| [`ebpf-verifier`](crates/ebpf-verifier) | Static verifier (interval lattice, widening, typed + map helpers) | `verify`, `verify_with_config`, `verify_traced`, `Range`, `VerifierState`, `VerifyError`, `HelperSignature`, `MapPtr`, `MaybeMapPtr` |
 | [`ebpf-lab-cli`](crates/ebpf-lab-cli) | `ebpf-lab` binary | clap derive, tracing |
 
 ## Memory model (v0.4)
@@ -90,7 +90,7 @@ range fault — matching the kernel verifier's diagnostic priority.
 
 ## Test fixtures
 
-21 hand-assembled `.bin` programs exercising the happy path *and* canonical
+25 hand-assembled `.bin` programs exercising the happy path *and* canonical
 rejections. See [`tests/fixtures/README.md`](tests/fixtures/README.md) for
 the full table (bytes, assembly, exit code, what each exercises).
 
@@ -106,7 +106,11 @@ Highlights:
 | `loop_1000_iters.bin` | Long loop, widening fires after threshold |
 | `helper_prandom.bin` | Typed helper `bpf_get_prandom_u32` + stack roundtrip |
 | `helper_ktime.bin` | Typed helper `bpf_ktime_get_ns` |
-| `map_hash_lookup.bin` | Hash lookup hit → scratch pointer |
+| `map_hash_lookup.bin` | Hash lookup → nullable scratch pointer (`maybe_map_ptr`) |
+| `map_guarded_value_access.bin` | Null-guarded lookup, bounded store/load roundtrip, exit 4660 |
+| `map_lookup_null_load.bin` | `NullMapPtrAccess` rejection (unguarded dereference) |
+| `map_value_oob.bin` | `MapValueOutOfBounds` rejection (bounds before alignment) |
+| `map_value_misaligned.bin` | `Misaligned` rejection on an in-range map access |
 | `map_array_update.bin` | Array update, exit 0 |
 | `map_bad_fd.bin` | `BadMapFd` rejection |
 | `uninit_read.bin` | `UninitializedRead` rejection |
@@ -170,15 +174,16 @@ Baselines (current main, `profile.release`, criterion):
 
 | Benchmark | Result |
 |-----------|--------|
-| `decode/4096_slots` | ~26 µs (~1.2 GiB/s) |
-| `decode/mixed_512_slots` | ~3.0 µs (cross-class dispatch) |
-| `cfg/4096_slots` | ~98 µs (~42 Melem/s) |
-| `vm/straight_1000_adds` | ~3.2 µs (~312 Melem/s) |
-| `vm/loop_1000_iters` | ~6.9 µs (~437 Melem/s) |
-| `memory/store_load` | ~45 ns per access (setup-isolated; the old ~500 ps was a folding artifact) |
-| `verify/arith/verdict` | ~240 ns |
-| `verify/wide_500/verdict` | ~3.9 µs (~7.8 ns/insn, linear) |
-| `verify/wide_500/trace` | ~119 µs (trace building dominates: ~30× verdict) |
+| `decode/4096_slots` | ~29 µs (~1.05 GiB/s) |
+| `decode/mixed_512_slots` | ~3.1 µs (cross-class dispatch) |
+| `cfg/4096_slots` | ~112 µs (~36 Melem/s) |
+| `vm/straight_1000_adds` | ~3.4 µs (~292 Melem/s) |
+| `vm/loop_1000_iters` | ~9.2 µs (~325 Melem/s) |
+| `memory/store_load` | ~40 ns per access (setup-isolated; the old ~500 ps was a folding artifact) |
+| `verify/arith/verdict` | ~265 ns |
+| `verify/wide_500/verdict` | ~4.7 µs (~9.4 ns/insn, linear) |
+| `verify/wide_500/trace` | ~182 µs (trace building dominates: ~39× verdict; rendering now inside `verify_traced`) |
+| `verify/map_guarded_value_access/verdict` | ~1.1 µs (null-guarded lookup + descriptor-bounded access) |
 
 No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 
@@ -202,15 +207,16 @@ No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 - [x] **v0.5** — Verifier (interval lattice, worklist + joins, JSON trace, CLI wired, differential oracle, lattice laws)
 - [x] **v0.6** — Widening + typed helpers (loop convergence, 3 built-in helpers, extensible registry)
 - [x] **v0.7** — Map simulator (HASH, ARRAY, LRU_ARRAY, `--maps` JSON, `MapPtr`)
-- **v0.8** — Packet/XDP simulator
-- **v0.9** — SSA construction + optimization passes
+- [x] **v0.8** — Nullable, bounded map values (`MaybeMapPtr`, `value_size` bounds, `NullMapPtrAccess`/`MapValueOutOfBounds`)
+- **v0.9** — Packet/XDP simulator
+- **v0.10** — SSA construction + optimization passes
 - **v1.0** — Real-world compatibility (BTF, relocs, bounded loops)
 
 ## Contributing
 
 1. `git clone` → `cargo build --workspace`
 2. Add fixtures to `tests/fixtures/` (see [the guide](tests/fixtures/README.md))
-3. Run `just verify` — all 189 tests + clippy + doc must be green
+3. Run `just verify` — all 204 tests + clippy + doc must be green
 4. Run `cargo insta review` after disassembler/CFG changes to accept new snapshots
 5. Run `just fuzz-smoke` before touching the decoder or verifier
 

@@ -15,8 +15,7 @@
 //! let bytes = [0xb7u8, 0x00, 0, 0, 1, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0];
 //! let insns = ebpf_isa::decode_program(&bytes).unwrap();
 //! let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
-//! let disasm = ebpf_disasm::disassemble(&insns);
-//! let result = verify(&insns, &cfg, &disasm).unwrap();
+//! let result = verify(&insns, &cfg).unwrap();
 //! assert_eq!(result.total_pc, 2);
 //! ```
 
@@ -33,10 +32,11 @@ pub use state::{Range, RegType, StackSlot, VerifierState};
 pub use trace::{RegSummary, StackSummary, TraceEntry};
 pub use verify::{
     HelperSignature, HelperSignatureRegistry, KtimeNs, MapDelete, MapLookup, MapUpdate, PrandomU32,
-    TracePrintk, VerifyConfig, verify, verify_with_config,
+    TracePrintk, VerifyConfig, verify, verify_traced, verify_with_config,
 };
 
-/// A successfully verified program with per-PC state snapshots.
+/// A successfully verified program: visited-PC count plus, when verified
+/// through [`verify_traced`], the per-PC trace entries (empty otherwise).
 #[derive(Debug)]
 pub struct VerifiedProgram {
     /// Per-PC trace entries (in instruction order).
@@ -108,12 +108,40 @@ pub enum VerifyError {
         fd: i64,
     },
 
+    /// Map value accessed through a possibly-null lookup result.
+    #[error("null map pointer access at pc {pc}: r{register} may be null (fd {fd})")]
+    NullMapPtrAccess {
+        /// PC of the offending instruction.
+        pc: usize,
+        /// Base register holding the nullable pointer.
+        register: u8,
+        /// File descriptor of the map the pointer belongs to.
+        fd: i64,
+    },
+
+    /// Map value access outside the descriptor's `value_size`.
+    #[error(
+        "map value out of bounds at pc {pc}: fd {fd} offset {offset} size {size} exceeds value size {value_size}"
+    )]
+    MapValueOutOfBounds {
+        /// PC of the offending instruction.
+        pc: usize,
+        /// File descriptor of the map the pointer belongs to.
+        fd: i64,
+        /// Byte offset from the value start.
+        offset: i32,
+        /// Access width in bytes.
+        size: u8,
+        /// Descriptor's value width in bytes.
+        value_size: usize,
+    },
+
     /// Multi-byte access at a naturally-unaligned address.
     #[error("misaligned {size}-byte access at pc {pc} (offset {offset})")]
     MisalignedAccess {
         /// PC of the offending instruction.
         pc: usize,
-        /// r10-relative byte offset of the access.
+        /// Pointer-relative byte offset of the access.
         offset: i32,
         /// Access width in bytes.
         size: u8,

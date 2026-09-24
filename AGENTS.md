@@ -2,7 +2,7 @@
 
 An eBPF laboratory in Rust: decode → disassemble → CFG → VM → verify.
 Seven workspace crates, zero `unsafe`, interval-lattice verifier with
-threshold widening + typed/map helpers, 189 tests, ~90% line coverage.
+threshold widening + typed/map helpers, 205 tests, ~90% line coverage.
 
 ## 1. Gates (run these, in this order)
 
@@ -46,7 +46,7 @@ crates/
   ebpf-vm/         interpreter (Vm, exec::ExecInsn, memory::MemoryView, maps::MapStore)
   ebpf-verifier/   static verifier (Range lattice, worklist, helpers, JSON trace)
   ebpf-lab-cli/    `ebpf-lab` binary (inspect, disasm, cfg, run, verify)
-tests/fixtures/    21 hand-assembled .bin programs + maps_example.json (COMMITTED)
+tests/fixtures/    25 hand-assembled .bin programs + maps_example.json (COMMITTED)
 fuzz/              own workspace ([workspace] in fuzz/Cargo.toml, own Cargo.lock)
 ```
 
@@ -144,16 +144,21 @@ ebpf-verifier ← ebpf-lab-cli
   in the setup closure, never in `b.iter`, or the compiler folds the
   measurement (see the `memory/store_load` ~500 ps → ~45 ns correction).
 - **Shared `&'static` + `match`** for tiny dispatch tables; `HashMap` only
-  where keys are genuinely dynamic (`HelperRegistry` in the VM, map storage).
+  where keys are genuinely dynamic (helper ids ≥ 4, map storage).
+  `HelperRegistry` keeps ids `0..=3` in dense `[Option<HelperFn>; 4]`
+  slots (direct index on dispatch; `insert` routes by id, so built-in
+  overrides behave as before).
 - **`#[cold]`** on error-only paths (`dispatch_helper`); `#[inline]` on hot
   single-call-site helpers (`step`, ALU halves, memory ops, `classify`).
   Do not use `#[inline(always)]` (clippy denies it).
 - **`BTreeMap` for JSON-facing maps** (`MapDesc.initial`): deterministic key
   order in serialization and tests. `HashMap` for runtime storage.
-- **Hex policy**: map keys/values in JSON are hex strings in listed byte
-  order (eBPF is little-endian: u32 `1` with `key_size: 4` is `"01000000"`).
-  Decode with `from_hex` (validates even length, rejects bad digits); never
-  hand-roll hex parsing elsewhere.
+- **Hex policy**: `--maps` JSON spells map keys/values as hex strings in
+  listed byte order (eBPF is little-endian: u32 `1` with `key_size: 4` is
+  `"01000000"`), but hex is a **boundary** concern: `MapDesc.initial` holds
+  raw `BTreeMap<Vec<u8>, Vec<u8>>` and the hex↔bytes codec lives only in
+  the `hex_map` serde module (via `from_hex`/`to_hex` — validates even
+  length, rejects bad digits). Never hand-roll hex parsing elsewhere.
 
 ## 5. Memory and verifier models (do not redesign casually)
 
@@ -174,26 +179,35 @@ ebpf-verifier ← ebpf-lab-cli
   over-approximation; `BitXor`/`Shr`/`sar` are conservatively `Top`.
   Lattice laws are pinned by proptests in `state.rs` (commutativity,
   idempotence, absorption, soundness, widening extension).
-- **`RegType::{NotInit, Scalar, StackPtr{offset}, MapPtr{fd}}`**. `NotInit`
-  is a first-class lattice element (`join(NotInit, x) = NotInit`) — do not
-  refactor to `Option<RegType>`. `MapPtr` joins same-fd, else `Top`;
-  loads through it yield `Top` with alignment checks (bounds need
-  `value_size`: v0.8 work).
+- **`RegType::{NotInit, Scalar, StackPtr{offset}, MapPtr{fd}, MaybeMapPtr{fd}}`**.
+  `NotInit` is a first-class lattice element (`join(NotInit, x) = NotInit`) —
+  do not refactor to `Option<RegType>`. Lookup returns nullable
+  `MaybeMapPtr`; an immediate `== 0` / `!= 0` check refines it to scalar
+  zero or proven `MapPtr`. Same-fd joins keep nullability (proven +
+  nullable = nullable), else `Top`. Dereference requires proven `MapPtr`
+  (`NullMapPtrAccess`); accesses are checked against `value_size`
+  (`MapValueOutOfBounds`, bounds before alignment). Do not preserve
+  map-pointer-ness through ALU moves (no aliases: each lookup writes `r0`).
 - **Worklist**: generation counters (`states_gen`/`processed_gen`, `u64`)
   replace state clones for fixed-point detection; `visited` is a bitvec,
   not a `HashSet`; LIFO `Vec` worklist (order irrelevant); in-place
   `join_assign`/`widen_assign` return the changed flag (no
-  allocate-then-compare); `states[].clone()` once per block visit is the
-  only remaining big clone — do not regress it. `VerifierState.maps` is
+  allocate-then-compare); propagation (`refine_edge` + `merge_successor`)
+  **moves** the block-exit state into the final successor and clones only
+  for earlier edges — a single-successor visit clones nothing beyond the
+  once-per-block-visit `states[].clone()`, the only big clone left. Do not
+  regress it. `VerifierState.maps` is
   `Rc`-shared (`join_maps` fast-paths `ptr_eq`/double-empty via
   `adopt_maps`).
 - **Pointer arithmetic**: 64-bit `mov` copies / `add`+`sub`-by-constant
   shifts `StackPtr` offsets (checked, overflow → `Top`). ALU32 truncates
   pointers. `r10` writes keep the frame pointer (VM ignores them too).
-- **Trace discipline**: `VerifyConfig.collect_trace` gates ALL per-PC
-  allocation (`format_reg`, `format_stack`, `describe_action`). Verdict-only
-  runs must stay ~6× faster than trace runs (pinned by the verify bench).
-  `disasm` is split once, `jump_info` computed once per block.
+- **Trace discipline**: trace collection is an **entry-point choice**
+  (`verify_traced` vs `verify_with_config`), never a config knob; the
+  private `collect_trace` flag gates the disassembly render and ALL
+  per-PC allocation (`format_reg`, `format_stack`, `describe_action`).
+  Verdict-only runs must stay ~6× faster than trace runs (pinned by the
+  verify bench); `jump_info` computed once per block.
 - **Differential oracle** (`accept_implies_vm_safe`): anything the verifier
   accepts must run `MemError`-free. The random-program generator is weighted
   (ALU-heavy, small reg universe, aligned stack offsets, exit-terminated);
@@ -208,10 +222,10 @@ ebpf-verifier ← ebpf-lab-cli
 | Unit | `src/*.rs` `mod tests` | transfer fns, lattice ops, CRUD, error variants |
 | Proptest (256 cases) | `state.rs`, `maps.rs`, `memory.rs`, `decode.rs` | lattice laws, model properties (roundtrip, delete-then-miss, LRU capacity), wire roundtrip, never-panics |
 | Golden (insta) | `ebpf-disasm/tests/golden.rs` (6+3), `ebpf-cfg/tests/golden.rs` (4+1) | disassembly text, DOT graphs — incl. loop back-edge |
-| Trace snapshots (insta) | `ebpf-verifier/tests/trace_snapshot.rs` (5) | JSON schema incl. widened intervals + `map_ptr` |
+| Trace snapshots (insta) | `ebpf-verifier/tests/trace_snapshot.rs` (6) | JSON schema incl. widened intervals + `maybe_map_ptr`/`map_ptr` |
 | Fixture accept/reject | `ebpf-verifier/tests/fixtures.rs`, `ebpf-vm/src/exec.rs` | exact `VerifyError`/`VmError` variants, pinned exit codes |
 | Differential oracle | `ebpf-verifier/tests/differential.rs` | fixtures + 256 random programs |
-| CLI e2e | `ebpf-lab-cli/tests/cli.rs` (19) | every subcommand/flag via `CARGO_BIN_EXE`, incl. `--maps` errors |
+| CLI e2e | `ebpf-lab-cli/tests/cli.rs` (24) | every subcommand/flag via `CARGO_BIN_EXE`, incl. `--maps` errors |
 | Fuzz | `fuzz/fuzz_targets/` (decode + verify_pipeline) | totality: errors, never panic/hang/OOM |
 
 - Shared verifier-test helpers live in `crates/ebpf-verifier/tests/common/`
@@ -269,8 +283,9 @@ in the same commit.
   folding through default→store→load. Bench setup must be opaque to `iter`.
 - Trace building is ~30× verdict cost (`wide_500`): never build trace
   strings on the verdict path.
-- `map_fd` fuzziness degrades to `Top`; `MapPtr` through stores is accepted
-  (scratch backs it) so the differential oracle holds.
+- `map_fd` fuzziness degrades to `Top`; proven-`MapPtr` accesses are
+  descriptor-bounded (scratch backs them) and nullable dereference rejects,
+  so the differential oracle holds.
 - Array `delete` zeroes the slot (lab simplification; kernel returns
   `EINVAL`) — documented on `MapStore::delete`, do not "fix" without a
   verifier-side counterpart.
@@ -284,8 +299,9 @@ in the same commit.
 - `msrv-minimal` is `continue-on-error: true` (transitive fossils creep in
   despite floors). Fix by slimming deps or raising floors, not by deleting
   the job.
-- Pre-populated `initial` map values are hex in **listed (little-endian)
-  byte order**, validated at build; runtime re-checks widths.
+- Pre-populated `initial` map values are raw bytes in `MapDesc`; hex is a
+  `--maps` JSON concern decoded at the serde boundary. Widths are
+  validated at `MapStore::new`.
 - `build_stores([])` returns an empty table (not an error); fd 0 is always
   `None`/invalid; duplicate fds are `DuplicateFd`.
 

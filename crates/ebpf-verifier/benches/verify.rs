@@ -1,5 +1,5 @@
 //! Baseline: verifier time per program (straight-line, widening loop,
-//! map lookup), with the JSON trace on and off.
+//! guarded map access), with the JSON trace on and off.
 //!
 //! Run with `cargo bench -p ebpf-verifier`.
 
@@ -31,15 +31,21 @@ fn wide_program() -> Vec<ebpf_isa::Insn> {
     ebpf_isa::decode_program(&bytes).expect("synthetic program decodes")
 }
 
+/// Shared shape of `verify_with_config` / `verify_traced` — the bench
+/// selects the entry point per tag without duplicating the call.
+type VerifyFn = fn(
+    &[ebpf_isa::Insn],
+    &ebpf_cfg::Cfg,
+    &ebpf_verifier::VerifyConfig,
+) -> Result<ebpf_verifier::VerifiedProgram, ebpf_verifier::VerifyError>;
+
 fn prepared(
     insns: &[ebpf_isa::Insn],
     maps: Vec<ebpf_verifier::MapDesc>,
-) -> (ebpf_cfg::Cfg, String, ebpf_verifier::VerifyConfig) {
+) -> (ebpf_cfg::Cfg, ebpf_verifier::VerifyConfig) {
     let cfg = ebpf_cfg::build_cfg(insns).expect("cfg builds");
-    let disasm = ebpf_disasm::disassemble(insns);
-    let mut config = ebpf_verifier::VerifyConfig::with_maps(maps);
-    config.collect_trace = true;
-    (cfg, disasm, config)
+    let config = ebpf_verifier::VerifyConfig::with_maps(maps);
+    (cfg, config)
 }
 
 fn bench_verify(c: &mut Criterion) {
@@ -47,28 +53,30 @@ fn bench_verify(c: &mut Criterion) {
     let mut cases: Vec<(&str, Vec<ebpf_isa::Insn>, Vec<ebpf_verifier::MapDesc>)> = vec![
         ("arith", fixture("arith.bin"), Vec::new()),
         ("loop_1000_iters", fixture("loop_1000_iters.bin"), Vec::new()),
-        ("map_hash_lookup", fixture("map_hash_lookup.bin"), maps::test_maps()),
+        ("map_guarded_value_access", fixture("map_guarded_value_access.bin"), maps::test_maps()),
     ];
+
     cases.push(("wide_500", wide_program(), Vec::new()));
     for (stem, insns, maps) in &cases {
-        let (cfg, disasm, config) = prepared(insns, maps.clone());
-        for collect in [true, false] {
-            let mut config = config.clone();
-            config.collect_trace = collect;
-            let tag = if collect { "trace" } else { "verdict" };
+        let (cfg, config) = prepared(insns, maps.clone());
+        for traced in [true, false] {
+            let verify_fn: VerifyFn = if traced {
+                ebpf_verifier::verify_traced
+            } else {
+                ebpf_verifier::verify_with_config
+            };
+
+            let tag = if traced { "trace" } else { "verdict" };
             group.bench_function(format!("{stem}/{tag}"), |b| {
                 b.iter_batched(
                     || (insns.clone(), config.clone()),
                     |(insns, config)| {
-                        black_box(
-                            ebpf_verifier::verify_with_config(
-                                black_box(&insns),
-                                black_box(&cfg),
-                                black_box(&disasm),
-                                black_box(&config),
-                            )
-                            .expect("bench fixture verifies"),
-                        );
+                        black_box(verify_fn(
+                            black_box(&insns),
+                            black_box(&cfg),
+                            black_box(&config),
+                        ))
+                        .expect("bench fixture verifies");
                     },
                     BatchSize::SmallInput,
                 );

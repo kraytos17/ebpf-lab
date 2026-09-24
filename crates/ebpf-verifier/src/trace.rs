@@ -25,8 +25,8 @@ pub struct RegSummary {
     /// Register index (0–10).
     pub r: usize,
     /// Human-readable type description (one of `not_init`, `scalar`,
-    /// `unknown`, `bottom`, `stack_ptr` — hence `&'static str`, no
-    /// allocation per register per PC).
+    /// `unknown`, `bottom`, `stack_ptr`, `map_ptr`, `maybe_map_ptr` — hence
+    /// `&'static str`, no allocation per register per PC).
     #[serde(rename = "type")]
     pub ty: &'static str,
     /// Optional value range (for scalars).
@@ -61,6 +61,9 @@ pub const fn format_reg(index: usize, reg: &RegType) -> RegSummary {
             RegSummary { r: index, ty: "stack_ptr", range: None, offset: Some(*offset) }
         }
         RegType::MapPtr { .. } => RegSummary { r: index, ty: "map_ptr", range: None, offset: None },
+        RegType::MaybeMapPtr { .. } => {
+            RegSummary { r: index, ty: "maybe_map_ptr", range: None, offset: None }
+        }
     }
 }
 

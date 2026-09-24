@@ -10,16 +10,17 @@ use crate::state::{Range, RegType, STACK_BYTES, VerifierState};
 use crate::trace::{TraceEntry, format_reg, format_stack};
 use crate::{VerifiedProgram, VerifyError};
 
-/// Configuration for the verifier.
+/// Semantic configuration for the verifier: widening and maps.
+///
+/// Trace collection is deliberately *not* a field here — it is an
+/// entry-point choice ([`verify_traced`] vs [`verify_with_config`]), so
+/// verdict-only callers can never pay for trace rendering by accident.
 #[derive(Debug, Clone)]
 pub struct VerifyConfig {
     /// Maximum join-only iterations at a block before widening fires.
     /// After this many re-joins, [`VerifierState::widen`] replaces
     /// [`VerifierState::join`] to force convergence on loops.
     pub widening_threshold: usize,
-    /// Whether to collect the per-PC trace. Disable for a ~60% speedup
-    /// when only the verdict matters (the CLI sets this from `--trace`).
-    pub collect_trace: bool,
     /// Map descriptors (from `--maps` JSON). Empty means no maps: any
     /// map-helper call rejects with [`VerifyError::BadMapFd`].
     pub maps: Vec<MapDesc>,
@@ -27,15 +28,15 @@ pub struct VerifyConfig {
 
 impl Default for VerifyConfig {
     fn default() -> Self {
-        Self { widening_threshold: 16, collect_trace: true, maps: Vec::new() }
+        Self { widening_threshold: 16, maps: Vec::new() }
     }
 }
 
 impl VerifyConfig {
-    /// Config with default widening/trace settings and `maps` installed.
+    /// Config with default widening settings and `maps` installed.
     #[must_use]
     pub const fn with_maps(maps: Vec<MapDesc>) -> Self {
-        Self { widening_threshold: 16, collect_trace: true, maps }
+        Self { widening_threshold: 16, maps }
     }
 }
 
@@ -104,12 +105,33 @@ fn map_fd(state: &VerifierState, pc: usize) -> Result<Option<i64>, VerifyError> 
         RegType::Scalar(Range::Interval { lo, hi }) if lo == hi => Ok(Some(*lo)),
         RegType::Scalar(_) => Ok(None),
         RegType::NotInit => Err(VerifyError::UninitRegister { pc, reg: 1 }),
-        RegType::StackPtr { .. } | RegType::MapPtr { .. } => Err(VerifyError::TypeMismatch {
-            pc,
-            register: 1,
-            expected: "scalar file descriptor",
-            found: "pointer",
-        }),
+        RegType::StackPtr { .. } | RegType::MapPtr { .. } | RegType::MaybeMapPtr { .. } => {
+            Err(VerifyError::TypeMismatch {
+                pc,
+                register: 1,
+                expected: "scalar file descriptor",
+                found: "pointer",
+            })
+        }
+    }
+}
+
+/// Resolve a map-value base register.
+///
+/// Proven pointers yield their fd; nullable pointers reject (a lookup
+/// miss leaves no value behind, so there is nothing safe to access);
+/// anything else yields `None` so the caller uses the stack path.
+const fn map_value_fd(
+    state: &VerifierState,
+    base: Reg,
+    pc: usize,
+) -> Result<Option<i64>, VerifyError> {
+    match state.regs[base.index()] {
+        RegType::MapPtr { fd } => Ok(Some(fd)),
+        RegType::MaybeMapPtr { fd } => {
+            Err(VerifyError::NullMapPtrAccess { pc, register: base.0, fd })
+        }
+        RegType::NotInit | RegType::Scalar(_) | RegType::StackPtr { .. } => Ok(None),
     }
 }
 
@@ -124,8 +146,8 @@ fn map_desc(state: &VerifierState, fd: i64) -> Option<&MapDesc> {
 /// Mirrors the [`Insn::Load`] path: the VM reads these bytes unconditionally
 /// (faulting on unwritten stack), so the verifier must prove readability
 /// or reject. Non-stack pointers reject conservatively (the VM would serve
-/// scratch reads, but narrowing that is v0.8 work — reject is the sound
-/// direction for the accept-implies-safe oracle).
+/// scratch reads, but narrowing key pointers that way is future work —
+/// reject is the sound direction for the accept-implies-safe oracle).
 fn check_map_ptr(state: &VerifierState, r: Reg, size: usize, pc: usize) -> Result<(), VerifyError> {
     ensure_stack_ptr(state, r, pc)?;
     let base_off = state.regs[r.index()].stack_offset().unwrap_or(0);
@@ -140,9 +162,11 @@ fn check_map_ptr(state: &VerifierState, r: Reg, size: usize, pc: usize) -> Resul
 
 /// `bpf_map_lookup_elem` (func 1): `r1` = fd, `r2` = key pointer.
 ///
-/// Returns [`RegType::MapPtr`] on a known fd. A non-exact fd range cannot
-/// be tied to a descriptor, so it degrades to `Top` (sound: the caller
-/// can do nothing precise with it). Unknown exact fds reject.
+/// Returns [`RegType::MaybeMapPtr`] on a known fd: a miss yields `0` at
+/// runtime, so callers must prove non-null (immediate `== 0` / `!= 0`)
+/// before dereferencing. A non-exact fd range cannot be tied to a
+/// descriptor, so it degrades to `Top` (sound: the caller can do nothing
+/// precise with it). Unknown exact fds reject.
 #[derive(Debug, Clone, Copy)]
 pub struct MapLookup;
 
@@ -155,7 +179,7 @@ impl HelperSignature for MapLookup {
             return Err(VerifyError::BadMapFd { pc, fd });
         };
         check_map_ptr(state, Reg(2), desc.key_size, pc)?;
-        Ok(RegType::MapPtr { fd })
+        Ok(RegType::MaybeMapPtr { fd })
     }
 }
 
@@ -244,14 +268,16 @@ impl HelperSignatureRegistry {
 /// forward, and blocks re-joined more than
 /// [`VerifyConfig::widening_threshold`] times switch to
 /// [`VerifierState::widen`] to guarantee convergence on loops.
-/// Returns a [`VerifiedProgram`] with per-PC state snapshots for the
-/// JSON trace, or the first [`VerifyError`] encountered.
+/// Verdict-only verification with the default [`VerifyConfig`]
+/// (widening 16, no maps); the returned trace is empty. See
+/// [`verify_traced`] for the JSON-trace variant or [`verify_with_config`]
+/// to tune widening/maps.
 ///
 /// # Errors
 ///
 /// Returns the first per-instruction safety violation.
-pub fn verify(insns: &[Insn], cfg: &Cfg, disasm: &str) -> Result<VerifiedProgram, VerifyError> {
-    verify_with_config(insns, cfg, disasm, &VerifyConfig::default())
+pub fn verify(insns: &[Insn], cfg: &Cfg) -> Result<VerifiedProgram, VerifyError> {
+    verify_with_config(insns, cfg, &VerifyConfig::default())
 }
 
 /// Build the fd-indexed map table (index 0 always `None`).
@@ -275,7 +301,9 @@ fn build_map_table(config: &VerifyConfig) -> Vec<Option<MapDesc>> {
     table
 }
 
-/// Verify with an explicit [`VerifyConfig`] (e.g. custom widening threshold).
+/// Verdict-only verification with an explicit [`VerifyConfig`] (e.g.
+/// custom widening threshold or map descriptors). No trace is built —
+/// use [`verify_traced`] for the JSON-trace variant.
 ///
 /// # Errors
 ///
@@ -283,12 +311,44 @@ fn build_map_table(config: &VerifyConfig) -> Vec<Option<MapDesc>> {
 pub fn verify_with_config(
     insns: &[Insn],
     cfg: &Cfg,
-    disasm: &str,
     config: &VerifyConfig,
 ) -> Result<VerifiedProgram, VerifyError> {
+    verify_core(insns, cfg, config, false)
+}
+
+/// Verify while collecting the per-PC trace (the JSON schema input).
+///
+/// The trace path costs several times the verdict path, so rendering is
+/// an entry-point choice rather than a config knob: verdict-only callers
+/// cannot pay for it by accident.
+///
+/// # Errors
+///
+/// Returns the first per-instruction safety violation.
+pub fn verify_traced(
+    insns: &[Insn],
+    cfg: &Cfg,
+    config: &VerifyConfig,
+) -> Result<VerifiedProgram, VerifyError> {
+    verify_core(insns, cfg, config, true)
+}
+
+/// Shared worklist core. `collect_trace` gates the disassembly render
+/// and every per-PC allocation: verdict-only runs build no trace strings
+/// at all (trace discipline).
+fn verify_core(
+    insns: &[Insn],
+    cfg: &Cfg,
+    config: &VerifyConfig,
+    collect_trace: bool,
+) -> Result<VerifiedProgram, VerifyError> {
     let helpers = HelperSignatureRegistry::built_in();
+    // The trace's disassembly is derived here from the same `Insn` stream
+    // being verified, so a caller can never feed it a mismatched string.
+    // Verdict-only runs pay nothing for this.
+    let disasm = collect_trace.then(|| ebpf_disasm::disassemble(insns));
     let disasm_lines: Vec<&str> =
-        if config.collect_trace { disasm.lines().collect() } else { Vec::new() };
+        disasm.as_deref().map_or_else(Vec::new, |text| text.lines().collect());
 
     let map_table = build_map_table(config);
     let mut states: Vec<Option<VerifierState>> = vec![None; insns.len()];
@@ -309,7 +369,7 @@ pub fn verify_with_config(
     worklist.push(cfg.entry.index());
 
     let mut trace: Vec<TraceEntry> =
-        if config.collect_trace { Vec::with_capacity(insns.len()) } else { Vec::new() };
+        if collect_trace { Vec::with_capacity(insns.len()) } else { Vec::new() };
 
     let mut visited = vec![false; insns.len()];
     let mut total_pc: usize = 0;
@@ -341,7 +401,7 @@ pub fn verify_with_config(
                 visited[pc] = true;
                 total_pc += 1;
             }
-            if config.collect_trace {
+            if collect_trace {
                 trace.push(TraceEntry {
                     pc,
                     insns: disasm_lines.get(pc).unwrap_or(&"").trim().to_string(),
@@ -351,55 +411,101 @@ pub fn verify_with_config(
                 });
             }
         }
-        // Propagate to successor blocks.
-        for edge in cfg.graph.edges(node) {
-            let target = edge.target();
-            let target_bb = &cfg.graph[target];
-            let target_pc = target_bb.start.0;
-
-            // Refine state on the edge.
+        // Propagate to successor blocks. All but the last edge refine a
+        // clone of the block-exit state; the last edge takes ownership of
+        // `current` outright (the refined register is read from `out`
+        // before it changes — still the unrefined block-exit state), so a
+        // single-successor block propagates with zero full-state clones.
+        // `edges(node)` is re-entrant (fresh iterator, stable order), so
+        // count first and re-walk instead of collecting into a Vec — no
+        // per-visit allocation.
+        let n_succ = cfg.graph.edges(node).count();
+        if n_succ == 0 {
+            continue; // exit block: no successors
+        }
+        for edge in cfg.graph.edges(node).take(n_succ - 1) {
+            let target_pc = cfg.graph[edge.target()].start.0;
             let mut out = current.clone();
-            match edge.weight() {
-                EdgeKind::BranchTrue => {
-                    // Refine on the taken branch.
-                    if let Some((op, dst, k)) = last_jump {
-                        let refined = refine(current.regs[dst.index()].scalar_range(), op, k, true);
-                        out.regs[dst.index()] = RegType::Scalar(refined);
-                    }
-                }
-                EdgeKind::BranchFalse => {
-                    // Refine on the not-taken branch.
-                    if let Some((op, dst, k)) = last_jump {
-                        let refined =
-                            refine(current.regs[dst.index()].scalar_range(), op, k, false);
-                        out.regs[dst.index()] = RegType::Scalar(refined);
-                    }
-                }
-                EdgeKind::Fallthrough | EdgeKind::Unconditional => {}
-            }
-            match &mut states[target_pc] {
-                None => {
-                    states[target_pc] = Some(out);
-                    states_gen[target_pc] = states_gen[target_pc].wrapping_add(1);
-                    worklist.push(target_pc);
-                }
-                Some(existing) => {
-                    block_iterations[target_pc] += 1;
-                    let changed = if block_iterations[target_pc] > config.widening_threshold {
-                        existing.widen_assign(&out)
-                    } else {
-                        existing.join_assign(&out)
-                    };
-                    if changed {
-                        states_gen[target_pc] = states_gen[target_pc].wrapping_add(1);
-                        worklist.push(target_pc);
-                    }
-                }
-            }
+            refine_edge(&mut out, *edge.weight(), last_jump);
+            merge_successor(
+                &mut states,
+                &mut states_gen,
+                &mut block_iterations,
+                &mut worklist,
+                target_pc,
+                out,
+                config.widening_threshold,
+            );
+        }
+        if let Some(edge) = cfg.graph.edges(node).nth(n_succ - 1) {
+            let target_pc = cfg.graph[edge.target()].start.0;
+            let mut out = current;
+            refine_edge(&mut out, *edge.weight(), last_jump);
+            merge_successor(
+                &mut states,
+                &mut states_gen,
+                &mut block_iterations,
+                &mut worklist,
+                target_pc,
+                out,
+                config.widening_threshold,
+            );
         }
     }
 
     Ok(VerifiedProgram { trace, total_pc })
+}
+
+/// Refine the propagated state `out` for one successor edge.
+///
+/// `out` is still the unrefined block-exit state (a fresh clone, or the
+/// moved block-exit state on the final edge), so the compared register's
+/// pre-edge value is read from `out` itself.
+#[inline]
+fn refine_edge(out: &mut VerifierState, kind: EdgeKind, last_jump: Option<(JumpOp, Reg, i64)>) {
+    let taken = match kind {
+        EdgeKind::BranchTrue => true,
+        EdgeKind::BranchFalse => false,
+        EdgeKind::Fallthrough | EdgeKind::Unconditional => return,
+    };
+
+    let Some((op, dst, k)) = last_jump else { return };
+    let incoming = out.regs[dst.index()].clone();
+    refine_reg(&mut out.regs[dst.index()], &incoming, op, k, taken);
+}
+
+/// Merge a successor's entry state: first write, or join (widen after the
+/// configured re-join threshold); bump the generation and requeue only
+/// when the entry changed.
+#[inline]
+fn merge_successor(
+    states: &mut [Option<VerifierState>],
+    states_gen: &mut [u64],
+    block_iterations: &mut [usize],
+    worklist: &mut Vec<usize>,
+    target_pc: usize,
+    incoming: VerifierState,
+    widening_threshold: usize,
+) {
+    match &mut states[target_pc] {
+        None => {
+            states[target_pc] = Some(incoming);
+            states_gen[target_pc] = states_gen[target_pc].wrapping_add(1);
+            worklist.push(target_pc);
+        }
+        Some(existing) => {
+            block_iterations[target_pc] += 1;
+            let changed = if block_iterations[target_pc] > widening_threshold {
+                existing.widen_assign(&incoming)
+            } else {
+                existing.join_assign(&incoming)
+            };
+            if changed {
+                states_gen[target_pc] = states_gen[target_pc].wrapping_add(1);
+                worklist.push(target_pc);
+            }
+        }
+    }
 }
 
 /// Check one instruction and transfer the abstract state.
@@ -524,12 +630,10 @@ fn check_and_transfer(
             }
         }
         Insn::Load { size, dst, base, offset } => {
-            if matches!(state.regs[base.index()], RegType::MapPtr { .. }) {
-                // Map value memory: the VM serves it from scratch, so any
-                // in-bounds read succeeds. Bounds need `value_size` (v0.8);
-                // alignment is checkable now (scratch base is 8-aligned, so
-                // relative alignment coincides, as with the stack).
-                check_map_align(*offset, *size, pc)?;
+            if let Some(fd) = map_value_fd(state, *base, pc)? {
+                // Map value memory: the VM serves it from scratch, so an
+                // in-bounds read succeeds; the descriptor bounds it.
+                check_map_value_bounds(state, fd, *offset, *size, pc)?;
             } else {
                 let (start, lo, hi) = check_mem_access(state, *base, *offset, *size, pc)?;
                 // Every spanned byte must be initialized — a partial store
@@ -551,10 +655,10 @@ fn check_and_transfer(
                 Operand::Reg(r) => ensure_init(state, *r, pc)?,
                 Operand::Imm(_) => {}
             }
-            if matches!(state.regs[base.index()], RegType::MapPtr { .. }) {
-                // Scratch is always readable/writable; alignment still
-                // enforced to match the VM.
-                check_map_align(*offset, *size, pc)?;
+            if let Some(fd) = map_value_fd(state, *base, pc)? {
+                // Scratch is always readable/writable; the descriptor
+                // bounds the access and alignment still matches the VM.
+                check_map_value_bounds(state, fd, *offset, *size, pc)?;
             } else {
                 let (_, lo, hi) = check_mem_access(state, *base, *offset, *size, pc)?;
                 state
@@ -604,6 +708,31 @@ fn check_and_transfer(
     Ok(())
 }
 
+/// Refine a register on a branch edge, preserving pointer provenance.
+///
+/// Nullable map pointers refine only on immediate `== 0` / `!= 0` tests:
+/// the null edge becomes an exact-zero scalar, the non-null edge a proven
+/// [`RegType::MapPtr`]. Proven map pointers survive untouched (a second
+/// null check must not degrade them). Everything else keeps the existing
+/// scalar behavior.
+fn refine_reg(reg: &mut RegType, incoming: &RegType, op: JumpOp, k: i64, taken: bool) {
+    if let RegType::MaybeMapPtr { fd } = *incoming {
+        // Normalize `Ne` to its `Eq` complement, mirroring `refine`.
+        let (op, taken) = match (op, taken) {
+            (JumpOp::Ne, taken) => (JumpOp::Eq, !taken),
+            other => other,
+        };
+        if matches!(op, JumpOp::Eq) && k == 0 {
+            *reg = if taken { RegType::Scalar(Range::exact(0)) } else { RegType::MapPtr { fd } };
+        }
+        return;
+    }
+    if matches!(incoming, RegType::MapPtr { .. }) {
+        return;
+    }
+    *reg = RegType::Scalar(refine(incoming.scalar_range(), op, k, taken));
+}
+
 /// Extract the comparison op, compared register, and immediate from a jump.
 fn jump_info(insn: &Insn) -> Option<(JumpOp, Reg, i64)> {
     match insn {
@@ -612,12 +741,44 @@ fn jump_info(insn: &Insn) -> Option<(JumpOp, Reg, i64)> {
     }
 }
 
+/// Check a map-value access against the descriptor's `value_size`.
+///
+/// Bounds before alignment mirrors the VM (`scratch_load` /
+/// `scratch_store`): a straddling access reports out-of-bounds, not
+/// misalignment. A missing descriptor rejects as `BadMapFd` (defensive:
+/// validated configs install the descriptor before any pointer to it can
+/// exist).
+fn check_map_value_bounds(
+    state: &VerifierState,
+    fd: i64,
+    offset: i16,
+    size: MemSize,
+    pc: usize,
+) -> Result<(), VerifyError> {
+    let desc = map_desc(state, fd).ok_or(VerifyError::BadMapFd { pc, fd })?;
+    let width = usize::from(size.bytes());
+    let out_of_bounds = || VerifyError::MapValueOutOfBounds {
+        pc,
+        fd,
+        offset: i32::from(offset),
+        size: size.bytes(),
+        value_size: desc.value_size,
+    };
+
+    let start = usize::try_from(offset).map_err(|_| out_of_bounds())?;
+    let end = start.checked_add(width).ok_or_else(out_of_bounds)?;
+    if end > desc.value_size {
+        return Err(out_of_bounds());
+    }
+    check_map_align(offset, size, pc)
+}
+
 /// Alignment check for map-scratch accesses.
 ///
 /// The scratch base is 8-aligned, so the instruction offset's alignment
 /// coincides with the absolute address's (same argument as the stack
-/// path in [`check_mem_access`]). Bounds need `value_size` and arrive
-/// in v0.8; the VM faults past-the-value reads as `OutOfBounds`.
+/// path in [`check_mem_access`]). Runs after [`check_map_value_bounds`];
+/// the VM faults past-the-value reads as `OutOfBounds`.
 fn check_map_align(offset: i16, size: MemSize, pc: usize) -> Result<(), VerifyError> {
     let width = i64::from(size.bytes());
     if width > 1 && i64::from(offset).rem_euclid(width) != 0 {
@@ -711,6 +872,12 @@ const fn ensure_stack_ptr(state: &VerifierState, r: Reg, pc: usize) -> Result<()
             expected: "stack pointer",
             found: "map pointer",
         }),
+        RegType::MaybeMapPtr { .. } => Err(VerifyError::TypeMismatch {
+            pc,
+            register: r.0,
+            expected: "stack pointer",
+            found: "nullable map pointer",
+        }),
     }
 }
 
@@ -741,7 +908,7 @@ impl RegType {
     const fn scalar_range(&self) -> Range {
         match self {
             Self::Scalar(r) => *r,
-            Self::StackPtr { .. } | Self::MapPtr { .. } => Range::Top,
+            Self::StackPtr { .. } | Self::MapPtr { .. } | Self::MaybeMapPtr { .. } => Range::Top,
             Self::NotInit => Range::Bottom,
         }
     }
@@ -752,5 +919,76 @@ impl RegType {
             Self::StackPtr { offset } => Some(*offset),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use ebpf_isa::insn::JumpOp;
+
+    use super::refine_reg;
+    use crate::state::{Range, RegType};
+
+    /// Refine on one successor edge the way `verify` does: `out` starts as
+    /// a clone of the block-exit state, `incoming` is the pre-edge state.
+    fn edge(incoming: &RegType, op: JumpOp, k: i64, taken: bool) -> RegType {
+        let mut out = incoming.clone();
+        refine_reg(&mut out, incoming, op, k, taken);
+        out
+    }
+
+    #[test]
+    fn refine_reg_maybe_map_ptr_truth_table() {
+        let maybe = RegType::MaybeMapPtr { fd: 1 };
+        // Immediate `== 0` / `!= 0` are the only refining comparisons:
+        // null edge → exact-zero scalar, non-null edge → proven pointer.
+        assert_eq!(edge(&maybe, JumpOp::Eq, 0, true), RegType::Scalar(Range::exact(0)));
+        assert_eq!(edge(&maybe, JumpOp::Eq, 0, false), RegType::MapPtr { fd: 1 });
+        assert_eq!(edge(&maybe, JumpOp::Ne, 0, true), RegType::MapPtr { fd: 1 });
+        assert_eq!(edge(&maybe, JumpOp::Ne, 0, false), RegType::Scalar(Range::exact(0)));
+        // Non-zero k against a null check, and every other comparison,
+        // leave the nullable pointer unchanged on both edges.
+        for (op, k) in [(JumpOp::Eq, 5), (JumpOp::Ne, 5), (JumpOp::Gt, 0), (JumpOp::Sle, 0)] {
+            for taken in [true, false] {
+                assert_eq!(
+                    edge(&maybe, op, k, taken),
+                    maybe,
+                    "op {op:?} k {k} taken {taken} should not refine"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refine_reg_preserves_proven_map_ptr() {
+        // A second null check (or any comparison) on a proven pointer must
+        // not collapse it to a scalar — the guard already happened, and a
+        // later block terminator comparing this register would otherwise
+        // destroy provenance.
+        let proven = RegType::MapPtr { fd: 1 };
+        for (op, k, taken) in [
+            (JumpOp::Eq, 0, true),
+            (JumpOp::Eq, 0, false),
+            (JumpOp::Ne, 0, true),
+            (JumpOp::Gt, 5, false),
+        ] {
+            assert_eq!(
+                edge(&proven, op, k, taken),
+                proven,
+                "op {op:?} k {k} taken {taken} should not degrade a proven pointer"
+            );
+        }
+    }
+
+    #[test]
+    fn refine_reg_scalar_keeps_interval_refinement() {
+        // Scalars keep the pre-v0.8 behavior: interval meet via `refine`.
+        let scalar = RegType::Scalar(Range::Interval { lo: 0, hi: 10 });
+        assert_eq!(
+            edge(&scalar, JumpOp::Lt, 5, true),
+            RegType::Scalar(Range::Interval { lo: 0, hi: 4 })
+        );
     }
 }

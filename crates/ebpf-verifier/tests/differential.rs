@@ -39,15 +39,52 @@ fn vm_memory_clean(insns: &[ebpf_isa::Insn]) -> bool {
 
 #[test]
 fn map_fixtures_verify_and_run_memory_clean() {
-    for name in ["map_hash_lookup", "map_array_update"] {
+    for name in ["map_hash_lookup", "map_array_update", "map_guarded_value_access"] {
         let insns = load_fixture(name);
         let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
-        let disasm = ebpf_disasm::disassemble(&insns);
         let config = ebpf_verifier::VerifyConfig::with_maps(test_maps());
-        ebpf_verifier::verify_with_config(&insns, &cfg, &disasm, &config)
+        ebpf_verifier::verify_with_config(&insns, &cfg, &config)
             .unwrap_or_else(|e| panic!("{name} should verify: {e}"));
         let mut vm = Vm::new_with_maps(insns, test_maps()).unwrap();
         assert!(!matches!(vm.run(10_000), Err(VmError::Memory(_))), "{name} faulted with MemError");
+    }
+    // The guarded access round-trips a word through the scratch value.
+    let insns = load_fixture("map_guarded_value_access");
+    let mut vm = Vm::new_with_maps(insns, test_maps()).unwrap();
+    assert_eq!(vm.run(10_000), Ok(0x1234));
+}
+
+#[test]
+fn rejected_map_value_fixtures_agree_with_vm() {
+    // Every rejected map-value program faults in the VM with the memory
+    // error its verifier diagnostic names: the two stages agree on each
+    // new boundary.
+    for (name, verdict, runtime) in [
+        (
+            "map_lookup_null_load",
+            "null map pointer access",
+            "out-of-bounds 8-byte access at address 0x0",
+        ),
+        (
+            "map_value_oob",
+            "map value out of bounds",
+            "out-of-bounds 8-byte access at address 0x30008",
+        ),
+        (
+            "map_value_misaligned",
+            "misaligned 4-byte access",
+            "misaligned 4-byte access at address 0x30001",
+        ),
+    ] {
+        let insns = load_fixture(name);
+        let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+        let config = ebpf_verifier::VerifyConfig::with_maps(test_maps());
+        let err = ebpf_verifier::verify_with_config(&insns, &cfg, &config).unwrap_err();
+        assert!(err.to_string().contains(verdict), "{name}: unexpected verdict {err}");
+        let mut vm = Vm::new_with_maps(insns, test_maps()).unwrap();
+        let err = vm.run(10_000).unwrap_err();
+        assert!(matches!(err, VmError::Memory(_)), "{name}: unexpected runtime {err}");
+        assert!(err.to_string().contains(runtime), "{name}: unexpected runtime {err}");
     }
 }
 
@@ -56,9 +93,7 @@ fn accepted_fixtures_run_memory_clean() {
     for name in ACCEPT_FIXTURES {
         let insns = load_fixture(name);
         let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
-        let disasm = ebpf_disasm::disassemble(&insns);
-        ebpf_verifier::verify(&insns, &cfg, &disasm)
-            .unwrap_or_else(|e| panic!("{name} should verify: {e}"));
+        ebpf_verifier::verify(&insns, &cfg).unwrap_or_else(|e| panic!("{name} should verify: {e}"));
         assert!(vm_memory_clean(&insns), "{name} faulted with MemError");
     }
 }
@@ -146,8 +181,7 @@ proptest! {
     fn accept_implies_vm_safe(bytes in arb_program()) {
         let Ok(insns) = ebpf_isa::decode_program(&bytes) else { return Ok(()); };
         let Ok(cfg) = ebpf_cfg::build_cfg(&insns) else { return Ok(()); };
-        let disasm = ebpf_disasm::disassemble(&insns);
-        let Ok(_) = ebpf_verifier::verify(&insns, &cfg, &disasm) else { return Ok(()); };
+        let Ok(_) = ebpf_verifier::verify(&insns, &cfg) else { return Ok(()); };
         let mut vm = Vm::new(insns);
         prop_assert!(
             !matches!(vm.run(10_000), Err(VmError::Memory(_))),
