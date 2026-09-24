@@ -1,5 +1,6 @@
 ---
 source: crates/ebpf-disasm/tests/golden.rs
+assertion_line: 27
 expression: "disasm_fixture(\"arith.bin\")"
 ---
 0   mov r1, 10

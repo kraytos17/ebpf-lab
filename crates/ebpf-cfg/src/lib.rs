@@ -22,11 +22,23 @@ use thiserror::Error;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pc(pub usize);
 
+impl std::fmt::Display for Pc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Pc({})", self.0)
+    }
+}
+
 /// 8-byte slot number: the numbering eBPF jump offsets count in.
 /// A `ld_imm_dw` occupies two slots but decodes to one [`Insn`], so
 /// `Slot` and [`Pc`] diverge whenever a program contains a wide load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Slot(pub u32);
+
+impl std::fmt::Display for Slot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Slot({})", self.0)
+    }
+}
 
 impl Slot {
     /// Slot number as a `usize` (for display and slicing).
@@ -90,6 +102,8 @@ pub struct Cfg {
     block_of_pc: Vec<NodeIndex>,
     /// Decoded index → slot number.
     slot_of: Vec<Slot>,
+    /// Reverse-postorder traversal of the CFG (blocks, not PCs).
+    rpo: Vec<NodeIndex>,
 }
 
 impl Cfg {
@@ -103,6 +117,12 @@ impl Cfg {
     #[must_use]
     pub fn slot_at(&self, pc: Pc) -> Slot {
         self.slot_of[pc.0]
+    }
+
+    /// Reverse-postorder block indices (precomputed at CFG build time).
+    #[must_use]
+    pub fn rpo(&self) -> &[NodeIndex] {
+        &self.rpo
     }
 }
 
@@ -152,9 +172,11 @@ fn slot_maps(insns: &[Insn]) -> (Vec<Slot>, Vec<usize>) {
         slot.0 += slot_width(insn);
     }
 
-    let mut decoded_of_slot = vec![usize::MAX; slot.as_usize()];
+    // 0 = unmapped (was usize::MAX); decoded indices are 1-based so
+    // that the zero sentinel is distinguishable from any valid index.
+    let mut decoded_of_slot = vec![0usize; slot.as_usize()];
     for (i, &s) in slot_of.iter().enumerate() {
-        decoded_of_slot[s.as_usize()] = i;
+        decoded_of_slot[s.as_usize()] = i + 1;
     }
     (slot_of, decoded_of_slot)
 }
@@ -184,14 +206,14 @@ fn resolve_target(
         .and_then(|t| decoded_of_slot.get(t))
         .copied()
         .ok_or(CfgError::JumpOutOfBounds { pc, target })?;
-    // A slot that is the *second* half of a wide load maps to `usize::MAX`
+    // A slot that is the *second* half of a wide load maps to 0
     // (see slot_maps); landing there is a malformed program.
-    if decoded == usize::MAX {
+    if decoded == 0 {
         let target_slot =
             u32::try_from(target_u).map_err(|_| CfgError::JumpOutOfBounds { pc, target })?;
         return Err(CfgError::JumpIntoWide { pc, target: target_slot });
     }
-    Ok(Pc(decoded))
+    Ok(Pc(decoded - 1))
 }
 
 /// Find basic-block entry points ("leaders") as decoded indices.
@@ -266,7 +288,7 @@ pub fn build_cfg(insns: &[Insn]) -> Result<Cfg, CfgError> {
         .map(|(&start, end)| (start, end))
         .collect();
 
-    let mut graph = DiGraph::new();
+    let mut graph = DiGraph::with_capacity(ranges.len(), ranges.len() * 2);
     let mut nodes = Vec::with_capacity(ranges.len());
     for &(start, end) in &ranges {
         nodes.push(graph.add_node(BasicBlock { start, end }));
@@ -299,7 +321,18 @@ pub fn build_cfg(insns: &[Insn]) -> Result<Cfg, CfgError> {
         }
     }
 
-    Ok(Cfg { entry: nodes[0], graph, block_of_pc, slot_of })
+    // Precompute reverse-postorder traversal for the verifier worklist.
+    let mut rpo_nodes = Vec::new();
+    {
+        use petgraph::visit::DfsPostOrder;
+        let mut dfs = DfsPostOrder::new(&graph, nodes[0]);
+        while let Some(node) = dfs.next(&graph) {
+            rpo_nodes.push(node);
+        }
+        rpo_nodes.reverse();
+    }
+
+    Ok(Cfg { entry: nodes[0], graph, block_of_pc, slot_of, rpo: rpo_nodes })
 }
 
 /// Whether the graph contains a cycle (a loop).

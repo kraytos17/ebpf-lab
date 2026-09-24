@@ -1,6 +1,6 @@
 ---
 source: crates/ebpf-verifier/tests/trace_snapshot.rs
-assertion_line: 50
+assertion_line: 51
 expression: "trace_json(\"loop.bin\")"
 ---
 [
@@ -402,6 +402,83 @@ expression: "trace_json(\"loop.bin\")"
     "action": "jlt r1, 10, +-3"
   },
   {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          1
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "bottom",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  },
+  {
     "pc": 2,
     "insns": "2   add r0, 1",
     "regs": [
@@ -642,6 +719,83 @@ expression: "trace_json(\"loop.bin\")"
     "action": "jlt r1, 10, +-3"
   },
   {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          2
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "bottom",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  },
+  {
     "pc": 2,
     "insns": "2   add r0, 1",
     "regs": [
@@ -882,6 +1036,83 @@ expression: "trace_json(\"loop.bin\")"
     "action": "jlt r1, 10, +-3"
   },
   {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          3
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "bottom",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  },
+  {
     "pc": 2,
     "insns": "2   add r0, 1",
     "regs": [
@@ -1122,6 +1353,83 @@ expression: "trace_json(\"loop.bin\")"
     "action": "jlt r1, 10, +-3"
   },
   {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          4
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "bottom",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  },
+  {
     "pc": 2,
     "insns": "2   add r0, 1",
     "regs": [
@@ -1362,6 +1670,83 @@ expression: "trace_json(\"loop.bin\")"
     "action": "jlt r1, 10, +-3"
   },
   {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          5
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "bottom",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  },
+  {
     "pc": 2,
     "insns": "2   add r0, 1",
     "regs": [
@@ -1602,6 +1987,83 @@ expression: "trace_json(\"loop.bin\")"
     "action": "jlt r1, 10, +-3"
   },
   {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          6
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "bottom",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  },
+  {
     "pc": 2,
     "insns": "2   add r0, 1",
     "regs": [
@@ -1842,6 +2304,83 @@ expression: "trace_json(\"loop.bin\")"
     "action": "jlt r1, 10, +-3"
   },
   {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          7
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "bottom",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  },
+  {
     "pc": 2,
     "insns": "2   add r0, 1",
     "regs": [
@@ -2082,6 +2621,83 @@ expression: "trace_json(\"loop.bin\")"
     "action": "jlt r1, 10, +-3"
   },
   {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          8
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "bottom",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  },
+  {
     "pc": 2,
     "insns": "2   add r0, 1",
     "regs": [
@@ -2322,6 +2938,83 @@ expression: "trace_json(\"loop.bin\")"
     "action": "jlt r1, 10, +-3"
   },
   {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          9
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "bottom",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  },
+  {
     "pc": 2,
     "insns": "2   add r0, 1",
     "regs": [
@@ -2560,6 +3253,86 @@ expression: "trace_json(\"loop.bin\")"
     ],
     "stack_init": [],
     "action": "jlt r1, 10, +-3"
+  },
+  {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          10
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          10,
+          10
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
   },
   {
     "pc": 2,
@@ -2802,6 +3575,86 @@ expression: "trace_json(\"loop.bin\")"
     "action": "jlt r1, 10, +-3"
   },
   {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          11
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          10,
+          10
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  },
+  {
     "pc": 2,
     "insns": "2   add r0, 1",
     "regs": [
@@ -3040,6 +3893,86 @@ expression: "trace_json(\"loop.bin\")"
     ],
     "stack_init": [],
     "action": "jlt r1, 10, +-3"
+  },
+  {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          12
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          10,
+          10
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
   },
   {
     "pc": 2,
@@ -3282,6 +4215,86 @@ expression: "trace_json(\"loop.bin\")"
     "action": "jlt r1, 10, +-3"
   },
   {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          13
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          10,
+          10
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  },
+  {
     "pc": 2,
     "insns": "2   add r0, 1",
     "regs": [
@@ -3520,6 +4533,86 @@ expression: "trace_json(\"loop.bin\")"
     ],
     "stack_init": [],
     "action": "jlt r1, 10, +-3"
+  },
+  {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          14
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          10,
+          10
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
   },
   {
     "pc": 2,
@@ -3762,6 +4855,86 @@ expression: "trace_json(\"loop.bin\")"
     "action": "jlt r1, 10, +-3"
   },
   {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          15
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          10,
+          10
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  },
+  {
     "pc": 2,
     "insns": "2   add r0, 1",
     "regs": [
@@ -4000,6 +5173,86 @@ expression: "trace_json(\"loop.bin\")"
     ],
     "stack_init": [],
     "action": "jlt r1, 10, +-3"
+  },
+  {
+    "pc": 5,
+    "insns": "5   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          16
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          10,
+          10
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
   },
   {
     "pc": 2,
@@ -4242,97 +5495,23 @@ expression: "trace_json(\"loop.bin\")"
     "action": "jlt r1, 10, +-3"
   },
   {
-    "pc": 2,
-    "insns": "2   add r0, 1",
+    "pc": 5,
+    "insns": "5   exit",
     "regs": [
       {
         "r": 0,
-        "type": "unknown",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 1,
         "type": "scalar",
         "range": [
-          0,
-          9
+          1,
+          17
         ],
         "offset": null
       },
       {
-        "r": 2,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 3,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 4,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 5,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 6,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 7,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 8,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 9,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 10,
-        "type": "stack_ptr",
-        "range": null,
-        "offset": 0
-      }
-    ],
-    "stack_init": [],
-    "action": "r0 add= 1"
-  },
-  {
-    "pc": 3,
-    "insns": "3   add r1, 1",
-    "regs": [
-      {
-        "r": 0,
-        "type": "unknown",
-        "range": null,
-        "offset": null
-      },
-      {
         "r": 1,
         "type": "scalar",
         "range": [
-          1,
+          10,
           10
         ],
         "offset": null
@@ -4393,84 +5572,7 @@ expression: "trace_json(\"loop.bin\")"
       }
     ],
     "stack_init": [],
-    "action": "r1 add= 1"
-  },
-  {
-    "pc": 4,
-    "insns": "4   jlt r1, 10, +-3",
-    "regs": [
-      {
-        "r": 0,
-        "type": "unknown",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 1,
-        "type": "scalar",
-        "range": [
-          1,
-          10
-        ],
-        "offset": null
-      },
-      {
-        "r": 2,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 3,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 4,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 5,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 6,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 7,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 8,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 9,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 10,
-        "type": "stack_ptr",
-        "range": null,
-        "offset": 0
-      }
-    ],
-    "stack_init": [],
-    "action": "jlt r1, 10, +-3"
+    "action": "exit"
   },
   {
     "pc": 2,
@@ -4779,5 +5881,236 @@ expression: "trace_json(\"loop.bin\")"
     ],
     "stack_init": [],
     "action": "exit"
+  },
+  {
+    "pc": 2,
+    "insns": "2   add r0, 1",
+    "regs": [
+      {
+        "r": 0,
+        "type": "unknown",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          0,
+          9
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "r0 add= 1"
+  },
+  {
+    "pc": 3,
+    "insns": "3   add r1, 1",
+    "regs": [
+      {
+        "r": 0,
+        "type": "unknown",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          1,
+          10
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "r1 add= 1"
+  },
+  {
+    "pc": 4,
+    "insns": "4   jlt r1, 10, +-3",
+    "regs": [
+      {
+        "r": 0,
+        "type": "unknown",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "scalar",
+        "range": [
+          1,
+          10
+        ],
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "jlt r1, 10, +-3"
   }
 ]

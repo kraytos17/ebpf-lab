@@ -1,5 +1,6 @@
 ---
 source: crates/ebpf-disasm/tests/golden.rs
+assertion_line: 32
 expression: "disasm_fixture(\"branch.bin\")"
 ---
 0   mov r1, 10

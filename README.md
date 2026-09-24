@@ -174,16 +174,16 @@ Baselines (current main, `profile.release`, criterion, 3s/200 samples):
 
 | Benchmark | Result |
 |-----------|--------|
-| `decode/4096_slots` | ~27 µs (~1.15 GiB/s) |
-| `decode/mixed_512_slots` | ~3.1 µs (cross-class dispatch) |
-| `cfg/4096_slots` | ~48 µs (~85 Melem/s) |
-| `vm/straight_1000_adds` | ~3.6 µs (~279 Melem/s) |
-| `vm/loop_1000_iters` | ~7.9 µs (~380 Melem/s) |
-| `memory/store_load` | ~32 ns per access (setup-isolated; the old ~500 ps was a folding artifact) |
-| `verify/arith/verdict` | ~183 ns |
-| `verify/wide_500/verdict` | ~4.1 µs (~8.2 ns/insn, linear) |
-| `verify/wide_500/trace` | ~154 µs (trace building dominates: ~37× verdict; rendering now inside `verify_traced`) |
-| `verify/map_guarded_value_access/verdict` | ~492 ns (null-guarded lookup + descriptor-bounded access) |
+| `decode/4096_slots` | ~29 µs (~1.04 GiB/s) |
+| `decode/mixed_512_slots` | ~2.8 µs (cross-class dispatch) |
+| `cfg/4096_slots` | ~56 µs (~73 Melem/s) |
+| `vm/straight_1000_adds` | ~3.4 µs (~299 Melem/s) |
+| `vm/loop_1000_iters` | ~7.2 µs (~415 Melem/s) |
+| `memory/store_load` | ~31 ns per access |
+| `verify/arith/verdict` | ~175 ns |
+| `verify/wide_500/verdict` | ~4.7 µs (~9.4 ns/insn, linear) |
+| `verify/wide_500/trace` | ~163 µs (trace building dominates: ~35× verdict; rendering now inside `verify_traced`) |
+| `verify/map_guarded_value_access/verdict` | ~508 ns (null-guarded lookup + descriptor-bounded access) |
 
 No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 
@@ -208,15 +208,15 @@ No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 - [x] **v0.6** — Widening + typed helpers (loop convergence, 3 built-in helpers, extensible registry)
 - [x] **v0.7** — Map simulator (HASH, ARRAY, LRU_ARRAY, `--maps` JSON, `MapPtr`)
 - [x] **v0.8** — Nullable, bounded map values (`MaybeMapPtr`, `value_size` bounds, `NullMapPtrAccess`/`MapValueOutOfBounds`)
-- **v0.9** — Packet/XDP simulator
-- **v0.10** — SSA construction + optimization passes
+- [x] **v0.9** — Performance audit (RPO worklist, state shrink, CFG optimization, Display impls, idiomatic Rust)
+- **v0.10** — Packet/XDP simulator, SSA construction + optimization passes
 - **v1.0** — Real-world compatibility (BTF, relocs, bounded loops)
 
 ## Contributing
 
 1. `git clone` → `cargo build --workspace`
 2. Add fixtures to `tests/fixtures/` (see [the guide](tests/fixtures/README.md))
-3. Run `just verify` — all 204 tests + clippy + doc must be green
+3. Run `just verify` — all 205 tests + clippy + doc must be green
 4. Run `cargo insta review` after disassembler/CFG changes to accept new snapshots
 5. Run `just fuzz-smoke` before touching the decoder or verifier
 

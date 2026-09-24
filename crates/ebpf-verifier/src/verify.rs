@@ -4,6 +4,7 @@ use ebpf_cfg::{Cfg, EdgeKind, Pc};
 use ebpf_isa::insn::{AluOp, Insn, JumpOp, MemSize, Operand, Reg, Width};
 use ebpf_vm::maps::MapDesc;
 use petgraph::visit::EdgeRef;
+use std::collections::VecDeque;
 
 use crate::refine::refine;
 use crate::state::{Range, RegType, STACK_BYTES, VerifierState};
@@ -359,20 +360,23 @@ fn verify_core(
     // Terminates: joins are monotone, and widening after
     // `widening_threshold` re-joins forces finite ascent (each widening
     // strictly grows at least one register toward Top).
-    let mut states_gen: Vec<u64> = vec![0; insns.len()];
+    let mut states_gen: Vec<u32> = vec![0; insns.len()];
     states_gen[cfg.entry.index()] = 1;
 
-    let mut processed_gen: Vec<u64> = vec![u64::MAX; insns.len()];
+    let mut processed_gen: Vec<u32> = vec![u32::MAX; insns.len()];
     let mut block_iterations: Vec<usize> = vec![0; insns.len()];
-    let mut worklist: Vec<usize> = Vec::with_capacity(insns.len());
-    worklist.push(cfg.entry.index());
+    let mut worklist: VecDeque<usize> = VecDeque::with_capacity(insns.len());
+    // Use precomputed RPO from the CFG for the initial worklist seeding.
+    for &node in cfg.rpo() {
+        worklist.push_back(cfg.graph[node].start.0);
+    }
 
     let mut trace: Vec<TraceEntry> =
         if collect_trace { Vec::with_capacity(insns.len()) } else { Vec::new() };
 
     let mut visited = vec![false; insns.len()];
     let mut total_pc: usize = 0;
-    while let Some(pc_idx) = worklist.pop() {
+    while let Some(pc_idx) = worklist.pop_front() {
         if processed_gen[pc_idx] == states_gen[pc_idx] {
             continue;
         }
@@ -479,9 +483,9 @@ fn refine_edge(out: &mut VerifierState, kind: EdgeKind, last_jump: Option<(JumpO
 #[inline]
 fn merge_successor(
     states: &mut [Option<VerifierState>],
-    states_gen: &mut [u64],
+    states_gen: &mut [u32],
     block_iterations: &mut [usize],
-    worklist: &mut Vec<usize>,
+    worklist: &mut VecDeque<usize>,
     target_pc: usize,
     incoming: VerifierState,
     widening_threshold: usize,
@@ -490,7 +494,7 @@ fn merge_successor(
         None => {
             states[target_pc] = Some(incoming);
             states_gen[target_pc] = states_gen[target_pc].wrapping_add(1);
-            worklist.push(target_pc);
+            worklist.push_back(target_pc);
         }
         Some(existing) => {
             block_iterations[target_pc] += 1;
@@ -499,9 +503,10 @@ fn merge_successor(
             } else {
                 existing.join_assign(&incoming)
             };
+
             if changed {
                 states_gen[target_pc] = states_gen[target_pc].wrapping_add(1);
-                worklist.push(target_pc);
+                worklist.push_back(target_pc);
             }
         }
     }

@@ -38,7 +38,7 @@ staged *from* these files by `fuzz/build.rs`; fixtures are its upstream.
 | `misaligned.bin` | 3 | `mov r1, 1; stw [r10-7], 1; exit` | ❌ `Misaligned` (@0xfff9, needs 4) | In-bounds (505+4 ≤ 512) but unaligned; v0.4 alignment path |
 | `join_uninit.bin` | 8 | `mov r1, 10; jeq r1, 10, +2; mov r0, 0; ja +2; stxdw [r10-8], r1; ja +0; ldxdw r0, [r10-8]; exit` | ❌ `UninitStackRead` (merge) | Taken path stores, fallthrough doesn't; merge must reject (worklist fixed-point regression test) |
 
-Expected disassembly (from `ebpf-lab disasm`, v0.4.0):
+Expected disassembly (from `ebpf-lab disasm`):
 
 ```
 mov_exit:  mov r0, 1 / exit

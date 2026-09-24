@@ -1,5 +1,6 @@
 ---
 source: crates/ebpf-cfg/tests/golden.rs
+assertion_line: 23
 expression: "dot_fixture(\"branch.bin\")"
 ---
 digraph cfg {

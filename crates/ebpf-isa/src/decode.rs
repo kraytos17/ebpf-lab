@@ -46,19 +46,21 @@ pub fn decode_program(bytes: &[u8]) -> Result<Vec<Insn>, DecodeError> {
 
 /// Decode a single instruction; returns the instruction plus bytes consumed (8 or 16).
 fn decode_one(raw: RawInsn, rest: &[u8]) -> Result<(Insn, usize), DecodeError> {
-    if raw.opcode == opcode::JMP_EXIT {
-        return Ok((Insn::Exit, RawInsn::SIZE));
-    }
-    if raw.opcode == opcode::JMP_CALL {
-        return Ok((Insn::Call { func: raw.imm.cast_unsigned() }, RawInsn::SIZE));
-    }
-    if raw.opcode == opcode::LD_IMM_DW {
-        let wide: &[u8; 16] = rest.first_chunk().ok_or(DecodeError::TruncatedWide)?;
-        let hi: &[u8; RawInsn::SIZE] =
-            wide[RawInsn::SIZE..16].try_into().map_err(|_| DecodeError::TruncatedWide)?;
-        let next = RawInsn::from_bytes(hi);
-        let imm = i64::from(raw.imm.cast_unsigned()) | (i64::from(next.imm.cast_unsigned()) << 32);
-        return Ok((Insn::LoadImm64 { dst: Reg::new(raw.dst())?, imm }, 16));
+    match raw.opcode {
+        opcode::JMP_EXIT => return Ok((Insn::Exit, RawInsn::SIZE)),
+        opcode::JMP_CALL => {
+            return Ok((Insn::Call { func: raw.imm.cast_unsigned() }, RawInsn::SIZE));
+        }
+        opcode::LD_IMM_DW => {
+            let wide: &[u8; 16] = rest.first_chunk().ok_or(DecodeError::TruncatedWide)?;
+            let hi: &[u8; RawInsn::SIZE] =
+                wide[RawInsn::SIZE..16].try_into().map_err(|_| DecodeError::TruncatedWide)?;
+            let next = RawInsn::from_bytes(hi);
+            let imm =
+                i64::from(raw.imm.cast_unsigned()) | (i64::from(next.imm.cast_unsigned()) << 32);
+            return Ok((Insn::LoadImm64 { dst: Reg::new(raw.dst())?, imm }, 16));
+        }
+        _ => {}
     }
 
     let klass = opcode::klass(raw.opcode);

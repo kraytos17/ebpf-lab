@@ -76,14 +76,16 @@ impl Range {
     /// convergence (each widening step strictly grows toward `Top`,
     /// which has finite height).
     #[must_use]
-    pub fn widen(self, other: Self) -> Self {
+    pub const fn widen(self, other: Self) -> Self {
         match (self, other) {
             (Self::Bottom, r) | (r, Self::Bottom) => r,
             (Self::Top, _) | (_, Self::Top) => Self::Top,
             (Self::Interval { lo: l1, hi: h1 }, Self::Interval { lo: l2, hi: h2 }) => {
-                let lo = if l2 < l1 { i64::MIN } else { l1.min(l2) };
-                let hi = if h2 > h1 { i64::MAX } else { h1.max(h2) };
-                Self::Interval { lo, hi }
+                // lo: if l2 < l1 → MIN (widened outward); else l1 (l2 >= l1, so min = l1).
+                let lo = if l2 < l1 { i64::MIN } else { l1 };
+                // hi: if h2 > h1 → MAX (widened outward); else h1 (h2 <= h1, so max = h1).
+                let hi = if h2 > h1 { i64::MAX } else { h1 };
+                if lo == i64::MIN && hi == i64::MAX { Self::Top } else { Self::Interval { lo, hi } }
             }
         }
     }
@@ -204,10 +206,20 @@ impl std::ops::Shl for Range {
 impl std::ops::Shr for Range {
     type Output = Self;
 
-    /// Conservatively `Top`: precise shift modeling is v0.6 work.
+    /// When the shift is a known constant in `[0, 64)`, compute the
+    /// precise interval (unsigned shift). Otherwise conservatively `Top`.
     fn shr(self, shift: Self) -> Self {
         match (self, shift) {
             (Self::Bottom, _) | (_, Self::Bottom) => Self::Bottom,
+            (Self::Interval { lo, hi }, Self::Interval { lo: s_lo, hi: s_hi })
+                if s_lo == s_hi && (0..64).contains(&s_lo) =>
+            {
+                #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                let s = s_lo as u32;
+                let lo = lo.cast_unsigned().wrapping_shr(s);
+                let hi = hi.cast_unsigned().wrapping_shr(s);
+                Self::Interval { lo: lo.cast_signed(), hi: hi.cast_signed() }
+            }
             _ => Self::Top,
         }
     }
@@ -221,6 +233,12 @@ impl fmt::Debug for Range {
             Self::Interval { lo, hi } if lo == hi => write!(f, "{lo}"),
             Self::Interval { lo, hi } => write!(f, "[{lo}, {hi}]"),
         }
+    }
+}
+
+impl fmt::Display for Range {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
     }
 }
 
@@ -304,6 +322,18 @@ impl RegType {
         } else {
             *self = joined;
             true
+        }
+    }
+}
+
+impl fmt::Display for RegType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotInit => f.write_str("⊥"),
+            Self::Scalar(r) => write!(f, "s:{r}"),
+            Self::StackPtr { offset } => write!(f, "sp+{offset}"),
+            Self::MapPtr { fd } => write!(f, "mp({fd})"),
+            Self::MaybeMapPtr { fd } => write!(f, "?mp({fd})"),
         }
     }
 }
@@ -693,8 +723,8 @@ mod tests {
         assert_eq!(v << Range::Top, Range::Top);
         // Negative values degrade to Top.
         assert_eq!(Range::Interval { lo: -1, hi: 3 } << Range::exact(1), Range::Top);
-        // Shr/sar are conservatively Top.
-        assert_eq!(v >> Range::exact(1), Range::Top);
+        // Shr is precise for constant shifts.
+        assert_eq!(v >> Range::exact(1), Range::Interval { lo: 0, hi: 1 });
         assert_eq!(v.sar(Range::exact(1)), Range::Top);
     }
 
@@ -793,7 +823,7 @@ mod tests {
     fn widen_grows_to_top() {
         let old = Range::Interval { lo: 5, hi: 10 };
         let new = Range::Interval { lo: -100, hi: 100 };
-        assert_eq!(old.widen(new), Range::Interval { lo: i64::MIN, hi: i64::MAX });
+        assert_eq!(old.widen(new), Range::Top);
     }
 
     #[test]

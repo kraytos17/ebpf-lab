@@ -171,6 +171,15 @@ impl Width {
     }
 }
 
+impl fmt::Display for Width {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::B32 => f.write_str("32"),
+            Self::B64 => Ok(()), // 64-bit is the default, unmarked.
+        }
+    }
+}
+
 /// Byte-swap direction for `BPF_END`: little-endian vs big-endian output.
 /// A named enum instead of a `to_be: bool` flag so matches read as
 /// `Endian::Be` rather than a bare boolean.
@@ -180,6 +189,15 @@ pub enum Endian {
     Le,
     /// Big-endian output (`BPF_TO_BE`): mask, then swap within the width.
     Be,
+}
+
+impl fmt::Display for Endian {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Le => f.write_str("le"),
+            Self::Be => f.write_str("be"),
+        }
+    }
 }
 
 /// ALU operations (upper nibble of ALU/ALU64 opcodes).
@@ -266,6 +284,12 @@ impl AluOp {
     }
 }
 
+impl fmt::Display for AluOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.mnemonic())
+    }
+}
+
 /// Jump operations (upper nibble of JMP/JMP32 opcodes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JumpOp {
@@ -347,6 +371,12 @@ impl JumpOp {
     }
 }
 
+impl fmt::Display for JumpOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.mnemonic())
+    }
+}
+
 /// Memory access width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemSize {
@@ -396,6 +426,12 @@ impl MemSize {
             Self::W => "w",
             Self::Dw => "dw",
         }
+    }
+}
+
+impl fmt::Display for MemSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.mnemonic())
     }
 }
 
@@ -476,29 +512,21 @@ impl fmt::Display for Insn {
     /// Canonical text form (the same rendering the disassembler prints).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Alu { width, op, dst, src } => {
-                let suffix = if width.is_64() { "" } else { "32" };
-                match (op, src) {
-                    (AluOp::Neg, _) => write!(f, "neg{suffix} {dst}"),
-                    (AluOp::End(_), Operand::Imm(v)) => write!(f, "end{suffix} {dst}, {v}"),
-                    _ => write!(f, "{}{suffix} {dst}, {src}", op.mnemonic()),
-                }
-            }
-            Self::Load { size, dst, base, offset } => {
-                write!(f, "{dst} = *({} *)({base} + {offset})", size.mnemonic())
-            }
-            Self::Store { size, base, offset, src } => match src {
-                Operand::Imm(v) => {
-                    write!(f, "*({} *)({base} + {offset}) = {v}", size.mnemonic())
-                }
-                Operand::Reg(r) => {
-                    write!(f, "*({} *)({base} + {offset}) = {r}", size.mnemonic())
-                }
+            Self::Alu { width, op, dst, src } => match (op, src) {
+                (AluOp::Neg, _) => write!(f, "neg{width} {dst}"),
+                (AluOp::End(_), Operand::Imm(v)) => write!(f, "end{width} {dst}, {v}"),
+                _ => write!(f, "{op}{width} {dst}, {src}"),
             },
+            Self::Load { size, dst, base, offset } => {
+                write!(f, "{dst} = *({size} *)({base} + {offset})")
+            }
+            Self::Store { size, base, offset, src } => {
+                write!(f, "*({size} *)({base} + {offset}) = {src}")
+            }
             Self::LoadImm64 { dst, imm } => write!(f, "{dst} = {imm:#x}"),
             Self::Jump { op, dst, src, offset, .. } => match op {
                 JumpOp::Always => write!(f, "ja +{offset}"),
-                _ => write!(f, "{} {dst}, {src}, +{offset}", op.mnemonic()),
+                _ => write!(f, "{op} {dst}, {src}, +{offset}"),
             },
             Self::Call { func } => write!(f, "call {func}"),
             Self::Exit => write!(f, "exit"),

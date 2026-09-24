@@ -1,6 +1,6 @@
 ---
 source: crates/ebpf-verifier/tests/trace_snapshot.rs
-assertion_line: 28
+assertion_line: 37
 expression: "trace_json(\"diamond.bin\")"
 ---
 [
@@ -157,160 +157,6 @@ expression: "trace_json(\"diamond.bin\")"
     ],
     "stack_init": [],
     "action": "jeq r1, 10, +2"
-  },
-  {
-    "pc": 4,
-    "insns": "4   mov r0, 2",
-    "regs": [
-      {
-        "r": 0,
-        "type": "scalar",
-        "range": [
-          2,
-          2
-        ],
-        "offset": null
-      },
-      {
-        "r": 1,
-        "type": "bottom",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 2,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 3,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 4,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 5,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 6,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 7,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 8,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 9,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 10,
-        "type": "stack_ptr",
-        "range": null,
-        "offset": 0
-      }
-    ],
-    "stack_init": [],
-    "action": "r0 mov= 2"
-  },
-  {
-    "pc": 5,
-    "insns": "5   exit",
-    "regs": [
-      {
-        "r": 0,
-        "type": "scalar",
-        "range": [
-          2,
-          2
-        ],
-        "offset": null
-      },
-      {
-        "r": 1,
-        "type": "bottom",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 2,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 3,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 4,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 5,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 6,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 7,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 8,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 9,
-        "type": "not_init",
-        "range": null,
-        "offset": null
-      },
-      {
-        "r": 10,
-        "type": "stack_ptr",
-        "range": null,
-        "offset": 0
-      }
-    ],
-    "stack_init": [],
-    "action": "exit"
   },
   {
     "pc": 2,
@@ -471,6 +317,83 @@ expression: "trace_json(\"diamond.bin\")"
     ],
     "stack_init": [],
     "action": "ja r0, 0, +1"
+  },
+  {
+    "pc": 4,
+    "insns": "4   mov r0, 2",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          2,
+          2
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "bottom",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "r0 mov= 2"
   },
   {
     "pc": 5,
