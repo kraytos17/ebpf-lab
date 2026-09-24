@@ -153,8 +153,7 @@ fn check_map_ptr(state: &VerifierState, r: Reg, size: usize, pc: usize) -> Resul
     let base_off = state.regs[r.index()].stack_offset().unwrap_or(0);
     let width = u8::try_from(size).map_err(|_| VerifyError::StackOverflow { pc })?;
     let (start, lo, hi) = byte_range(base_off, 0, width, pc)?;
-    let readable = state.stack_init.get(lo..=hi).ok_or(VerifyError::StackOverflow { pc })?;
-    if !readable.iter().all(|&b| b) {
+    if !state.stack_range_init(lo, hi) {
         return Err(VerifyError::UninitStackRead { pc, offset: start });
     }
     Ok(())
@@ -638,9 +637,7 @@ fn check_and_transfer(
                 let (start, lo, hi) = check_mem_access(state, *base, *offset, *size, pc)?;
                 // Every spanned byte must be initialized — a partial store
                 // must not satisfy a later wide load (the VM faults there).
-                let readable =
-                    state.stack_init.get(lo..=hi).ok_or(VerifyError::StackOverflow { pc })?;
-                if !readable.iter().all(|&b| b) {
+                if !state.stack_range_init(lo, hi) {
                     return Err(VerifyError::UninitStackRead { pc, offset: start });
                 }
             }
@@ -661,15 +658,7 @@ fn check_and_transfer(
                 check_map_value_bounds(state, fd, *offset, *size, pc)?;
             } else {
                 let (_, lo, hi) = check_mem_access(state, *base, *offset, *size, pc)?;
-                state
-                    .stack_init
-                    .get_mut(lo..=hi)
-                    .ok_or(VerifyError::StackOverflow { pc })?
-                    .fill(true);
-                for s in lo / 8..=hi / 8 {
-                    let slot = state.stack.get_mut(s).ok_or(VerifyError::StackOverflow { pc })?;
-                    *slot = RegType::Scalar(Range::Top);
-                }
+                state.mark_stack_range(lo, hi);
             }
         }
         Insn::Jump { op: JumpOp::Always, .. } => {
@@ -690,7 +679,7 @@ fn check_and_transfer(
             Some(helper) => {
                 state.regs[0] = helper.effect(state, pc)?;
                 if helper.may_write_memory() {
-                    state.stack.fill(RegType::Scalar(Range::Top));
+                    state.clear_stack_init();
                 }
             }
             None => {

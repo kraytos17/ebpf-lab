@@ -170,20 +170,20 @@ cargo bench -p ebpf-vm --bench vm
 cargo bench -p ebpf-verifier --bench verify
 ```
 
-Baselines (current main, `profile.release`, criterion):
+Baselines (current main, `profile.release`, criterion, 3s/200 samples):
 
 | Benchmark | Result |
 |-----------|--------|
-| `decode/4096_slots` | ~29 µs (~1.05 GiB/s) |
+| `decode/4096_slots` | ~27 µs (~1.15 GiB/s) |
 | `decode/mixed_512_slots` | ~3.1 µs (cross-class dispatch) |
-| `cfg/4096_slots` | ~112 µs (~36 Melem/s) |
-| `vm/straight_1000_adds` | ~3.4 µs (~292 Melem/s) |
-| `vm/loop_1000_iters` | ~9.2 µs (~325 Melem/s) |
-| `memory/store_load` | ~40 ns per access (setup-isolated; the old ~500 ps was a folding artifact) |
-| `verify/arith/verdict` | ~265 ns |
-| `verify/wide_500/verdict` | ~4.7 µs (~9.4 ns/insn, linear) |
-| `verify/wide_500/trace` | ~182 µs (trace building dominates: ~39× verdict; rendering now inside `verify_traced`) |
-| `verify/map_guarded_value_access/verdict` | ~1.1 µs (null-guarded lookup + descriptor-bounded access) |
+| `cfg/4096_slots` | ~48 µs (~85 Melem/s) |
+| `vm/straight_1000_adds` | ~3.6 µs (~279 Melem/s) |
+| `vm/loop_1000_iters` | ~7.9 µs (~380 Melem/s) |
+| `memory/store_load` | ~32 ns per access (setup-isolated; the old ~500 ps was a folding artifact) |
+| `verify/arith/verdict` | ~183 ns |
+| `verify/wide_500/verdict` | ~4.1 µs (~8.2 ns/insn, linear) |
+| `verify/wide_500/trace` | ~154 µs (trace building dominates: ~37× verdict; rendering now inside `verify_traced`) |
+| `verify/map_guarded_value_access/verdict` | ~492 ns (null-guarded lookup + descriptor-bounded access) |
 
 No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 

@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::state::{RegType, STACK_BYTES, STACK_BYTES_I32};
+use crate::state::{RegType, STACK_BYTES_I32};
 
 /// A per-PC state snapshot in the verification trace.
 #[derive(Debug, Serialize)]
@@ -75,17 +75,26 @@ pub const fn format_reg(index: usize, reg: &RegType) -> RegSummary {
 /// init-tracking metadata, not a range (exact-value rendering arrives
 /// with v0.9 value tracking).
 #[must_use]
-pub fn format_stack(init: &[bool; STACK_BYTES]) -> Vec<StackSummary> {
+pub fn format_stack(init: &[u64; 8]) -> Vec<StackSummary> {
     let mut out = Vec::new();
     // r10-relative start offset of slot 0. `STACK_BYTES_I32` is the
     // compile-time signed twin, so this is a plain negation — no
     // `try_from`/`unwrap_or` around a value known since v0.4.
     let base = -STACK_BYTES_I32;
-    let (chunks, _) = init.as_chunks::<8>();
-    for (i, bytes) in chunks.iter().enumerate() {
-        if bytes.iter().all(|&b| b) {
-            let offset = base + i32::try_from(i).unwrap_or(0) * 8;
+    for (word_idx, &word) in init.iter().enumerate() {
+        if word == u64::MAX {
+            // All 8 bytes in this word initialized: one "unknown" entry.
+            let offset = base + i32::try_from(word_idx).unwrap_or(0) * 8;
             out.push(StackSummary { offset, value: "unknown".into() });
+        } else if word != 0 {
+            // Partial word: report individual initialized bytes.
+            for bit in 0..64u32 {
+                if word & (1u64 << bit) != 0 {
+                    let byte = word_idx * 64 + bit as usize;
+                    let offset = base + i32::try_from(byte).unwrap_or(0);
+                    out.push(StackSummary { offset, value: "unknown".into() });
+                }
+            }
         }
     }
     out

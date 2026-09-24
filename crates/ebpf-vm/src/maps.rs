@@ -390,13 +390,11 @@ impl MapStore {
                 Ok(Some(data[idx].as_slice()))
             }
             Self::LruArray { data, stamps, stamp_of, seq, .. } => {
-                if data.contains_key(key) {
-                    // Touch: stamp as most recent.
+                data.get(key).map_or(Ok(None), |v| {
+                    // Touch: stamp as of most recent
                     lru_touch(stamps, stamp_of, seq, key);
-                    Ok(data.get(key).map(Vec::as_slice))
-                } else {
-                    Ok(None)
-                }
+                    Ok(Some(v.as_slice()))
+                })
             }
         }
     }

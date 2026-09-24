@@ -23,7 +23,6 @@ pub mod memory;
 use ebpf_isa::insn::{AluOp, Endian, Insn, JumpOp, MemSize, Reg, Width};
 use exec::{ExecInsn, load};
 use maps::build_stores;
-use std::collections::HashMap;
 use thiserror::Error;
 
 pub use maps::{MapDesc, MapError, MapStore, MapType};
@@ -126,15 +125,16 @@ pub type HelperFn = fn(&mut Vm) -> StepResult;
 /// Registry of helper implementations, keyed by helper id.
 ///
 /// Ids `0..=3` (the kernel's built-in range) live in dense slots — a
-/// direct index, no hashing on the dispatch path — while higher ids hash
-/// as before. [`insert`](Self::insert) routes by id, so overriding a
-/// built-in id behaves exactly like the previous single-map registry.
+/// direct index, no hashing on the dispatch path — while higher ids use
+/// a small sorted slice with binary search. [`insert`](Self::insert)
+/// routes by id, so overriding a built-in id behaves exactly like the
+/// previous single-map registry.
 #[derive(Debug, Default)]
 pub struct HelperRegistry {
     /// Dense slots for ids `0..=3` (`None` = unknown helper).
     low: [Option<HelperFn>; 4],
-    /// Custom helpers for ids `>= 4`.
-    high: HashMap<u32, HelperFn>,
+    /// Custom helpers for ids `>= 4`, sorted by key for binary search.
+    high: Vec<(u32, HelperFn)>,
 }
 
 impl HelperRegistry {
@@ -156,22 +156,23 @@ impl HelperRegistry {
     }
 
     /// Look up a helper implementation (direct index for ids `0..=3`,
-    /// hashed for the rest).
+    /// binary search for the rest).
     #[must_use]
     pub fn get(&self, func: u32) -> Option<HelperFn> {
-        usize::try_from(func)
-            .ok()
-            .filter(|&i| i < self.low.len())
-            .map_or_else(|| self.high.get(&func).copied(), |i| self.low[i])
+        usize::try_from(func).ok().filter(|&i| i < self.low.len()).map_or_else(
+            || self.high.binary_search_by_key(&func, |&(k, _)| k).ok().map(|i| self.high[i].1),
+            |i| self.low[i],
+        )
     }
 
     /// Register one helper implementation.
     pub fn insert(&mut self, func: u32, helper: HelperFn) {
         match usize::try_from(func) {
             Ok(i) if i < self.low.len() => self.low[i] = Some(helper),
-            _ => {
-                self.high.insert(func, helper);
-            }
+            _ => match self.high.binary_search_by_key(&func, |&(k, _)| k) {
+                Ok(i) => self.high[i].1 = helper,
+                Err(i) => self.high.insert(i, (func, helper)),
+            },
         }
     }
 }

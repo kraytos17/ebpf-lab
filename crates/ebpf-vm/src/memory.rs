@@ -48,7 +48,7 @@ pub const MAP_SCRATCH_BASE: i64 = 0x3_0000;
 #[inline]
 fn check_alignment(addr: i64, size: MemSize) -> Result<(), MemError> {
     let align = i64::from(size.bytes());
-    if align > 1 && addr.rem_euclid(align) != 0 {
+    if align > 1 && (addr & (align - 1)) != 0 {
         return Err(MemError::Misaligned { addr, size: size.bytes(), align: size.bytes() });
     }
     Ok(())
@@ -426,9 +426,6 @@ impl MemoryView {
     /// value); past-the-value reads are [`MemError::OutOfBounds`].
     #[inline]
     pub fn load(&self, addr: i64, size: MemSize) -> Result<i64, MemError> {
-        if (StackMemory::LOW..=STACK_BASE).contains(&addr) {
-            return self.stack.load(addr, size, self.align_checks);
-        }
         match Self::classify(addr) {
             MemRegion::Stack => self.stack.load(addr, size, self.align_checks),
             MemRegion::Packet => {
@@ -475,9 +472,6 @@ impl MemoryView {
     /// See [`load`](Self::load).
     #[inline]
     pub fn store(&mut self, addr: i64, size: MemSize, value: i64) -> Result<(), MemError> {
-        if (StackMemory::LOW..=STACK_BASE).contains(&addr) {
-            return self.stack.store(addr, size, value, self.align_checks);
-        }
         match Self::classify(addr) {
             MemRegion::Stack => self.stack.store(addr, size, value, self.align_checks),
             MemRegion::MapScratch => self.scratch_store(addr, size, value),

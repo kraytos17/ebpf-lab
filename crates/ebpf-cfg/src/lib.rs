@@ -15,7 +15,6 @@
 
 use ebpf_isa::insn::{Insn, JumpOp};
 use petgraph::graph::{DiGraph, NodeIndex};
-use std::collections::BTreeSet;
 use thiserror::Error;
 
 /// Decoded-instruction index into the [`Insn`] slice (not a byte offset,
@@ -203,23 +202,26 @@ fn resolve_target(
 /// # Errors
 ///
 /// Propagates [`CfgError`] from invalid jump targets.
-pub fn find_leaders(insns: &[Insn]) -> Result<BTreeSet<Pc>, CfgError> {
+pub fn find_leaders(insns: &[Insn]) -> Result<Vec<Pc>, CfgError> {
     if insns.is_empty() {
         return Err(CfgError::EmptyProgram);
     }
 
     let (slot_of, decoded_of_slot) = slot_maps(insns);
-    let mut leaders = BTreeSet::new();
+    let mut leaders = Vec::with_capacity(insns.len().min(1024));
 
-    leaders.insert(Pc(0));
+    leaders.push(Pc(0));
     for (i, insn) in insns.iter().enumerate() {
         if let Insn::Jump { offset, .. } = insn {
-            leaders.insert(resolve_target(&slot_of, &decoded_of_slot, i, *offset)?);
+            leaders.push(resolve_target(&slot_of, &decoded_of_slot, i, *offset)?);
         }
         if matches!(insn, Insn::Jump { .. } | Insn::Exit) && i + 1 < insns.len() {
-            leaders.insert(Pc(i + 1));
+            leaders.push(Pc(i + 1));
         }
     }
+
+    leaders.sort_unstable();
+    leaders.dedup();
     Ok(leaders)
 }
 
@@ -254,14 +256,13 @@ pub fn build_cfg(insns: &[Insn]) -> Result<Cfg, CfgError> {
 
     let (slot_of, decoded_of_slot) = slot_maps(insns);
     let leaders = find_leaders(insns)?;
-    let leader_vec: Vec<Pc> = leaders.into_iter().collect();
 
     // Block ranges computed once: each leader pairs with the next leader
     // (or the program end), so no loop rescans the leader list.
     let end_of_program = Pc(insns.len());
-    let ranges: Vec<(Pc, Pc)> = leader_vec
+    let ranges: Vec<(Pc, Pc)> = leaders
         .iter()
-        .zip(leader_vec.iter().skip(1).copied().chain([end_of_program]))
+        .zip(leaders.iter().skip(1).copied().chain([end_of_program]))
         .map(|(&start, end)| (start, end))
         .collect();
 
@@ -395,7 +396,7 @@ mod tests {
 
         let insns = decode(&bytes);
         let leaders = find_leaders(&insns).unwrap();
-        assert_eq!(leaders, BTreeSet::from([Pc(0), Pc(3), Pc(4)]));
+        assert_eq!(leaders, vec![Pc(0), Pc(3), Pc(4)]);
 
         let cfg = build_cfg(&insns).unwrap();
         assert_eq!(cfg.graph.node_count(), 3);

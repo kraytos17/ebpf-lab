@@ -1,6 +1,6 @@
 ---
 source: crates/ebpf-verifier/tests/trace_snapshot.rs
-assertion_line: 57
+assertion_line: 58
 expression: "trace_json_maps(\"map_hash_lookup.bin\")"
 ---
 [
@@ -309,7 +309,24 @@ expression: "trace_json_maps(\"map_hash_lookup.bin\")"
         "offset": 0
       }
     ],
-    "stack_init": [],
+    "stack_init": [
+      {
+        "offset": -8,
+        "value": "unknown"
+      },
+      {
+        "offset": -7,
+        "value": "unknown"
+      },
+      {
+        "offset": -6,
+        "value": "unknown"
+      },
+      {
+        "offset": -5,
+        "value": "unknown"
+      }
+    ],
     "action": "*(w *)(r10 + -8) = 1"
   },
   {
@@ -386,7 +403,24 @@ expression: "trace_json_maps(\"map_hash_lookup.bin\")"
         "offset": 0
       }
     ],
-    "stack_init": [],
+    "stack_init": [
+      {
+        "offset": -8,
+        "value": "unknown"
+      },
+      {
+        "offset": -7,
+        "value": "unknown"
+      },
+      {
+        "offset": -6,
+        "value": "unknown"
+      },
+      {
+        "offset": -5,
+        "value": "unknown"
+      }
+    ],
     "action": "call 1"
   },
   {
@@ -466,6 +500,50 @@ expression: "trace_json_maps(\"map_hash_lookup.bin\")"
     "stack_init": [
       {
         "offset": -16,
+        "value": "unknown"
+      },
+      {
+        "offset": -15,
+        "value": "unknown"
+      },
+      {
+        "offset": -14,
+        "value": "unknown"
+      },
+      {
+        "offset": -13,
+        "value": "unknown"
+      },
+      {
+        "offset": -12,
+        "value": "unknown"
+      },
+      {
+        "offset": -11,
+        "value": "unknown"
+      },
+      {
+        "offset": -10,
+        "value": "unknown"
+      },
+      {
+        "offset": -9,
+        "value": "unknown"
+      },
+      {
+        "offset": -8,
+        "value": "unknown"
+      },
+      {
+        "offset": -7,
+        "value": "unknown"
+      },
+      {
+        "offset": -6,
+        "value": "unknown"
+      },
+      {
+        "offset": -5,
         "value": "unknown"
       }
     ],
@@ -548,6 +626,50 @@ expression: "trace_json_maps(\"map_hash_lookup.bin\")"
     "stack_init": [
       {
         "offset": -16,
+        "value": "unknown"
+      },
+      {
+        "offset": -15,
+        "value": "unknown"
+      },
+      {
+        "offset": -14,
+        "value": "unknown"
+      },
+      {
+        "offset": -13,
+        "value": "unknown"
+      },
+      {
+        "offset": -12,
+        "value": "unknown"
+      },
+      {
+        "offset": -11,
+        "value": "unknown"
+      },
+      {
+        "offset": -10,
+        "value": "unknown"
+      },
+      {
+        "offset": -9,
+        "value": "unknown"
+      },
+      {
+        "offset": -8,
+        "value": "unknown"
+      },
+      {
+        "offset": -7,
+        "value": "unknown"
+      },
+      {
+        "offset": -6,
+        "value": "unknown"
+      },
+      {
+        "offset": -5,
         "value": "unknown"
       }
     ],

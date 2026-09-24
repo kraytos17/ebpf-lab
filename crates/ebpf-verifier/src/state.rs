@@ -310,10 +310,8 @@ impl RegType {
 
 /// A single 8-byte stack slot's abstract value.
 ///
-/// A plain [`RegType`] alias: initialization is tracked separately per
-/// byte (see [`VerifierState::stack_init`]), so the slot carries the
-/// value only. Loads produce `Top`; kept for trace display and future
-/// value tracking.
+/// Initialization is tracked per byte in the [`VerifierState::stack_init`]
+/// bitset
 pub type StackSlot = RegType;
 
 /// Number of 8-byte stack slots (512 / 8 = 64).
@@ -334,16 +332,17 @@ pub const STACK_BYTES: usize = 512;
 pub const STACK_BYTES_I32: i32 = 512;
 
 /// Abstract machine state at a single program counter.
+///
+/// `stack_init` is a `[u64; 8]` bitset (one bit per stack byte) — 8×
+/// smaller than the old `[bool; 512]` and joinable with 8 word-ANDs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifierState {
     /// Register file: r0–r10.
     pub regs: [RegType; 11],
-    /// Stack slots (frame pointer at r10 points to slot 64, growing down).
-    pub stack: [StackSlot; STACK_SLOTS],
-    /// Per-byte initialization bitmap, mirroring the VM: byte index `i`
-    /// covers r10-relative offset `i - STACK_BYTES`. The single source
-    /// of truth for readability; `stack` slots carry values only.
-    pub stack_init: [bool; STACK_BYTES],
+    /// Per-byte initialization bitset. Word `i` covers bytes
+    /// `i*64 .. i*64+64`. A set bit means the byte has been written
+    /// and is safe to read. Mirrors the VM's own `[u64; 8]` bitmap.
+    pub stack_init: [u64; 8],
     /// fd-indexed map table (index 0 always `None`). Immutable,
     /// reference-counted configuration: set once from
     /// [`VerifyConfig`](crate::verify::VerifyConfig), shared
@@ -365,12 +364,31 @@ impl VerifierState {
     pub fn initial_with_maps(maps: Vec<Option<MapDesc>>) -> Self {
         let mut regs = array::from_fn(|_| RegType::NotInit);
         regs[10] = RegType::StackPtr { offset: 0 };
-        Self {
-            regs,
-            stack: array::from_fn(|_| RegType::NotInit),
-            stack_init: [false; STACK_BYTES],
-            maps: maps.into(),
+        Self { regs, stack_init: [0u64; 8], maps: maps.into() }
+    }
+
+    /// Set one byte in the `stack_init` bitset.
+    #[inline]
+    pub const fn mark_stack_byte(&mut self, byte: usize) {
+        self.stack_init[byte >> 6] |= 1u64 << (byte & 63);
+    }
+
+    /// Fill a range of bytes in the `stack_init` bitset.
+    pub fn mark_stack_range(&mut self, lo: usize, hi: usize) {
+        for byte in lo..=hi {
+            self.mark_stack_byte(byte);
         }
+    }
+
+    /// Whether every byte in `lo..=hi` is initialized.
+    #[must_use]
+    pub fn stack_range_init(&self, lo: usize, hi: usize) -> bool {
+        (lo..=hi).all(|byte| self.stack_init[byte >> 6] & (1u64 << (byte & 63)) != 0)
+    }
+
+    /// Zero the entire `stack_init` bitset
+    pub const fn clear_stack_init(&mut self) {
+        self.stack_init = [0u64; 8];
     }
 
     /// Merge two fd tables: keep entries both sides agree on.
@@ -410,10 +428,9 @@ impl VerifierState {
     #[must_use]
     pub fn join(a: &Self, b: &Self) -> Self {
         let regs = array::from_fn(|i| RegType::join(&a.regs[i], &b.regs[i]));
-        let stack = array::from_fn(|i| RegType::join(&a.stack[i], &b.stack[i]));
-        let stack_init = array::from_fn(|i| a.stack_init[i] && b.stack_init[i]);
+        let stack_init = array::from_fn(|i| a.stack_init[i] & b.stack_init[i]);
         let maps = Self::join_maps(&a.maps, &b.maps);
-        Self { regs, stack, stack_init, maps }
+        Self { regs, stack_init, maps }
     }
 
     /// Widen two states at a loop header: widen each scalar register,
@@ -426,10 +443,9 @@ impl VerifierState {
             _ => RegType::join(&old.regs[i], &new.regs[i]),
         });
 
-        let stack = array::from_fn(|i| RegType::join(&old.stack[i], &new.stack[i]));
-        let stack_init = array::from_fn(|i| old.stack_init[i] && new.stack_init[i]);
+        let stack_init = array::from_fn(|i| old.stack_init[i] & new.stack_init[i]);
         let maps = Self::join_maps(&old.maps, &new.maps);
-        Self { regs, stack, stack_init, maps }
+        Self { regs, stack_init, maps }
     }
 
     /// Join `other` into `self` in place. Returns true if anything changed.
@@ -443,11 +459,8 @@ impl VerifierState {
         for (a, b) in self.regs.iter_mut().zip(other.regs.iter()) {
             changed |= a.join_assign(b);
         }
-        for (a, b) in self.stack.iter_mut().zip(other.stack.iter()) {
-            changed |= a.join_assign(b);
-        }
         for (a, b) in self.stack_init.iter_mut().zip(other.stack_init.iter()) {
-            let next = *a && *b;
+            let next = *a & *b;
             if next != *a {
                 *a = next;
                 changed = true;
@@ -475,11 +488,8 @@ impl VerifierState {
                 changed = true;
             }
         }
-        for (a, b) in self.stack.iter_mut().zip(other.stack.iter()) {
-            changed |= a.join_assign(b);
-        }
         for (a, b) in self.stack_init.iter_mut().zip(other.stack_init.iter()) {
-            let next = *a && *b;
+            let next = *a & *b;
             if next != *a {
                 *a = next;
                 changed = true;
@@ -760,7 +770,7 @@ mod tests {
         let s = VerifierState::initial();
         assert!(matches!(s.regs[10], RegType::StackPtr { offset: 0 }));
         assert!(matches!(s.regs[0], RegType::NotInit));
-        assert!(s.stack_init.iter().all(|&b| !b));
+        assert!(s.stack_init.iter().all(|&w| w == 0));
     }
 
     #[test]

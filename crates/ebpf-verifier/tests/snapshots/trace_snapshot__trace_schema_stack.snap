@@ -1,6 +1,6 @@
 ---
 source: crates/ebpf-verifier/tests/trace_snapshot.rs
-assertion_line: 35
+assertion_line: 44
 expression: "trace_json(\"stack.bin\")"
 ---
 [
@@ -159,6 +159,34 @@ expression: "trace_json(\"stack.bin\")"
       {
         "offset": -8,
         "value": "unknown"
+      },
+      {
+        "offset": -7,
+        "value": "unknown"
+      },
+      {
+        "offset": -6,
+        "value": "unknown"
+      },
+      {
+        "offset": -5,
+        "value": "unknown"
+      },
+      {
+        "offset": -4,
+        "value": "unknown"
+      },
+      {
+        "offset": -3,
+        "value": "unknown"
+      },
+      {
+        "offset": -2,
+        "value": "unknown"
+      },
+      {
+        "offset": -1,
+        "value": "unknown"
       }
     ],
     "action": "*(dw *)(r10 + -8) = r1"
@@ -241,6 +269,34 @@ expression: "trace_json(\"stack.bin\")"
       {
         "offset": -8,
         "value": "unknown"
+      },
+      {
+        "offset": -7,
+        "value": "unknown"
+      },
+      {
+        "offset": -6,
+        "value": "unknown"
+      },
+      {
+        "offset": -5,
+        "value": "unknown"
+      },
+      {
+        "offset": -4,
+        "value": "unknown"
+      },
+      {
+        "offset": -3,
+        "value": "unknown"
+      },
+      {
+        "offset": -2,
+        "value": "unknown"
+      },
+      {
+        "offset": -1,
+        "value": "unknown"
       }
     ],
     "action": "r0 = *(dw *)(r10 + -8)"
@@ -322,6 +378,34 @@ expression: "trace_json(\"stack.bin\")"
     "stack_init": [
       {
         "offset": -8,
+        "value": "unknown"
+      },
+      {
+        "offset": -7,
+        "value": "unknown"
+      },
+      {
+        "offset": -6,
+        "value": "unknown"
+      },
+      {
+        "offset": -5,
+        "value": "unknown"
+      },
+      {
+        "offset": -4,
+        "value": "unknown"
+      },
+      {
+        "offset": -3,
+        "value": "unknown"
+      },
+      {
+        "offset": -2,
+        "value": "unknown"
+      },
+      {
+        "offset": -1,
         "value": "unknown"
       }
     ],

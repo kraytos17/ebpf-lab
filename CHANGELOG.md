@@ -62,6 +62,27 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   state instead of cloning it (a single-successor visit propagates with
   zero state clones — one fewer full-state copy per visit).
 
+### Performance
+
+- CFG build: `find_leaders` uses `Vec` + `sort_unstable` instead of
+  `BTreeSet` (~6× faster leader discovery); `slot_maps` computed once
+  per `build_cfg` instead of twice. **cfg/4096: −63%**.
+- Verifier state: `stack_init` is a `[u64; 8]` bitset (was `[bool; 512]`);
+  dead `stack: [StackSlot; 64]` field removed (never read back by the
+  verifier). Per-edge clone drops from ~2.9 KB to ~0.5 KB.
+  **verify/arith: −30%, verify/loop_1000: −81%, verify/map_guarded: −57%**.
+- `MemoryView::load`/`store`: deduped redundant stack fast-path through
+  `classify`; `check_alignment` uses bit-mask instead of `rem_euclid`.
+  **memory/store_load: −5.5%**.
+- `HelperRegistry`: high ids (`>= 4`) use a sorted `Vec` with binary
+  search instead of `HashMap` (SipHash eliminated for the 3 custom
+  helpers). Hot-path ids `0..=3` unchanged (dense array).
+- `MapStore::LruArray::lookup`: single `data.get()` instead of
+  `contains_key` + `get` (one hash computation instead of two).
+- Bench methodology tightened: README baselines now use `--measurement-time
+  3 --sample-size 200 --warm-up-time 1` (was 1s/10/0.1s); CI widths
+  dropped from ±10–15% to ±0.5–2%.
+
 ## [0.7.0] - 2026-09-23
 
 ### Added
