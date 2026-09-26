@@ -1,10 +1,11 @@
 //! Stage the libFuzzer seed corpus before the fuzz target builds.
 //!
-//! Copies `tests/fixtures/*.bin` into `fuzz/corpus/decode_program/` and
-//! `fuzz/corpus/verify_pipeline/` so the corpus is always fresh without
-//! being committed (the corpus dir is gitignored). Re-runs only when the
-//! fixtures change, via `rerun-if-changed` — the same pattern as protobuf
-//! codegen in `build.rs`.
+//! Copies `tests/fixtures/*.bin` into `fuzz/corpus/decode_program/`,
+//! `fuzz/corpus/verify_pipeline/`, and `fuzz/corpus/ssa_pipeline/` so
+//! the corpus is always fresh without being committed (the corpus dir is
+//! gitignored). Re-runs only when the fixtures change, via
+//! `rerun-if-changed` — the same pattern as protobuf codegen in
+//! `build.rs`.
 //!
 //! Only `*.bin` copies are refreshed; fuzzer-discovered inputs in the
 //! corpus dir are never deleted.
@@ -58,7 +59,7 @@ fn main() {
     // Re-run when fixtures change: per-file directives catch content edits,
     // the directory directive catches added/removed fixtures.
     println!("cargo:rerun-if-changed={}", src.display());
-    for target in ["decode_program", "verify_pipeline"] {
+    for target in ["decode_program", "verify_pipeline", "ssa_pipeline"] {
         sync_dir(&src, &manifest.join("corpus").join(target));
     }
 }

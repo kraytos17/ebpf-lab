@@ -67,6 +67,14 @@ fn bench_decode(c: &mut Criterion) {
     group.bench_function("mixed_512_slots", |b| {
         b.iter(|| decode_program(black_box(&mixed)).expect("bench program decodes"));
     });
+    // Encode path (v0.10 Part B serializer): decode once in setup so only
+    // the serializer is timed.
+    let bytes = mov_chain(4096);
+    let insns = decode_program(&bytes).expect("bench program decodes");
+    group.throughput(Throughput::Bytes(bytes.len() as u64));
+    group.bench_function("encode_4096_slots", |b| {
+        b.iter(|| ebpf_isa::encode_program(black_box(&insns)).expect("encodes"));
+    });
     group.finish();
 }
 

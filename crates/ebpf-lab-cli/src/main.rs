@@ -1,7 +1,7 @@
 //! `ebpf-lab` — inspect, verify, execute, and optimize eBPF programs.
 //!
-//! v0.6 surface: `inspect`, `disasm`, `cfg`, `verify`, and `run`.
-//! Later milestones add `trace`, `optimize`, `xdp`, and `map`.
+//! Current surface: `inspect`, `disasm`, `cfg`, `verify`, `run`,
+//! and `xdp`. Later milestones add `trace`, `optimize`, and `map`.
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
@@ -72,6 +72,40 @@ enum Command {
         /// Path to a `--maps` JSON file (map descriptors with initial values).
         #[arg(long)]
         maps: Option<PathBuf>,
+        /// Path to a raw packet file (its length is the packet context).
+        /// Wins over `--packet-len` when both are given.
+        #[arg(long)]
+        packet: Option<PathBuf>,
+        /// Concrete packet length for bound checks.
+        #[arg(long)]
+        packet_len: Option<usize>,
+    },
+    /// Run an XDP program against a packet (verify, then execute).
+    Xdp {
+        /// Program input.
+        #[command(flatten)]
+        input: ProgramInput,
+        /// Path to a raw packet file.
+        packet: PathBuf,
+        /// Print each step (instruction plus changed registers).
+        #[arg(long)]
+        trace: bool,
+        /// Path to a `--maps` JSON file (map descriptors with initial values).
+        #[arg(long)]
+        maps: Option<PathBuf>,
+        /// Widening threshold for the pre-run verification.
+        #[arg(long, default_value_t = 16)]
+        max_iterations: usize,
+    },
+    /// Optimize a program (SSA constant folding, copy propagation, dead
+    /// code and unreachable block elimination) and write flat bytecode.
+    Optimize {
+        /// Program input (single-program `.bin` or `.o`).
+        #[command(flatten)]
+        input: ProgramInput,
+        /// Output path for the optimized flat bytecode.
+        #[arg(short, long)]
+        output: PathBuf,
     },
 }
 
@@ -179,9 +213,22 @@ fn cmd_verify(
     trace: bool,
     max_iterations: usize,
     maps: Option<&PathBuf>,
+    packet: Option<&PathBuf>,
+    packet_len: Option<usize>,
 ) -> anyhow::Result<()> {
-    let config =
-        ebpf_verifier::VerifyConfig { widening_threshold: max_iterations, maps: load_maps(maps)? };
+    let packet_len = match packet {
+        Some(packet) => Some(
+            fs::read(packet)
+                .with_context(|| format!("reading packet file `{}`", packet.display()))?
+                .len(),
+        ),
+        None => packet_len,
+    };
+    let config = ebpf_verifier::VerifyConfig {
+        widening_threshold: max_iterations,
+        maps: load_maps(maps)?,
+        packet_len,
+    };
 
     for prog in &load_decoded(path)? {
         let insns = &prog.insns;
@@ -267,6 +314,145 @@ fn cmd_run(path: &Path, trace: bool, maps: Option<&PathBuf>) -> anyhow::Result<(
     Ok(())
 }
 
+fn cmd_xdp(
+    path: &Path,
+    packet_path: &Path,
+    trace: bool,
+    maps: Option<&PathBuf>,
+    max_iterations: usize,
+) -> anyhow::Result<()> {
+    use ebpf_vm::StepResult;
+    let packet = fs::read(packet_path)
+        .with_context(|| format!("reading packet file `{}`", packet_path.display()))?;
+    let config = ebpf_verifier::VerifyConfig {
+        widening_threshold: max_iterations,
+        maps: load_maps(maps)?,
+        packet_len: Some(packet.len()),
+    };
+
+    let descs = config.maps.clone();
+    let stores = if descs.is_empty() {
+        Vec::new()
+    } else {
+        ebpf_vm::maps::build_stores(descs).with_context(|| "installing maps")?
+    };
+
+    for prog in load_decoded(path)? {
+        let cfg = ebpf_cfg::build_cfg(&prog.insns)
+            .with_context(|| format!("building CFG for `{}`", prog.meta.name))?;
+        if let Err(e) = ebpf_verifier::verify_with_config(&prog.insns, &cfg, &config) {
+            println!("rejected: {e}");
+            continue;
+        }
+        // Verified: stage the packet and step manually so `--trace` can
+        // annotate packet loads with decoded header fields.
+        let mut vm = if stores.iter().all(Option::is_none) {
+            ebpf_vm::Vm::new(prog.insns)
+        } else {
+            ebpf_vm::Vm::new_with_stores(prog.insns, stores.clone())
+        };
+
+        vm.install_xdp_packet(ebpf_vm::PacketBuffer::from(packet.as_slice()));
+        if !trace {
+            match vm.run(DEFAULT_MAX_STEPS) {
+                Ok(code) => {
+                    let action = ebpf_vm::XdpAction::from_code(code);
+                    println!("xdp: {action} ({code})");
+                }
+                Err(e) => println!("error: {e}"),
+            }
+            continue;
+        }
+
+        loop {
+            let pc = vm.pc();
+            let before = *vm.regs();
+            let annotation = packet_annotation(&vm, pc, &packet);
+            match vm.step() {
+                StepResult::Continue => {
+                    let after = vm.regs();
+                    let changed: Vec<String> = before
+                        .iter()
+                        .zip(after.iter())
+                        .enumerate()
+                        .filter(|(i, (a, b))| a != b && *i != ebpf_isa::Reg::FRAME_PTR.index())
+                        .map(|(i, (_, b))| format!("r{i} = {b}"))
+                        .collect();
+                    println!("PC {pc}: {}  [{}]{annotation}", vm.insns()[pc], changed.join(", "));
+                }
+                StepResult::Exit(code) => {
+                    let action = ebpf_vm::XdpAction::from_code(code);
+                    println!("xdp: {action} ({code})");
+                    break;
+                }
+                StepResult::Error(e) => {
+                    println!("error at PC {pc}: {e}");
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort packet-load annotation for `xdp --trace`.
+///
+/// Inspects the instruction at `pc`: when it is a load whose base register
+/// currently holds a packet-derived address, resolve the concrete offset
+/// and ask the header parsers for a suffix (`" ; ethertype=IPv4"`), else
+/// empty. Never fails — unknown shapes yield no annotation.
+fn packet_annotation(vm: &ebpf_vm::Vm, pc: usize, packet: &[u8]) -> String {
+    use ebpf_isa::Insn;
+    let Some(insn) = vm.insns().get(pc) else { return String::new() };
+    let (base, offset, size) = match insn {
+        Insn::Load { base, offset, size, .. } => (*base, i64::from(*offset), size.bytes()),
+        _ => return String::new(),
+    };
+
+    let base_val = vm.regs()[base];
+    let pkt_base = ebpf_vm::PACKET_BASE;
+    let pkt_end = pkt_base.saturating_add(i64::try_from(packet.len()).unwrap_or(i64::MAX));
+    if base_val < pkt_base || base_val > pkt_end {
+        return String::new();
+    }
+
+    let offset = base_val.wrapping_add(offset).wrapping_sub(pkt_base);
+    ebpf_vm::annotate_packet_load(packet, offset, size)
+        .map_or_else(String::new, |note| format!(" ; {note}"))
+}
+
+fn cmd_optimize(path: &Path, output: &Path) -> anyhow::Result<()> {
+    let programs = load_decoded(path)?;
+    let [prog] = programs.as_slice() else {
+        anyhow::bail!("optimize expects a single program, found {}", programs.len());
+    };
+    // Analysis refusals print like `verify`'s rejections and exit
+    // zero; only IO failures are fatal.
+    let outcome = (|| -> anyhow::Result<(usize, Vec<u8>)> {
+        let cfg = ebpf_cfg::build_cfg(&prog.insns)
+            .with_context(|| format!("building CFG for `{}`", prog.meta.name))?;
+        let mut ssa = ebpf_ssa::build_ssa(&prog.insns, &cfg)
+            .with_context(|| format!("building SSA for `{}`", prog.meta.name))?;
+
+        ebpf_ssa::optimize(&mut ssa);
+        let lowered =
+            ebpf_ssa::lower(&ssa).with_context(|| format!("lowering `{}`", prog.meta.name))?;
+        let bytes = ebpf_isa::encode_program(&lowered)
+            .with_context(|| format!("encoding `{}`", prog.meta.name))?;
+        Ok((lowered.len(), bytes))
+    })();
+
+    match outcome {
+        Ok((new_len, bytes)) => {
+            fs::write(output, &bytes)
+                .with_context(|| format!("writing optimized output `{}`", output.display()))?;
+            println!("optimized: {} -> {} instructions", prog.insns.len(), new_len);
+        }
+        Err(e) => println!("error: {e:#}"),
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let filter = match cli.verbose {
@@ -285,8 +471,17 @@ fn main() -> anyhow::Result<()> {
         Command::Disasm { input } => cmd_disasm(&input.path),
         Command::Cfg { input, dot } => cmd_cfg(&input.path, *dot),
         Command::Run { input, trace, maps } => cmd_run(&input.path, *trace, maps.as_ref()),
-        Command::Verify { input, trace, max_iterations, maps } => {
-            cmd_verify(&input.path, *trace, *max_iterations, maps.as_ref())
+        Command::Verify { input, trace, max_iterations, maps, packet, packet_len } => cmd_verify(
+            &input.path,
+            *trace,
+            *max_iterations,
+            maps.as_ref(),
+            packet.as_ref(),
+            *packet_len,
+        ),
+        Command::Xdp { input, packet, trace, maps, max_iterations } => {
+            cmd_xdp(&input.path, packet, *trace, maps.as_ref(), *max_iterations)
         }
+        Command::Optimize { input, output } => cmd_optimize(&input.path, output),
     }
 }

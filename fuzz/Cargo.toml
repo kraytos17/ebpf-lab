@@ -12,6 +12,8 @@ libfuzzer-sys = "0.4.13"
 ebpf-isa = { path = "../crates/ebpf-isa" }
 ebpf-cfg = { path = "../crates/ebpf-cfg" }
 ebpf-verifier = { path = "../crates/ebpf-verifier" }
+ebpf-vm = { path = "../crates/ebpf-vm" }
+ebpf-ssa = { path = "../crates/ebpf-ssa" }
 
 [[bin]]
 name = "decode_program"
@@ -22,6 +24,12 @@ doc = false
 [[bin]]
 name = "verify_pipeline"
 path = "fuzz_targets/verify_pipeline.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ssa_pipeline"
+path = "fuzz_targets/ssa_pipeline.rs"
 test = false
 doc = false
 

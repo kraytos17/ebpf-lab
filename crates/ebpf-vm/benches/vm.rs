@@ -1,4 +1,5 @@
-//! Baseline: interpreter steps/sec on straight-line and looping programs.
+//! Baseline: interpreter steps/sec on straight-line, looping, and XDP
+//! dispatch programs.
 //!
 //! Run with `cargo bench -p ebpf-vm`.
 
@@ -7,6 +8,7 @@ use ebpf_isa::MemSize;
 use ebpf_isa::decode::decode_program;
 use ebpf_vm::{MemoryView, STACK_BASE, Vm, exec};
 use std::hint::black_box;
+use std::path::PathBuf;
 
 fn straight_line(adds: usize) -> Vec<u8> {
     let mut bytes = Vec::with_capacity((adds + 2) * 8);
@@ -82,5 +84,31 @@ fn bench_memory(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_vm, bench_memory);
+fn bench_xdp(c: &mut Criterion) {
+    // XDP ethertype dispatch over a 54-byte IPv4-shaped packet: exercises
+    // `xdp_md` staging, context loads, and packet-region loads through
+    // the `run_xdp` entry.
+    let mut group = c.benchmark_group("vm");
+    let path: PathBuf =
+        [env!("CARGO_MANIFEST_DIR"), "..", "..", "tests", "fixtures", "xdp_ethertype_pass.bin"]
+            .iter()
+            .collect();
+
+    let bytes = std::fs::read(path).expect("fixture exists");
+    let insns = decode_program(&bytes).expect("fixture decodes");
+    let mut packet = vec![0u8; 54];
+
+    packet[12] = 0x08;
+    group.throughput(Throughput::Elements(insns.len() as u64));
+    group.bench_function("xdp_ethertype", |b| {
+        b.iter_batched(
+            || insns.clone(),
+            |i| black_box(ebpf_vm::run_xdp(i, black_box(&packet), Vec::new(), 10_000)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_vm, bench_memory, bench_xdp);
 criterion_main!(benches);

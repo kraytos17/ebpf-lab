@@ -13,7 +13,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::rc::Rc;
 use thiserror::Error;
+
+/// Maximum accepted map fd (`1024`, the `FD_SETSIZE` convention).
+///
+/// Both fd-indexed tables ([`build_stores`] here, the verifier's map
+/// table) are dense `Vec`s sized `max_fd + 1`, so an unbounded `fd` from
+/// `--maps` JSON would attempt a multi-gigabyte allocation for a single
+/// descriptor. Anything above this is a typo or hostile input, never a
+/// real lab map.
+pub const MAX_MAP_FD: i64 = 1024;
 
 /// Map type matching kernel `BPF_MAP_TYPE_*` semantics (subset).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -122,6 +132,16 @@ pub enum MapError {
     BadFd {
         /// Offending descriptor value.
         fd: i64,
+    },
+    /// File descriptor exceeds [`MAX_MAP_FD`]: the fd-indexed tables are
+    /// dense `Vec`s, so this fails fast instead of attempting a
+    /// multi-gigabyte allocation.
+    #[error("map fd {fd} exceeds maximum {max}")]
+    FdTooLarge {
+        /// Offending descriptor value.
+        fd: i64,
+        /// The enforced ceiling ([`MAX_MAP_FD`]).
+        max: i64,
     },
     /// Two descriptors claim the same fd.
     #[error("duplicate map fd {fd}")]
@@ -248,17 +268,22 @@ pub enum MapStore {
         data: Vec<Vec<u8>>,
     },
     /// Hash map evicting least-recently-used keys at capacity.
+    ///
+    /// Key bytes are shared by reference count: `data`, `stamps`, and
+    /// `stamp_of` each hold an `Rc<[u8]>` handle to the *same*
+    /// allocation, so a live entry stores its key bytes once no matter
+    /// how many times it is touched.
     LruArray {
         /// Static description.
         desc: MapDesc,
         /// Live entries.
-        data: HashMap<Vec<u8>, Vec<u8>>,
+        data: HashMap<Rc<[u8]>, Vec<u8>>,
         /// Recency index: stamp → key, ordered (lowest stamp = oldest,
         /// the next eviction victim).
-        stamps: BTreeMap<u64, Vec<u8>>,
+        stamps: BTreeMap<u64, Rc<[u8]>>,
         /// Reverse index: key → stamp, so touch/remove hit the tree
         /// directly instead of scanning (was O(n) per lookup hit).
-        stamp_of: HashMap<Vec<u8>, u64>,
+        stamp_of: HashMap<Rc<[u8]>, u64>,
         /// Next recency stamp (monotonically increasing; see `lru_touch`).
         seq: u64,
     },
@@ -324,9 +349,10 @@ impl MapStore {
                 let mut stamp_of = HashMap::with_capacity(desc.max_entries);
                 let mut seq = 0u64;
                 for (k, v) in initial {
-                    stamps.insert(seq, k.clone());
-                    stamp_of.insert(k.clone(), seq);
-                    data.insert(k, v);
+                    let shared: Rc<[u8]> = Rc::from(k);
+                    stamps.insert(seq, shared.clone());
+                    stamp_of.insert(shared.clone(), seq);
+                    data.insert(shared, v);
                     seq += 1;
                 }
                 Ok(Self::LruArray { desc, data, stamps, stamp_of, seq })
@@ -352,7 +378,8 @@ impl MapStore {
     #[must_use]
     pub fn len(&self) -> usize {
         match self {
-            Self::Hash { data, .. } | Self::LruArray { data, .. } => data.len(),
+            Self::Hash { data, .. } => data.len(),
+            Self::LruArray { data, .. } => data.len(),
             Self::Array { desc, .. } => desc.max_entries,
         }
     }
@@ -371,7 +398,8 @@ impl MapStore {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         match self {
-            Self::Hash { data, .. } | Self::LruArray { data, .. } => data.is_empty(),
+            Self::Hash { data, .. } => data.is_empty(),
+            Self::LruArray { data, .. } => data.is_empty(),
             Self::Array { .. } => false,
         }
     }
@@ -448,8 +476,9 @@ impl MapStore {
                     data.remove(&old);
                     stamp_of.remove(&old);
                 }
+
                 lru_touch(stamps, stamp_of, seq, key);
-                data.insert(key.to_vec(), value.to_vec());
+                data.insert(Rc::from(key), value.to_vec());
                 Ok(())
             }
         }
@@ -505,20 +534,24 @@ impl MapStore {
 /// stale stamp (if any), then insert a fresh one. O(log n) via the
 /// `stamps` tree plus the `stamp_of` reverse index — no linear scan (the
 /// old `VecDeque`-based touch walked the whole order per hit).
+/// Handles are `Rc` bumps, never key copies.
 /// `seq` only grows, so a stamp collision would need 2^64 touches.
 fn lru_touch(
-    stamps: &mut BTreeMap<u64, Vec<u8>>,
-    stamp_of: &mut HashMap<Vec<u8>, u64>,
+    stamps: &mut BTreeMap<u64, Rc<[u8]>>,
+    stamp_of: &mut HashMap<Rc<[u8]>, u64>,
     seq: &mut u64,
     key: &[u8],
 ) {
     if let Some(old) = stamp_of.remove(key) {
         stamps.remove(&old);
     }
+
     let stamp = *seq;
     *seq += 1;
-    stamp_of.insert(key.to_vec(), stamp);
-    stamps.insert(stamp, key.to_vec());
+
+    let shared: Rc<[u8]> = Rc::from(key);
+    stamp_of.insert(shared.clone(), stamp);
+    stamps.insert(stamp, shared);
 }
 
 /// Array key bytes → slot index (first 4 bytes, little-endian).
@@ -526,6 +559,7 @@ const fn array_index(key: &[u8], max_entries: usize) -> Result<usize, MapError> 
     let Some(chunk) = key.first_chunk::<4>() else {
         return Err(MapError::KeySizeMismatch { expected: 4, got: key.len() });
     };
+
     let idx = u32::from_le_bytes(*chunk) as usize;
     if idx >= max_entries {
         return Err(MapError::Full { max_entries });
@@ -536,17 +570,23 @@ const fn array_index(key: &[u8], max_entries: usize) -> Result<usize, MapError> 
 /// Build the fd-indexed runtime table from descriptors.
 ///
 /// Index 0 is always `None` (fd 0 is invalid); sparse fds leave gaps.
+/// Fds above [`MAX_MAP_FD`] reject with [`MapError::FdTooLarge`] before
+/// any allocation.
 ///
 /// # Errors
 ///
-/// Returns [`MapError`] on duplicate fds or invalid descriptors.
+/// Returns [`MapError`] on duplicate fds, oversized fds, or invalid descriptors.
 pub fn build_stores(descs: Vec<MapDesc>) -> Result<Vec<Option<MapStore>>, MapError> {
     if descs.is_empty() {
         return Ok(Vec::new());
     }
+
     let max_fd = descs.iter().map(|d| d.fd).max().unwrap_or(0);
     if max_fd <= 0 {
         return Err(MapError::BadFd { fd: max_fd });
+    }
+    if max_fd > MAX_MAP_FD {
+        return Err(MapError::FdTooLarge { fd: max_fd, max: MAX_MAP_FD });
     }
 
     let len = usize::try_from(max_fd).map_err(|_| MapError::BadFd { fd: max_fd })?;
@@ -783,5 +823,22 @@ mod tests {
             Err(MapError::DuplicateFd { fd: 1 })
         ));
         assert!(build_stores(vec![]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn oversized_fd_rejected_before_allocation() {
+        // `i64::MAX` must fail fast: without the `MAX_MAP_FD` ceiling this
+        // would attempt a multi-exabyte `Vec` allocation.
+        assert!(matches!(
+            build_stores(vec![MapDesc { fd: i64::MAX, ..hash_desc() }]),
+            Err(MapError::FdTooLarge { .. })
+        ));
+        assert!(matches!(
+            build_stores(vec![MapDesc { fd: MAX_MAP_FD + 1, ..hash_desc() }]),
+            Err(MapError::FdTooLarge { fd, .. }) if fd == MAX_MAP_FD + 1
+        ));
+        // The ceiling itself is still accepted.
+        let table = build_stores(vec![MapDesc { fd: MAX_MAP_FD, ..hash_desc() }]).unwrap();
+        assert_eq!(table.len(), usize::try_from(MAX_MAP_FD).unwrap() + 1);
     }
 }

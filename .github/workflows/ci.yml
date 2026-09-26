@@ -83,6 +83,7 @@ jobs:
       - run: cargo bench -p ebpf-cfg --locked --bench cfg -- --measurement-time 1 --warm-up-time 0.1 --sample-size 10
       - run: cargo bench -p ebpf-vm --locked --bench vm -- --measurement-time 1 --warm-up-time 0.1 --sample-size 10
       - run: cargo bench -p ebpf-verifier --locked --bench verify -- --measurement-time 1 --warm-up-time 0.1 --sample-size 10
+      - run: cargo bench -p ebpf-ssa --locked --bench ssa -- --measurement-time 1 --warm-up-time 0.1 --sample-size 10
 
   doc:
     runs-on: ubuntu-latest

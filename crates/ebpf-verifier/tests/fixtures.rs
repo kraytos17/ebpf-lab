@@ -7,6 +7,8 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use common::fixtures::decode_fixture as fixture;
 use common::maps::test_maps;
 use ebpf_verifier::{VerifyError, verify};
@@ -148,6 +150,17 @@ fn verify_fixture_with_maps(
     ebpf_verifier::verify_with_config(&insns, &cfg, &config)
 }
 
+/// Verify a fixture with a concrete packet length installed.
+fn verify_fixture_with_packet(
+    name: &str,
+    packet_len: usize,
+) -> Result<ebpf_verifier::VerifiedProgram, ebpf_verifier::VerifyError> {
+    let insns = fixture(name);
+    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+    let config = ebpf_verifier::VerifyConfig::with_packet_len(packet_len);
+    ebpf_verifier::verify_with_config(&insns, &cfg, &config)
+}
+
 #[test]
 fn accepts_map_hash_lookup() {
     verify_fixture_with_maps("map_hash_lookup.bin", test_maps())
@@ -196,6 +209,23 @@ fn rejects_map_bad_fd() {
         verify_fixture_with_maps("map_bad_fd.bin", test_maps()),
         Err(VerifyError::BadMapFd { fd: 99, .. })
     ));
+}
+
+#[test]
+fn oversized_map_fd_capped_not_allocated() {
+    // A hostile `--maps` file with an enormous fd must not force a
+    // multi-gigabyte table: the entry is dropped from the capped table
+    // and verification completes normally.
+    let mut maps = test_maps();
+    maps.push(ebpf_verifier::MapDesc {
+        fd: i64::MAX,
+        map_type: ebpf_verifier::MapType::Hash,
+        key_size: 4,
+        value_size: 8,
+        max_entries: 1,
+        initial: BTreeMap::new(),
+    });
+    verify_fixture_with_maps("mov_exit.bin", maps).expect("capped table should verify");
 }
 
 #[test]
@@ -354,4 +384,51 @@ fn join_rejects_partially_initialized_merge() {
     // Without reprocessing on joined-input change, the stale clean state
     // would propagate and the load would wrongly verify.
     assert!(matches!(verify_fixture("join_uninit.bin"), Err(VerifyError::UninitStackRead { .. })));
+}
+
+#[test]
+fn accepts_xdp_pass_drop() {
+    // Trivial XDP programs touch no packet memory: any length verifies.
+    verify_fixture_with_packet("xdp_pass.bin", 64).expect("xdp_pass should verify");
+    verify_fixture_with_packet("xdp_drop.bin", 64).expect("xdp_drop should verify");
+}
+
+#[test]
+fn accepts_xdp_bounded_access() {
+    // The ethertype program: context loads, pointer arithmetic, a
+    // data_end bound check, and a guarded half-word load. The trace
+    // snapshot pins the `packet_ptr`/`xdp_md_ptr` rendering.
+    let result =
+        verify_fixture_with_packet("xdp_ethertype_pass.bin", 54).expect("bounded access verifies");
+    assert!(result.total_pc >= 11);
+}
+
+#[test]
+fn rejects_xdp_unguarded_access() {
+    // Half-word load at offset 100 with a 54-byte packet: bounds before
+    // alignment (100 is 2-aligned, so only the bound fails).
+    assert!(matches!(
+        verify_fixture_with_packet("xdp_unguarded_access.bin", 54),
+        Err(VerifyError::PacketOutOfBounds { offset: 100, size: 2, packet_len: 54, .. })
+    ));
+}
+
+#[test]
+fn rejects_xdp_store() {
+    // Packet memory is read-only: even an in-bounds store rejects.
+    assert!(matches!(
+        verify_fixture_with_packet("xdp_store_rejected.bin", 54),
+        Err(VerifyError::PacketOutOfBounds { packet_len: 54, .. })
+    ));
+}
+
+#[test]
+fn rejects_xdp_without_packet_context() {
+    // Strict by design (D4): no `--packet`/`--packet-len` means the legacy
+    // entry with `r1` uninitialized, so the first context load rejects
+    // instead of guessing a length.
+    assert!(matches!(
+        verify_fixture("xdp_ethertype_pass.bin"),
+        Err(VerifyError::UninitRegister { reg: 1, .. })
+    ));
 }

@@ -19,8 +19,9 @@
 pub mod exec;
 pub mod maps;
 pub mod memory;
+pub mod xdp;
 
-use ebpf_isa::insn::{AluOp, Endian, Insn, JumpOp, MemSize, Reg, Width};
+use ebpf_isa::insn::{Insn, JumpOp, Reg, Width};
 use exec::{ExecInsn, load};
 use maps::build_stores;
 use thiserror::Error;
@@ -28,8 +29,9 @@ use thiserror::Error;
 pub use maps::{MapDesc, MapError, MapStore, MapType};
 pub use memory::{
     MAP_SCRATCH_BASE, MemError, MemRegion, MemoryView, PACKET_BASE, PacketBuffer, STACK_BASE,
-    STACK_SIZE,
+    STACK_SIZE, XDP_MD_BASE, XDP_MD_LEN,
 };
+pub use xdp::{XdpAction, annotate_packet_load, parse_eth, parse_ipv4, run_xdp};
 
 /// Number of general-purpose registers (`r0`–`r10`).
 pub const NUM_REGS: usize = 11;
@@ -198,6 +200,7 @@ fn helper_map_lookup(vm: &mut Vm) -> StepResult {
         .map_store_mut(fd)
         .and_then(|store| store.lookup(&key).ok().flatten())
         .map(<[u8]>::to_vec);
+
     match hit {
         Some(value) => {
             vm.memory.set_map_scratch(value);
@@ -414,6 +417,27 @@ impl Vm {
         &self.regs
     }
 
+    /// Mutable memory (XDP entry setup).
+    pub(crate) const fn memory_mut(&mut self) -> &mut MemoryView {
+        &mut self.memory
+    }
+
+    /// Set a register (XDP entry setup).
+    pub(crate) fn set_reg(&mut self, r: Reg, value: i64) {
+        self.regs[r] = value;
+    }
+
+    /// Install `packet` and point `r1` at the staged `xdp_md` context.
+    ///
+    /// The XDP calling convention: `r1` holds the context pointer whose
+    /// `+0`/`+4` loads yield `data`/`data_end`. Public so the CLI's `xdp`
+    /// subcommand can stage packets for `--trace` stepping; prefer
+    /// [`run_xdp`] for one-shot execution.
+    pub fn install_xdp_packet(&mut self, packet: PacketBuffer) {
+        self.memory.set_packet(packet);
+        self.regs[Reg(1)] = XDP_MD_BASE;
+    }
+
     /// Current program counter (decoded index).
     #[must_use]
     pub const fn pc(&self) -> usize {
@@ -448,23 +472,12 @@ impl Vm {
 
     /// Read `len` bytes from guest memory (byte-wise, so arbitrary key
     /// pointers never trip alignment). Bad pointers fault honestly.
-    // `B` loads always return `0..=255`; the `as` is exact — neither
-    // truncating nor sign-losing.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    ///
+    /// Bulk path ([`MemoryView::load_bytes`]): one classify plus one
+    /// whole-range bounds check and copy; failures fall back to the
+    /// byte-wise loop there so diagnostics name the exact byte.
     fn read_guest_bytes(&self, addr: i64, len: usize) -> Result<Vec<u8>, VmError> {
-        // Fast path: 8-byte aligned, exactly 8 bytes -> single Dw load.
-        if len == 8 && addr.trailing_zeros() >= 3 {
-            let v: u64 = self.memory.load(addr, MemSize::Dw)?.cast_unsigned();
-            return Ok(v.to_le_bytes()[..len].to_vec());
-        }
-
-        let mut out = Vec::with_capacity(len);
-        let mut a = addr;
-        for _ in 0..len {
-            out.push(self.memory.load(a, MemSize::B).map(|b| b as u8)?);
-            a = a.wrapping_add(1);
-        }
-        Ok(out)
+        Ok(self.memory.load_bytes(addr, len)?)
     }
 
     /// Execute one instruction.
@@ -482,7 +495,7 @@ impl Vm {
         };
         match insn {
             ExecInsn::AluReg { width, op, dst, src } => {
-                let result = alu_apply(op, self.regs[dst], self.regs[src], width);
+                let result = op.apply(self.regs[dst], self.regs[src], width);
                 // r10 is read-only: silently keep the frame pointer,
                 // mirroring hardware that ignores the write. (The
                 // verifier rejects such programs statically.)
@@ -493,7 +506,7 @@ impl Vm {
                 StepResult::Continue
             }
             ExecInsn::AluImm { width, op, dst, imm } => {
-                let result = alu_apply(op, self.regs[dst], i64::from(imm), width);
+                let result = op.apply(self.regs[dst], i64::from(imm), width);
                 if !dst.is_frame_ptr() {
                     self.regs[dst] = result;
                 }
@@ -589,165 +602,12 @@ impl Vm {
     }
 }
 
-/// Apply an ALU operation to concrete values.
-///
-/// Thin dispatcher over [`alu64`]/[`alu32`]: the width branch happens once
-/// here so each half is a straight jump-table match. Division or modulo by
-/// zero yields zero (kernel behavior, no trap).
-///
-/// Cast allows on the halves are intentional: eBPF arithmetic is *defined*
-/// as wrapping at the operand width with truncation on narrowing, so every
-/// `as` there implements the ISA semantic rather than hiding a bug.
-#[inline]
-fn alu_apply(op: AluOp, lhs: i64, rhs: i64, width: Width) -> i64 {
-    match width {
-        Width::B64 => alu64(op, lhs, rhs),
-        Width::B32 => alu32(op, lhs, rhs),
-    }
-}
-
-/// 64-bit ALU (see [`alu_apply`] for the casting rationale).
-// Shift amounts narrow `rhs` to `u32` (masked to 6 bits right after);
-// everything else here reinterprets in-width via `cast_signed`/`cast_unsigned`.
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-#[inline]
-fn alu64(op: AluOp, lhs: i64, rhs: i64) -> i64 {
-    match op {
-        AluOp::Add => lhs.wrapping_add(rhs),
-        AluOp::Sub => lhs.wrapping_sub(rhs),
-        AluOp::Mul => lhs.wrapping_mul(rhs),
-        AluOp::Div => {
-            if rhs == 0 {
-                0
-            } else {
-                lhs.cast_unsigned().wrapping_div(rhs.cast_unsigned()).cast_signed()
-            }
-        }
-        AluOp::Mod => {
-            if rhs == 0 {
-                0
-            } else {
-                lhs.cast_unsigned().wrapping_rem(rhs.cast_unsigned()).cast_signed()
-            }
-        }
-        AluOp::Or => lhs | rhs,
-        AluOp::And => lhs & rhs,
-        AluOp::Xor => lhs ^ rhs,
-        AluOp::Mov => rhs,
-        AluOp::Neg => lhs.wrapping_neg(),
-        AluOp::Lsh => lhs.wrapping_shl(rhs as u32 & 63),
-        AluOp::Rsh => lhs.cast_unsigned().wrapping_shr(rhs as u32 & 63).cast_signed(),
-        AluOp::Arsh => lhs.wrapping_shr(rhs as u32 & 63),
-        AluOp::End(endian) => endian_swap(lhs, rhs, endian),
-    }
-}
-
-/// 32-bit ALU with zero-extended result (see [`alu_apply`]).
-#[inline]
-fn alu32(op: AluOp, lhs: i64, rhs: i64) -> i64 {
-    // Low words: BPF_ALU32 operates on the low 32 bits, so truncation here
-    // is the ISA semantic, not a bug.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let (l, r) = (lhs as u32, rhs as u32);
-    let w = match op {
-        AluOp::Add => l.wrapping_add(r),
-        AluOp::Sub => l.wrapping_sub(r),
-        AluOp::Mul => l.wrapping_mul(r),
-        AluOp::Div => {
-            if r == 0 {
-                0
-            } else {
-                l.wrapping_div(r)
-            }
-        }
-        AluOp::Mod => {
-            if r == 0 {
-                0
-            } else {
-                l.wrapping_rem(r)
-            }
-        }
-        AluOp::Or => l | r,
-        AluOp::And => l & r,
-        AluOp::Xor => l ^ r,
-        AluOp::Mov => r,
-        AluOp::Neg => l.wrapping_neg(),
-        AluOp::Lsh => l.wrapping_shl(r & 31),
-        AluOp::Rsh => l.wrapping_shr(r & 31),
-        AluOp::Arsh => (l.cast_signed().wrapping_shr(r & 31)).cast_unsigned(),
-        AluOp::End(endian) => endian_swap_32(l, rhs, endian),
-    };
-    i64::from(w)
-}
-
-/// `BPF_END`: mask to `width` bits (from the immediate), then byte-swap
-/// within the width when big-endian output was requested. Little-endian
-/// output is a plain mask on little-endian hosts like this lab's.
-///
-/// Widths are validated at load ([`load`](exec::load) rejects anything but
-/// 16/32/64), so the dead arm is unreachable by construction.
-///
-/// The `as` casts truncate to the operand width per the ISA semantic
-/// (see [`alu_apply`]).
-#[inline]
-fn endian_swap(value: i64, width_imm: i64, endian: Endian) -> i64 {
-    let masked: u64 = match width_imm {
-        16 => value.cast_unsigned() & 0xFFFF,
-        32 => value.cast_unsigned() & 0xFFFF_FFFF,
-        64 => value.cast_unsigned(),
-        _ => unreachable!("BPF_END width validated at load"),
-    };
-    if endian == Endian::Le {
-        return masked.cast_signed();
-    }
-    let swapped = match width_imm {
-        // `masked` holds only the low 16 bits (16-arm above); the `as`
-        // only satisfies the `swap_bytes` API.
-        16 =>
-        {
-            #[allow(clippy::cast_possible_truncation)]
-            u64::from((masked as u16).swap_bytes())
-        }
-        // Same: only the low 32 bits are significant here.
-        32 =>
-        {
-            #[allow(clippy::cast_possible_truncation)]
-            u64::from((masked as u32).swap_bytes())
-        }
-        _ => masked.swap_bytes(),
-    };
-    swapped.cast_signed()
-}
-
-/// 32-bit variant of [`endian_swap`] (result is zero-extended by the caller).
-///
-/// Same load-time validation rationale as [`endian_swap`].
-#[inline]
-fn endian_swap_32(value: u32, width_imm: i64, endian: Endian) -> u32 {
-    let masked: u32 = match width_imm {
-        16 => value & 0xFFFF,
-        32 | 64 => value,
-        _ => unreachable!("BPF_END width validated at load"),
-    };
-    if endian == Endian::Le {
-        return masked;
-    }
-    match width_imm {
-        // `masked` holds only the low 16 bits (16-arm above).
-        16 =>
-        {
-            #[allow(clippy::cast_possible_truncation)]
-            u32::from((masked as u16).swap_bytes())
-        }
-        _ => masked.swap_bytes(),
-    }
-}
-
 /// Evaluate a conditional jump on concrete values.
 ///
 /// Thin dispatcher over [`jump_taken_64`]/[`jump_taken_32`].
 /// `BPF_JSET` is taken iff `(lhs & rhs) != 0`. Bit-pattern reinterprets in
-/// the halves are the defined comparison semantics (see [`alu_apply`]).
+/// the halves are the defined comparison semantics (see
+/// [`AluOp::apply`]).
 #[inline]
 const fn jump_taken(op: JumpOp, lhs: i64, rhs: i64, width: Width) -> bool {
     match width {

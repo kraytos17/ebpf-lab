@@ -1,17 +1,20 @@
-//! Memory model for the current interpreter: stack, packet, alignment.
+//! Memory model for the current interpreter: stack, packet, XDP context, alignment.
 //!
 //! Every access goes through [`MemoryView::load`] / [`MemoryView::store`],
-//! the same chokepoint the future verifier reasons about statically and the
-//! map stage will extend with a third region.
+//! the same chokepoint the verifier reasons about statically.
 //!
 //! Regions:
 //!
 //! - Stack: `[STACK_BASE - STACK_SIZE, STACK_BASE)`, read-write, with a
 //!   per-byte initialization bitmap. Reading a byte that was never written
 //!   is [`MemError::UninitializedRead`], mirroring the kernel verifier.
-//! - Packet: `[PACKET_BASE, PACKET_BASE + len)`, read-only in v0.4, backing
-//!   the XDP context (§v0.8). With no packet loaded, any packet-range
+//! - Packet: `[PACKET_BASE, PACKET_BASE + len)`, read-only, backing
+//!   the XDP context. With no packet loaded, any packet-range
 //!   access is [`MemError::NoPacket`].
+//! - XDP context (`xdp_md`): `[XDP_MD_BASE, XDP_MD_BASE + XDP_MD_LEN)`,
+//!   read-only, staged by [`MemoryView::set_packet`]: `data` (u32 LE) at
+//!   `+0`, `data_end` (u32 LE) at `+4`. `r1` points here on XDP entry.
+//! - Map scratch: `[MAP_SCRATCH_BASE, …)`, written by lookup hits.
 //! - Anything else: [`MemError::OutOfBounds`].
 //!
 //! Multi-byte accesses require natural alignment while
@@ -43,6 +46,17 @@ pub const PACKET_BASE: i64 = 0x2_0000;
 /// overwrites it, mirroring how kernel map-value pointers stay valid only
 /// until the next call in practice.
 pub const MAP_SCRATCH_BASE: i64 = 0x3_0000;
+
+/// Virtual address of the XDP metadata struct (`struct xdp_md`).
+///
+/// Layout (little-endian, kernel-faithful for the two fields clang emits):
+/// `data` (u32) at `+0`, `data_end` (u32) at `+4`. Well clear of stack,
+/// packet, and scratch so classification never overlaps. `r1` holds this
+/// address on XDP entry; stores fault (read-only, like packet).
+pub const XDP_MD_BASE: i64 = 0x4_0000;
+
+/// Length of the staged `xdp_md` struct in bytes.
+pub const XDP_MD_LEN: usize = 8;
 
 /// Require natural alignment for multi-byte accesses.
 #[inline]
@@ -110,6 +124,8 @@ pub enum MemRegion {
     Packet,
     /// `[MAP_SCRATCH_BASE, …)` (length-checked on access).
     MapScratch,
+    /// `[XDP_MD_BASE, XDP_MD_BASE + XDP_MD_LEN)`.
+    XdpMd,
     /// Outside every known region.
     Unknown,
 }
@@ -316,23 +332,25 @@ impl Default for StackMemory {
     }
 }
 
-/// The VM's view of memory: stack, optional packet buffer, and the
-/// map-value scratch area (written by `bpf_map_lookup_elem`, read by
+/// The VM's view of memory: stack, optional packet buffer, XDP context,
+/// and the map-value scratch area (written by `bpf_map_lookup_elem`, read by
 /// direct loads through the returned pointer).
 #[derive(Debug, Clone)]
 pub struct MemoryView {
     stack: StackMemory,
     packet: Option<PacketBuffer>,
+    xdp_md: [u8; XDP_MD_LEN],
     map_scratch: Vec<u8>,
     align_checks: bool,
 }
 
 impl Default for MemoryView {
-    /// Empty stack, no packet, empty scratch, alignment enforcement on.
+    /// Empty stack, no packet, zeroed `xdp_md`, empty scratch, alignment on.
     fn default() -> Self {
         Self {
             stack: StackMemory::default(),
             packet: None,
+            xdp_md: [0u8; XDP_MD_LEN],
             map_scratch: Vec::new(),
             align_checks: true,
         }
@@ -346,18 +364,22 @@ impl MemoryView {
     /// access width would straddle the boundary — the width check then
     /// reports [`MemError::StackOverflow`] rather than a generic fault.
     /// The frame-pointer value itself (`STACK_BASE`, one past the top)
-    /// counts as stack-shaped for the same reason. Packet-shaped addresses
-    /// (at or above [`PACKET_BASE`]) classify as [`MemRegion::Packet`]
+    /// counts as stack-shaped for the same reason. Higher regions win over
+    /// lower ones (`XdpMd` > `MapScratch` > `Packet`), so the bases never
+    /// overlap. Packet-shaped addresses classify as [`MemRegion::Packet`]
     /// whether or not a packet is currently loaded; the access itself
     /// reports [`MemError::NoPacket`] when unset. Scratch-shaped addresses
-    /// (at or above [`MAP_SCRATCH_BASE`]) classify as
-    /// [`MemRegion::MapScratch`]; the access itself reports
-    /// [`MemError::OutOfBounds`] past the latest lookup's value.
+    /// classify as [`MemRegion::MapScratch`]; the access itself reports
+    /// [`MemError::OutOfBounds`] past the latest lookup's value. Context
+    /// addresses classify as [`MemRegion::XdpMd`]; past-the-struct reads
+    /// report [`MemError::OutOfBounds`].
     #[must_use]
     #[inline]
     pub const fn classify(addr: i64) -> MemRegion {
         if addr >= StackMemory::LOW && addr <= STACK_BASE {
             MemRegion::Stack
+        } else if addr >= XDP_MD_BASE {
+            MemRegion::XdpMd
         } else if addr >= MAP_SCRATCH_BASE {
             MemRegion::MapScratch
         } else if addr >= PACKET_BASE {
@@ -368,13 +390,34 @@ impl MemoryView {
     }
 
     /// Load a packet buffer into the view (replaces any previous one).
+    ///
+    /// Also stages the `xdp_md` context: `data = PACKET_BASE`,
+    /// `data_end = PACKET_BASE + len` (both u32 LE). Lengths that do not
+    /// fit `u32` saturate (unreachable for real packets; keeps this total).
     pub fn set_packet(&mut self, packet: PacketBuffer) {
+        let len = packet.len();
         self.packet = Some(packet);
+
+        let data = PACKET_BASE;
+        let end = PACKET_BASE.saturating_add(i64::try_from(len).unwrap_or(i64::MAX));
+        // `PACKET_BASE` plus real-packet lengths always fit `u32`
+        let (data, end) =
+            (u32::try_from(data).unwrap_or(u32::MAX), u32::try_from(end).unwrap_or(u32::MAX));
+
+        self.xdp_md[..4].copy_from_slice(&data.to_le_bytes());
+        self.xdp_md[4..].copy_from_slice(&end.to_le_bytes());
     }
 
-    /// Drop the loaded packet, if any.
+    /// Drop the loaded packet and zero the `xdp_md` context.
     pub fn clear_packet(&mut self) {
         self.packet = None;
+        self.xdp_md = [0u8; XDP_MD_LEN];
+    }
+
+    /// Raw `xdp_md` bytes (always 8 bytes; zeroed when no packet is loaded).
+    #[must_use]
+    pub const fn xdp_md(&self) -> &[u8; XDP_MD_LEN] {
+        &self.xdp_md
     }
 
     /// Length of the loaded packet, or `None` when unset.
@@ -435,8 +478,110 @@ impl MemoryView {
                 packet.load(addr, size, self.align_checks)
             }
             MemRegion::MapScratch => self.scratch_load(addr, size),
+            MemRegion::XdpMd => self.xdp_md_load(addr, size),
             MemRegion::Unknown => Err(MemError::OutOfBounds { addr, size: size.bytes() }),
         }
+    }
+
+    /// Bulk byte read for map-helper key/value copies.
+    ///
+    /// Classifies once and bounds-checks the whole range up front, then a
+    /// single copy — instead of one full `load` dispatch per byte. Bytes
+    /// need no alignment enforcement (the byte-wise path never trips it),
+    /// so this path checks bounds and stack-init only. Anything the bulk
+    /// path cannot serve falls back to the byte-wise loop, which reports
+    /// the exact faulting byte — diagnostics are identical either way.
+    ///
+    /// # Errors
+    ///
+    /// Same variants as [`load`](Self::load), naming the faulting byte.
+    pub(crate) fn load_bytes(&self, addr: i64, len: usize) -> Result<Vec<u8>, MemError> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        if let Some(bytes) = self.load_bytes_bulk(addr, len) {
+            return Ok(bytes);
+        }
+        self.load_bytes_slow(addr, len)
+    }
+
+    /// Whole-range attempt for [`load_bytes`](Self::load_bytes): `Some`
+    /// on full success, `None` when the slow path must name the fault.
+    fn load_bytes_bulk(&self, addr: i64, len: usize) -> Option<Vec<u8>> {
+        match Self::classify(addr) {
+            MemRegion::Stack => {
+                let off =
+                    addr.checked_sub(StackMemory::LOW).and_then(|o| usize::try_from(o).ok())?;
+                let end = off.checked_add(len)?;
+                if end > STACK_SIZE || !(off..end).all(|i| self.stack.is_init(i, 1)) {
+                    return None;
+                }
+                Some(self.stack.bytes[off..end].to_vec())
+            }
+            MemRegion::Packet => {
+                let packet = self.packet.as_ref()?;
+                let off = addr.checked_sub(PACKET_BASE).and_then(|o| usize::try_from(o).ok())?;
+                let end = off.checked_add(len)?;
+                if end > packet.len() {
+                    return None;
+                }
+                Some(packet.as_slice()[off..end].to_vec())
+            }
+            MemRegion::MapScratch => {
+                let off =
+                    addr.checked_sub(MAP_SCRATCH_BASE).and_then(|o| usize::try_from(o).ok())?;
+                let end = off.checked_add(len)?;
+                if end > self.map_scratch.len() {
+                    return None;
+                }
+                Some(self.map_scratch[off..end].to_vec())
+            }
+            MemRegion::XdpMd => {
+                let off = addr.checked_sub(XDP_MD_BASE).and_then(|o| usize::try_from(o).ok())?;
+                let end = off.checked_add(len)?;
+                if end > XDP_MD_LEN {
+                    return None;
+                }
+                Some(self.xdp_md[off..end].to_vec())
+            }
+            MemRegion::Unknown => None,
+        }
+    }
+
+    /// Byte-wise fallback for [`load_bytes`](Self::load_bytes): one full
+    /// dispatch per byte, so the first fault names its exact address.
+    // `B` loads always return `0..=255`; the `as` is exact — neither
+    // truncating nor sign-losing.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn load_bytes_slow(&self, addr: i64, len: usize) -> Result<Vec<u8>, MemError> {
+        let mut out = Vec::with_capacity(len);
+        let mut a = addr;
+        for _ in 0..len {
+            out.push(self.load(a, MemSize::B).map(|b| b as u8)?);
+            a = a.wrapping_add(1);
+        }
+        Ok(out)
+    }
+
+    /// Context load: bounds then alignment (same diagnostic priority as
+    /// every other region), then a direct little-endian copy.
+    fn xdp_md_load(&self, addr: i64, size: MemSize) -> Result<i64, MemError> {
+        let width = usize::from(size.bytes());
+        let off = addr
+            .checked_sub(XDP_MD_BASE)
+            .and_then(|o| usize::try_from(o).ok())
+            .filter(|&o| o.checked_add(width).is_some_and(|end| end <= XDP_MD_LEN))
+            .ok_or_else(|| MemError::OutOfBounds { addr, size: size.bytes() })?;
+
+        if self.align_checks {
+            check_alignment(addr, size)?;
+        }
+
+        let mut v: i64 = 0;
+        for (i, b) in self.xdp_md[off..off + width].iter().enumerate() {
+            v |= i64::from(*b) << (8 * i);
+        }
+        Ok(v)
     }
 
     /// Scratch load: bounds then alignment (mirroring [`load`](Self::load)'s
@@ -461,7 +606,7 @@ impl MemoryView {
 
     /// Store the low `size` bytes of `value` at `addr`.
     ///
-    /// Packet memory is read-only: stores there report
+    /// Packet and `xdp_md` memory are read-only: stores there report
     /// [`MemError::OutOfBounds`]. Scratch memory is writable (it models a
     /// kernel map value obtained through lookup). All other error cases
     /// mirror [`load`](Self::load); a successful stack store marks the
@@ -475,7 +620,7 @@ impl MemoryView {
         match Self::classify(addr) {
             MemRegion::Stack => self.stack.store(addr, size, value, self.align_checks),
             MemRegion::MapScratch => self.scratch_store(addr, size, value),
-            MemRegion::Packet | MemRegion::Unknown => {
+            MemRegion::Packet | MemRegion::XdpMd | MemRegion::Unknown => {
                 Err(MemError::OutOfBounds { addr, size: size.bytes() })
             }
         }
@@ -595,11 +740,32 @@ mod tests {
             mem.load(PACKET_BASE + 1, MemSize::Dw),
             Err(MemError::OutOfBounds { .. })
         ));
-        // Packet memory is read-only in v0.4.
+        // Packet memory is read-only.
         assert!(matches!(mem.store(PACKET_BASE, MemSize::B, 0), Err(MemError::OutOfBounds { .. })));
+        // `set_packet` also stages the `xdp_md` context.
+        assert_eq!(mem.load(XDP_MD_BASE, MemSize::W).unwrap(), PACKET_BASE);
+        assert_eq!(mem.load(XDP_MD_BASE + 4, MemSize::W).unwrap(), PACKET_BASE + 4);
         mem.clear_packet();
         assert_eq!(mem.packet_len(), None);
         assert!(matches!(mem.load(PACKET_BASE, MemSize::B), Err(MemError::NoPacket)));
+        // Context zeroes with the packet.
+        assert_eq!(mem.load(XDP_MD_BASE, MemSize::W).unwrap(), 0);
+    }
+
+    #[test]
+    fn xdp_md_roundtrip_and_bounds() {
+        let mut mem = MemoryView::default();
+        // Zeroed before any packet: reads succeed (the struct exists),
+        // stores fault (read-only).
+        assert_eq!(mem.load(XDP_MD_BASE, MemSize::Dw).unwrap(), 0);
+        assert!(matches!(mem.store(XDP_MD_BASE, MemSize::W, 1), Err(MemError::OutOfBounds { .. })));
+        assert!(matches!(mem.load(XDP_MD_BASE + 8, MemSize::B), Err(MemError::OutOfBounds { .. })));
+        // Straddling the 8-byte struct faults before alignment is checked.
+        assert!(matches!(mem.load(XDP_MD_BASE + 6, MemSize::W), Err(MemError::OutOfBounds { .. })));
+        // Misaligned in-bounds access faults (base is 8-aligned).
+        assert!(matches!(mem.load(XDP_MD_BASE + 1, MemSize::W), Err(MemError::Misaligned { .. })));
+        assert_eq!(MemoryView::classify(XDP_MD_BASE), MemRegion::XdpMd);
+        assert_eq!(MemoryView::classify(XDP_MD_BASE + 100), MemRegion::XdpMd);
     }
 
     #[test]

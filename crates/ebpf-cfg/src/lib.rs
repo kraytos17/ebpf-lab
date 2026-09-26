@@ -216,6 +216,49 @@ fn resolve_target(
     Ok(Pc(decoded - 1))
 }
 
+/// Resolve every jump site once: `targets[i]` is `Some` exactly where
+/// `insns[i]` is a `Jump`, holding its decoded target.
+///
+/// Both leader discovery and edge wiring used to re-resolve each jump
+/// independently; sharing one table means one resolution per jump site.
+/// Errors surface here, in instruction order (same order `find_leaders`
+/// reported them in).
+fn jump_targets(
+    insns: &[Insn],
+    slot_of: &[Slot],
+    decoded_of_slot: &[usize],
+) -> Result<Vec<Option<Pc>>, CfgError> {
+    insns
+        .iter()
+        .enumerate()
+        .map(|(i, insn)| match insn {
+            Insn::Jump { offset, .. } => {
+                resolve_target(slot_of, decoded_of_slot, i, *offset).map(Some)
+            }
+            _ => Ok(None),
+        })
+        .collect()
+}
+
+/// Leader collection over a pre-resolved target table (total: the table
+/// already carries every resolution error, so this cannot fail).
+fn collect_leaders(insns: &[Insn], targets: &[Option<Pc>]) -> Vec<Pc> {
+    let mut leaders = Vec::with_capacity(insns.len().min(1024));
+    leaders.push(Pc(0));
+    for (i, (insn, target)) in insns.iter().zip(targets.iter()).enumerate() {
+        if let Some(t) = target {
+            leaders.push(*t);
+        }
+        if matches!(insn, Insn::Jump { .. } | Insn::Exit) && i + 1 < insns.len() {
+            leaders.push(Pc(i + 1));
+        }
+    }
+
+    leaders.sort_unstable();
+    leaders.dedup();
+    leaders
+}
+
 /// Find basic-block entry points ("leaders") as decoded indices.
 ///
 /// Leaders are: index 0, every jump target, the fallthrough after every
@@ -230,21 +273,8 @@ pub fn find_leaders(insns: &[Insn]) -> Result<Vec<Pc>, CfgError> {
     }
 
     let (slot_of, decoded_of_slot) = slot_maps(insns);
-    let mut leaders = Vec::with_capacity(insns.len().min(1024));
-
-    leaders.push(Pc(0));
-    for (i, insn) in insns.iter().enumerate() {
-        if let Insn::Jump { offset, .. } = insn {
-            leaders.push(resolve_target(&slot_of, &decoded_of_slot, i, *offset)?);
-        }
-        if matches!(insn, Insn::Jump { .. } | Insn::Exit) && i + 1 < insns.len() {
-            leaders.push(Pc(i + 1));
-        }
-    }
-
-    leaders.sort_unstable();
-    leaders.dedup();
-    Ok(leaders)
+    let targets = jump_targets(insns, &slot_of, &decoded_of_slot)?;
+    Ok(collect_leaders(insns, &targets))
 }
 
 /// Build the control-flow graph for a decoded program.
@@ -277,7 +307,8 @@ pub fn build_cfg(insns: &[Insn]) -> Result<Cfg, CfgError> {
     }
 
     let (slot_of, decoded_of_slot) = slot_maps(insns);
-    let leaders = find_leaders(insns)?;
+    let targets = jump_targets(insns, &slot_of, &decoded_of_slot)?;
+    let leaders = collect_leaders(insns, &targets);
 
     // Block ranges computed once: each leader pairs with the next leader
     // (or the program end), so no loop rescans the leader list.
@@ -300,13 +331,24 @@ pub fn build_cfg(insns: &[Insn]) -> Result<Cfg, CfgError> {
     }
     for (idx, &(_, end)) in ranges.iter().enumerate() {
         let last = end.0 - 1;
+        // Targets come from the shared `jump_targets` table built above,
+        // so every `Jump` site resolved exactly once. The `else` arm names
+        // the validation site: the table was built from this same `insns`
+        // slice, so a `Jump` without an entry is unreachable.
+        let target_at = |pc: usize| {
+            let Some(target) = targets[pc] else {
+                unreachable!("jump target table built from identical insns slice");
+            };
+            target
+        };
+
         match &insns[last] {
-            Insn::Jump { op: JumpOp::Always, offset, .. } => {
-                let target = resolve_target(&slot_of, &decoded_of_slot, last, *offset)?;
+            Insn::Jump { op: JumpOp::Always, .. } => {
+                let target = target_at(last);
                 graph.add_edge(nodes[idx], block_of_pc[target.0], EdgeKind::Unconditional);
             }
-            Insn::Jump { offset, .. } => {
-                let target = resolve_target(&slot_of, &decoded_of_slot, last, *offset)?;
+            Insn::Jump { .. } => {
+                let target = target_at(last);
                 graph.add_edge(nodes[idx], block_of_pc[target.0], EdgeKind::BranchTrue);
                 if end.0 < insns.len() {
                     graph.add_edge(nodes[idx], block_of_pc[end.0], EdgeKind::BranchFalse);
@@ -387,6 +429,7 @@ pub fn to_dot(cfg: &Cfg, insns: &[Insn]) -> String {
         };
         let _ = writeln!(s, "  n{} -> n{} [label=\"{label}\"];", a.index(), b.index());
     }
+
     s.push_str("}\n");
     s
 }

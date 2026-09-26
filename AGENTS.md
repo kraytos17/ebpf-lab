@@ -1,8 +1,9 @@
 # AGENTS.md — ebpf-lab
 
 An eBPF laboratory in Rust: decode → disassemble → CFG → VM → verify.
-Seven workspace crates, zero `unsafe`, interval-lattice verifier with
-threshold widening + typed/map helpers, 205 tests, ~90% line coverage.
+Eight workspace crates, zero `unsafe`, interval-lattice verifier with
+threshold widening + typed/map/packet helpers, SSA optimizer with
+run-equivalence oracle, 285 tests, ~90% line coverage.
 
 ## 1. Gates (run these, in this order)
 
@@ -39,25 +40,27 @@ just fuzz-smoke      # 2×60s libFuzzer runs (needs nightly + cargo-fuzz)
 
 ```
 crates/
-  ebpf-isa/        wire format + decoder (RawInsn ↔ Insn, Reg, MemSize, Width)
+  ebpf-isa/        wire format + decoder/encoder (RawInsn ↔ Insn, Reg, MemSize, Width, AluOp::apply)
   ebpf-elf/        ELF .o parsing + flat .bin loading (ElfProgram, ProgType)
   ebpf-disasm/     Insn → text (Display impls live in ebpf-isa; layout here)
   ebpf-cfg/        CFG over petgraph (Pc/Slot newtypes, build_cfg, to_dot)
   ebpf-vm/         interpreter (Vm, exec::ExecInsn, memory::MemoryView, maps::MapStore)
   ebpf-verifier/   static verifier (Range lattice, worklist, helpers, JSON trace)
-  ebpf-lab-cli/    `ebpf-lab` binary (inspect, disasm, cfg, run, verify)
-tests/fixtures/    25 hand-assembled .bin programs + maps_example.json (COMMITTED)
+  ebpf-ssa/        register SSA + optimizer (build_ssa, optimize, lower, SsaError)
+  ebpf-lab-cli/    `ebpf-lab` binary (inspect, disasm, cfg, run, verify, optimize)
+tests/fixtures/    34 hand-assembled .bin programs + 3 raw .pkt packets + maps_example.json (COMMITTED)
 fuzz/              own workspace ([workspace] in fuzz/Cargo.toml, own Cargo.lock)
 ```
 
 Dependency direction (never invert):
 
 ```
-ebpf-isa ← ebpf-elf, ebpf-disasm, ebpf-cfg, ebpf-vm, ebpf-verifier
-ebpf-cfg ← ebpf-verifier, ebpf-lab-cli
+ebpf-isa ← ebpf-elf, ebpf-disasm, ebpf-cfg, ebpf-vm, ebpf-verifier, ebpf-ssa
+ebpf-cfg ← ebpf-verifier, ebpf-ssa, ebpf-lab-cli
 ebpf-disasm ← ebpf-verifier, ebpf-lab-cli
 ebpf-vm ← ebpf-verifier (maps::MapDesc only), ebpf-lab-cli
 ebpf-verifier ← ebpf-lab-cli
+ebpf-ssa ← ebpf-lab-cli
 ```
 
 - `ebpf-vm` must not depend on `ebpf-cfg` or `ebpf-verifier` (exec lowering
@@ -188,9 +191,11 @@ ebpf-verifier ← ebpf-lab-cli
   (`NullMapPtrAccess`); accesses are checked against `value_size`
   (`MapValueOutOfBounds`, bounds before alignment). Do not preserve
   map-pointer-ness through ALU moves (no aliases: each lookup writes `r0`).
-- **Worklist**: generation counters (`states_gen`/`processed_gen`, `u64`)
-  replace state clones for fixed-point detection; `visited` is a bitvec,
-  not a `HashSet`; LIFO `Vec` worklist (order irrelevant); in-place
+- **Worklist**: block-indexed arrays (`states`, `states_gen`/`processed_gen`
+  as `u32`, `block_iterations`) sized by block count, keyed by `NodeIndex`
+  — never by raw PC; `BlockWorklist` carries the pending queue plus
+  already-queued flags (re-merges into a pending block skip the redundant
+  push/pop). RPO seeding from the precomputed `Cfg::rpo`; in-place
   `join_assign`/`widen_assign` return the changed flag (no
   allocate-then-compare); propagation (`refine_edge` + `merge_successor`)
   **moves** the block-exit state into the final successor and clones only
@@ -220,12 +225,12 @@ ebpf-verifier ← ebpf-lab-cli
 | Layer | Location | Contents |
 |-------|----------|----------|
 | Unit | `src/*.rs` `mod tests` | transfer fns, lattice ops, CRUD, error variants |
-| Proptest (256 cases) | `state.rs`, `maps.rs`, `memory.rs`, `decode.rs` | lattice laws, model properties (roundtrip, delete-then-miss, LRU capacity), wire roundtrip, never-panics |
+| Proptest (256 cases) | `state.rs`, `maps.rs`, `memory.rs`, `decode.rs`/`encode.rs` | lattice laws, model properties (roundtrip, delete-then-miss, LRU capacity), wire roundtrip, never-panics |
 | Golden (insta) | `ebpf-disasm/tests/golden.rs` (6+3), `ebpf-cfg/tests/golden.rs` (4+1) | disassembly text, DOT graphs — incl. loop back-edge |
-| Trace snapshots (insta) | `ebpf-verifier/tests/trace_snapshot.rs` (6) | JSON schema incl. widened intervals + `maybe_map_ptr`/`map_ptr` |
+| Trace snapshots (insta) | `ebpf-verifier/tests/trace_snapshot.rs` (7) | JSON schema incl. widened intervals + `maybe_map_ptr`/`map_ptr` |
 | Fixture accept/reject | `ebpf-verifier/tests/fixtures.rs`, `ebpf-vm/src/exec.rs` | exact `VerifyError`/`VmError` variants, pinned exit codes |
 | Differential oracle | `ebpf-verifier/tests/differential.rs` | fixtures + 256 random programs |
-| CLI e2e | `ebpf-lab-cli/tests/cli.rs` (24) | every subcommand/flag via `CARGO_BIN_EXE`, incl. `--maps` errors |
+| CLI e2e | `ebpf-lab-cli/tests/cli.rs` (38) | every subcommand/flag via `CARGO_BIN_EXE`, incl. `--maps` errors |
 | Fuzz | `fuzz/fuzz_targets/` (decode + verify_pipeline) | totality: errors, never panic/hang/OOM |
 
 - Shared verifier-test helpers live in `crates/ebpf-verifier/tests/common/`
@@ -303,7 +308,8 @@ in the same commit.
   `--maps` JSON concern decoded at the serde boundary. Widths are
   validated at `MapStore::new`.
 - `build_stores([])` returns an empty table (not an error); fd 0 is always
-  `None`/invalid; duplicate fds are `DuplicateFd`.
+  `None`/invalid; duplicate fds are `DuplicateFd`; fds above `MAX_MAP_FD`
+  (1024) are `FdTooLarge` (fail fast, never allocate).
 
 ## 9. Docs that must stay in sync (checklist for every change)
 

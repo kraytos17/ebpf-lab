@@ -1,5 +1,6 @@
 //! Baseline: verifier time per program (straight-line, widening loop,
-//! guarded map access), with the JSON trace on and off.
+//! guarded map access, XDP ethertype dispatch), with the JSON trace on
+//! and off.
 //!
 //! Run with `cargo bench -p ebpf-verifier`.
 
@@ -42,23 +43,56 @@ type VerifyFn = fn(
 fn prepared(
     insns: &[ebpf_isa::Insn],
     maps: Vec<ebpf_verifier::MapDesc>,
+    packet_len: Option<usize>,
 ) -> (ebpf_cfg::Cfg, ebpf_verifier::VerifyConfig) {
     let cfg = ebpf_cfg::build_cfg(insns).expect("cfg builds");
-    let config = ebpf_verifier::VerifyConfig::with_maps(maps);
+    let config = ebpf_verifier::VerifyConfig { widening_threshold: 16, maps, packet_len };
     (cfg, config)
 }
 
 fn bench_verify(c: &mut Criterion) {
+    struct Case {
+        stem: &'static str,
+        insns: Vec<ebpf_isa::Insn>,
+        maps: Vec<ebpf_verifier::MapDesc>,
+        packet_len: Option<usize>,
+    }
+
     let mut group = c.benchmark_group("verify");
-    let mut cases: Vec<(&str, Vec<ebpf_isa::Insn>, Vec<ebpf_verifier::MapDesc>)> = vec![
-        ("arith", fixture("arith.bin"), Vec::new()),
-        ("loop_1000_iters", fixture("loop_1000_iters.bin"), Vec::new()),
-        ("map_guarded_value_access", fixture("map_guarded_value_access.bin"), maps::test_maps()),
+    let mut cases = vec![
+        Case { stem: "arith", insns: fixture("arith.bin"), maps: Vec::new(), packet_len: None },
+        Case {
+            stem: "loop_1000_iters",
+            insns: fixture("loop_1000_iters.bin"),
+            maps: Vec::new(),
+            packet_len: None,
+        },
+        Case {
+            stem: "map_guarded_value_access",
+            insns: fixture("map_guarded_value_access.bin"),
+            maps: maps::test_maps(),
+            packet_len: None,
+        },
+        // XDP ethertype dispatch under a 54-byte packet context: context
+        // loads, packet-pointer arithmetic, `data_end` refinement, and
+        // bound checks with no maps involved.
+        Case {
+            stem: "xdp_ethertype",
+            insns: fixture("xdp_ethertype_pass.bin"),
+            maps: Vec::new(),
+            packet_len: Some(54),
+        },
     ];
 
-    cases.push(("wide_500", wide_program(), Vec::new()));
-    for (stem, insns, maps) in &cases {
-        let (cfg, config) = prepared(insns, maps.clone());
+    cases.push(Case {
+        stem: "wide_500",
+        insns: wide_program(),
+        maps: Vec::new(),
+        packet_len: None,
+    });
+
+    for case in &cases {
+        let (cfg, config) = prepared(&case.insns, case.maps.clone(), case.packet_len);
         for traced in [true, false] {
             let verify_fn: VerifyFn = if traced {
                 ebpf_verifier::verify_traced
@@ -67,9 +101,9 @@ fn bench_verify(c: &mut Criterion) {
             };
 
             let tag = if traced { "trace" } else { "verdict" };
-            group.bench_function(format!("{stem}/{tag}"), |b| {
+            group.bench_function(format!("{}/{tag}", case.stem), |b| {
                 b.iter_batched(
-                    || (insns.clone(), config.clone()),
+                    || (case.insns.clone(), config.clone()),
                     |(insns, config)| {
                         black_box(verify_fn(
                             black_box(&insns),

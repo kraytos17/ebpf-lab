@@ -272,6 +272,24 @@ pub enum RegType {
         /// File descriptor of the map the pointer belongs to.
         fd: i64,
     },
+    /// Pointer to the staged `xdp_md` context.
+    ///
+    /// The entry type of `r1` for XDP programs. Loads at `+0` yield the
+    /// packet base ([`RegType::PacketPtr`] at offset 0); loads at `+4`
+    /// yield the packet end as an exact scalar (when `packet_len` is
+    /// known). Never produced by arithmetic — any ALU move degrades to
+    /// `Scalar(Top)`, like map pointers.
+    XdpMdPtr,
+    /// Pointer into the packet at `PACKET_BASE + offset`.
+    ///
+    /// `offset` is range-tracked so bound checks (`offset < data_end`)
+    /// narrow it via branch refinement. Pointer arithmetic (`mov`,
+    /// `add`/`sub` by constant) preserves packet-ness by shifting the
+    /// range; anything else degrades to `Scalar(Top)`.
+    PacketPtr {
+        /// Byte offset from the packet start.
+        offset: Range,
+    },
 }
 
 impl RegType {
@@ -306,6 +324,10 @@ impl RegType {
                     Self::Scalar(Range::Top)
                 }
             }
+            (Self::XdpMdPtr, Self::XdpMdPtr) => Self::XdpMdPtr,
+            (Self::PacketPtr { offset: o1 }, Self::PacketPtr { offset: o2 }) => {
+                Self::PacketPtr { offset: o1.join(*o2) }
+            }
             _ => Self::Scalar(Range::Top),
         }
     }
@@ -334,6 +356,8 @@ impl fmt::Display for RegType {
             Self::StackPtr { offset } => write!(f, "sp+{offset}"),
             Self::MapPtr { fd } => write!(f, "mp({fd})"),
             Self::MaybeMapPtr { fd } => write!(f, "?mp({fd})"),
+            Self::XdpMdPtr => f.write_str("xdp_md"),
+            Self::PacketPtr { offset } => write!(f, "pkt+{offset}"),
         }
     }
 }
@@ -380,6 +404,11 @@ pub struct VerifierState {
     /// on. `Rc` makes the per-block state clone a refcount bump instead of
     /// a deep descriptor copy.
     pub maps: Rc<[Option<MapDesc>]>,
+    /// Concrete packet length for bound checks (`None` = no packet
+    /// context: packet-base and context loads reject). Immutable
+    /// configuration, shared across every worklist state like `maps`
+    /// (Copy, so no `Rc` needed — joins keep it when both sides agree).
+    pub packet_len: Option<usize>,
 }
 
 impl VerifierState {
@@ -394,7 +423,18 @@ impl VerifierState {
     pub fn initial_with_maps(maps: Vec<Option<MapDesc>>) -> Self {
         let mut regs = array::from_fn(|_| RegType::NotInit);
         regs[10] = RegType::StackPtr { offset: 0 };
-        Self { regs, stack_init: [0u64; 8], maps: maps.into() }
+        Self { regs, stack_init: [0u64; 8], maps: maps.into(), packet_len: None }
+    }
+
+    /// XDP entry state: `r1` is the `xdp_md` context pointer, `r10` the
+    /// frame pointer, `packet_len` the concrete packet length (`None`
+    /// rejects packet accesses — strict by design).
+    #[must_use]
+    pub fn initial_xdp(packet_len: Option<usize>, maps: Vec<Option<MapDesc>>) -> Self {
+        let mut regs = array::from_fn(|_| RegType::NotInit);
+        regs[1] = RegType::XdpMdPtr;
+        regs[10] = RegType::StackPtr { offset: 0 };
+        Self { regs, stack_init: [0u64; 8], maps: maps.into(), packet_len }
     }
 
     /// Set one byte in the `stack_init` bitset.
@@ -460,7 +500,8 @@ impl VerifierState {
         let regs = array::from_fn(|i| RegType::join(&a.regs[i], &b.regs[i]));
         let stack_init = array::from_fn(|i| a.stack_init[i] & b.stack_init[i]);
         let maps = Self::join_maps(&a.maps, &b.maps);
-        Self { regs, stack_init, maps }
+        let packet_len = if a.packet_len == b.packet_len { a.packet_len } else { None };
+        Self { regs, stack_init, maps, packet_len }
     }
 
     /// Widen two states at a loop header: widen each scalar register,
@@ -470,12 +511,16 @@ impl VerifierState {
     pub fn widen(old: &Self, new: &Self) -> Self {
         let regs = array::from_fn(|i| match (&old.regs[i], &new.regs[i]) {
             (RegType::Scalar(r1), RegType::Scalar(r2)) => RegType::Scalar(r1.widen(*r2)),
+            (RegType::PacketPtr { offset: o1 }, RegType::PacketPtr { offset: o2 }) => {
+                RegType::PacketPtr { offset: o1.widen(*o2) }
+            }
             _ => RegType::join(&old.regs[i], &new.regs[i]),
         });
 
         let stack_init = array::from_fn(|i| old.stack_init[i] & new.stack_init[i]);
         let maps = Self::join_maps(&old.maps, &new.maps);
-        Self { regs, stack_init, maps }
+        let packet_len = if old.packet_len == new.packet_len { old.packet_len } else { None };
+        Self { regs, stack_init, maps, packet_len }
     }
 
     /// Join `other` into `self` in place. Returns true if anything changed.
@@ -498,6 +543,12 @@ impl VerifierState {
         }
 
         changed |= self.adopt_maps(Self::join_maps(&self.maps, &other.maps));
+        if self.packet_len != other.packet_len && self.packet_len.is_some() {
+            // `packet_len` is immutable configuration; disagreement degrades
+            // to no context.
+            self.packet_len = None;
+            changed = true;
+        }
         changed
     }
 
@@ -511,6 +562,9 @@ impl VerifierState {
         for (a, b) in self.regs.iter_mut().zip(other.regs.iter()) {
             let next = match (&*a, b) {
                 (RegType::Scalar(r1), RegType::Scalar(r2)) => RegType::Scalar(r1.widen(*r2)),
+                (RegType::PacketPtr { offset: o1 }, RegType::PacketPtr { offset: o2 }) => {
+                    RegType::PacketPtr { offset: o1.widen(*o2) }
+                }
                 _ => RegType::join(a, b),
             };
             if *a != next {
@@ -527,6 +581,10 @@ impl VerifierState {
         }
 
         changed |= self.adopt_maps(Self::join_maps(&self.maps, &other.maps));
+        if self.packet_len != other.packet_len && self.packet_len.is_some() {
+            self.packet_len = None;
+            changed = true;
+        }
         changed
     }
 }
@@ -801,6 +859,43 @@ mod tests {
         assert!(matches!(s.regs[10], RegType::StackPtr { offset: 0 }));
         assert!(matches!(s.regs[0], RegType::NotInit));
         assert!(s.stack_init.iter().all(|&w| w == 0));
+        assert_eq!(s.packet_len, None);
+    }
+
+    #[test]
+    fn packet_ptr_join_keeps_precision() {
+        // Same-offset packet pointers survive; differing offsets join the
+        // ranges (sound: bounds checks use the joined interval).
+        let a = RegType::PacketPtr { offset: Range::Interval { lo: 0, hi: 5 } };
+        let b = RegType::PacketPtr { offset: Range::Interval { lo: 3, hi: 8 } };
+        assert_eq!(
+            RegType::join(&a, &b),
+            RegType::PacketPtr { offset: Range::Interval { lo: 0, hi: 8 } }
+        );
+        assert_eq!(RegType::join(&a, &a), a);
+        // Cross-kind pairs degrade to Top.
+        assert_eq!(
+            RegType::join(&a, &RegType::Scalar(Range::exact(0))),
+            RegType::Scalar(Range::Top)
+        );
+        assert_eq!(
+            RegType::join(&a, &RegType::StackPtr { offset: 0 }),
+            RegType::Scalar(Range::Top)
+        );
+        assert_eq!(RegType::join(&RegType::XdpMdPtr, &RegType::XdpMdPtr), RegType::XdpMdPtr);
+        assert_eq!(RegType::join(&RegType::XdpMdPtr, &a), RegType::Scalar(Range::Top));
+    }
+
+    #[test]
+    fn initial_xdp_shape() {
+        let s = VerifierState::initial_xdp(Some(64), Vec::new());
+        assert!(matches!(s.regs[1], RegType::XdpMdPtr));
+        assert!(matches!(s.regs[10], RegType::StackPtr { offset: 0 }));
+        assert_eq!(s.packet_len, Some(64));
+        // Mismatched lengths degrade to no context.
+        let t = VerifierState::initial_xdp(Some(128), Vec::new());
+        assert_eq!(VerifierState::join(&s, &t).packet_len, None);
+        assert_eq!(VerifierState::join(&s, &s).packet_len, Some(64));
     }
 
     #[test]

@@ -136,6 +136,31 @@ pub enum VerifyError {
         value_size: usize,
     },
 
+    /// Packet access outside the loaded packet (`data + offset + size`).
+    #[error(
+        "packet out of bounds at pc {pc}: offset {offset} size {size} exceeds packet length {packet_len}"
+    )]
+    PacketOutOfBounds {
+        /// PC of the offending instruction.
+        pc: usize,
+        /// Byte offset from the packet start.
+        offset: i32,
+        /// Access width in bytes.
+        size: u8,
+        /// Concrete packet length.
+        packet_len: usize,
+    },
+
+    /// Packet-base or context access with no packet length configured.
+    ///
+    /// The verifier is strict by design: `verify` without `--packet` or
+    /// `--packet-len` rejects packet programs instead of guessing a length.
+    #[error("packet access with no packet context at pc {pc}")]
+    NoPacketContext {
+        /// PC of the offending instruction.
+        pc: usize,
+    },
+
     /// Multi-byte access at a naturally-unaligned address.
     #[error("misaligned {size}-byte access at pc {pc} (offset {offset})")]
     MisalignedAccess {

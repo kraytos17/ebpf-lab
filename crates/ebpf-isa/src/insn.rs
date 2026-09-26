@@ -282,6 +282,168 @@ impl AluOp {
             Self::End(_) => "end",
         }
     }
+
+    /// Apply the operation to concrete values: the single source of truth
+    /// for ALU semantics, shared by the interpreter and the optimizer's
+    /// constant folder (so folding is correct by construction).
+    ///
+    /// Thin dispatcher over the width halves: the width branch happens once
+    /// here so each half is a straight jump-table match. Division or modulo
+    /// by zero yields zero (kernel behavior, no trap). For [`AluOp::End`],
+    /// `rhs` carries the width immediate (16/32/64); other widths hit an
+    /// unreachable arm — producers (the VM loader, the verifier) validate
+    /// before evaluating.
+    ///
+    /// Cast allows below are intentional: eBPF arithmetic is *defined* as
+    /// wrapping at the operand width with truncation on narrowing, so every
+    /// `as` here implements the ISA semantic rather than hiding a bug.
+    #[must_use]
+    #[inline]
+    pub fn apply(self, lhs: i64, rhs: i64, width: Width) -> i64 {
+        match width {
+            Width::B64 => alu64(self, lhs, rhs),
+            Width::B32 => alu32(self, lhs, rhs),
+        }
+    }
+}
+
+/// 64-bit ALU (see [`AluOp::apply`] for the casting rationale).
+// Shift amounts narrow `rhs` to `u32` (masked to 6 bits right after);
+// everything else here reinterprets in-width via `cast_signed`/`cast_unsigned`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[inline]
+fn alu64(op: AluOp, lhs: i64, rhs: i64) -> i64 {
+    match op {
+        AluOp::Add => lhs.wrapping_add(rhs),
+        AluOp::Sub => lhs.wrapping_sub(rhs),
+        AluOp::Mul => lhs.wrapping_mul(rhs),
+        AluOp::Div => {
+            if rhs == 0 {
+                0
+            } else {
+                lhs.cast_unsigned().wrapping_div(rhs.cast_unsigned()).cast_signed()
+            }
+        }
+        AluOp::Mod => {
+            if rhs == 0 {
+                0
+            } else {
+                lhs.cast_unsigned().wrapping_rem(rhs.cast_unsigned()).cast_signed()
+            }
+        }
+        AluOp::Or => lhs | rhs,
+        AluOp::And => lhs & rhs,
+        AluOp::Xor => lhs ^ rhs,
+        AluOp::Mov => rhs,
+        AluOp::Neg => lhs.wrapping_neg(),
+        AluOp::Lsh => lhs.wrapping_shl(rhs as u32 & 63),
+        AluOp::Rsh => lhs.cast_unsigned().wrapping_shr(rhs as u32 & 63).cast_signed(),
+        AluOp::Arsh => lhs.wrapping_shr(rhs as u32 & 63),
+        AluOp::End(endian) => endian_swap(lhs, rhs, endian),
+    }
+}
+
+/// 32-bit ALU with zero-extended result (see [`AluOp::apply`]).
+#[inline]
+fn alu32(op: AluOp, lhs: i64, rhs: i64) -> i64 {
+    // Low words: BPF_ALU32 operates on the low 32 bits, so truncation here
+    // is the ISA semantic, not a bug.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let (l, r) = (lhs as u32, rhs as u32);
+    let w = match op {
+        AluOp::Add => l.wrapping_add(r),
+        AluOp::Sub => l.wrapping_sub(r),
+        AluOp::Mul => l.wrapping_mul(r),
+        AluOp::Div => {
+            if r == 0 {
+                0
+            } else {
+                l.wrapping_div(r)
+            }
+        }
+        AluOp::Mod => {
+            if r == 0 {
+                0
+            } else {
+                l.wrapping_rem(r)
+            }
+        }
+        AluOp::Or => l | r,
+        AluOp::And => l & r,
+        AluOp::Xor => l ^ r,
+        AluOp::Mov => r,
+        AluOp::Neg => l.wrapping_neg(),
+        AluOp::Lsh => l.wrapping_shl(r & 31),
+        AluOp::Rsh => l.wrapping_shr(r & 31),
+        AluOp::Arsh => (l.cast_signed().wrapping_shr(r & 31)).cast_unsigned(),
+        AluOp::End(endian) => endian_swap_32(l, rhs, endian),
+    };
+    i64::from(w)
+}
+
+/// `BPF_END`: mask to `width` bits (from the immediate), then byte-swap
+/// within the width when big-endian output was requested. Little-endian
+/// output is a plain mask on little-endian hosts like this lab's.
+///
+/// Widths are validated by producers before evaluating (see
+/// [`AluOp::apply`]), so the dead arm is unreachable by construction.
+///
+/// The `as` casts truncate to the operand width per the ISA semantic
+/// (see [`AluOp::apply`]).
+#[inline]
+fn endian_swap(value: i64, width_imm: i64, endian: Endian) -> i64 {
+    let masked: u64 = match width_imm {
+        16 => value.cast_unsigned() & 0xFFFF,
+        32 => value.cast_unsigned() & 0xFFFF_FFFF,
+        64 => value.cast_unsigned(),
+        _ => unreachable!("BPF_END width validated before evaluating"),
+    };
+
+    if endian == Endian::Le {
+        return masked.cast_signed();
+    }
+    let swapped = match width_imm {
+        // `masked` holds only the low 16 bits (16-arm above); the `as`
+        // only satisfies the `swap_bytes` API.
+        16 =>
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            u64::from((masked as u16).swap_bytes())
+        }
+        // Same: only the low 32 bits are significant here.
+        32 =>
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            u64::from((masked as u32).swap_bytes())
+        }
+        _ => masked.swap_bytes(),
+    };
+    swapped.cast_signed()
+}
+
+/// 32-bit variant of [`endian_swap`] (result is zero-extended by the caller).
+///
+/// Same producer-validation rationale as [`endian_swap`].
+#[inline]
+fn endian_swap_32(value: u32, width_imm: i64, endian: Endian) -> u32 {
+    let masked: u32 = match width_imm {
+        16 => value & 0xFFFF,
+        32 | 64 => value,
+        _ => unreachable!("BPF_END width validated before evaluating"),
+    };
+
+    if endian == Endian::Le {
+        return masked;
+    }
+    match width_imm {
+        // `masked` holds only the low 16 bits (16-arm above).
+        16 =>
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            u32::from((masked as u16).swap_bytes())
+        }
+        _ => masked.swap_bytes(),
+    }
 }
 
 impl fmt::Display for AluOp {

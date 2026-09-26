@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::state::{RegType, STACK_BYTES_I32};
+use crate::state::{Range, RegType, STACK_BYTES_I32};
 
 /// A per-PC state snapshot in the verification trace.
 #[derive(Debug, Serialize)]
@@ -25,11 +25,12 @@ pub struct RegSummary {
     /// Register index (0–10).
     pub r: usize,
     /// Human-readable type description (one of `not_init`, `scalar`,
-    /// `unknown`, `bottom`, `stack_ptr`, `map_ptr`, `maybe_map_ptr` — hence
-    /// `&'static str`, no allocation per register per PC).
+    /// `unknown`, `bottom`, `stack_ptr`, `map_ptr`, `maybe_map_ptr`,
+    /// `xdp_md_ptr`, `packet_ptr` — hence `&'static str`, no allocation
+    /// per register per PC).
     #[serde(rename = "type")]
     pub ty: &'static str,
-    /// Optional value range (for scalars).
+    /// Optional value range (for scalars and packet-pointer offsets).
     pub range: Option<[i64; 2]>,
     /// Optional stack offset (for stack pointers).
     pub offset: Option<i32>,
@@ -51,9 +52,9 @@ pub const fn format_reg(index: usize, reg: &RegType) -> RegSummary {
         RegType::NotInit => RegSummary { r: index, ty: "not_init", range: None, offset: None },
         RegType::Scalar(r) => {
             let (ty, range) = match r {
-                crate::state::Range::Bottom => ("bottom", None),
-                crate::state::Range::Top => ("unknown", None),
-                crate::state::Range::Interval { lo, hi } => ("scalar", Some([*lo, *hi])),
+                Range::Bottom => ("bottom", None),
+                Range::Top => ("unknown", None),
+                Range::Interval { lo, hi } => ("scalar", Some([*lo, *hi])),
             };
             RegSummary { r: index, ty, range, offset: None }
         }
@@ -64,6 +65,14 @@ pub const fn format_reg(index: usize, reg: &RegType) -> RegSummary {
         RegType::MaybeMapPtr { .. } => {
             RegSummary { r: index, ty: "maybe_map_ptr", range: None, offset: None }
         }
+        RegType::XdpMdPtr => RegSummary { r: index, ty: "xdp_md_ptr", range: None, offset: None },
+        RegType::PacketPtr { offset } => {
+            let range = match offset {
+                Range::Interval { lo, hi } => Some([*lo, *hi]),
+                Range::Bottom | Range::Top => None,
+            };
+            RegSummary { r: index, ty: "packet_ptr", range, offset: None }
+        }
     }
 }
 
@@ -72,8 +81,7 @@ pub const fn format_reg(index: usize, reg: &RegType) -> RegSummary {
 /// One entry per 8-byte slot whose bytes are *all* initialized; the
 /// offset is the slot's start relative to the frame pointer. Values
 /// render as `unknown`: stores write `Top`, so the slot carries
-/// init-tracking metadata, not a range (exact-value rendering arrives
-/// with v0.9 value tracking).
+/// init-tracking metadata, not a range.
 #[must_use]
 pub fn format_stack(init: &[u64; 8]) -> Vec<StackSummary> {
     let mut out = Vec::new();

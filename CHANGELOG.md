@@ -3,6 +3,79 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- v0.10 Part B — SSA optimizer (`ebpf-ssa` crate): Braun-et-al.
+  register-SSA construction (`build_ssa`, total entry env with pinned
+  `FramePtr`/`EntryCtx`), four fixed-point passes (`optimize`: constant
+  folding through `AluOp::apply`, copy propagation incl. singleton phis,
+  mark-sweep DCE, unreachable elimination), and lowering back to bytecode
+  (`lower`: linear-scan allocation, critical-edge trampolines, slot-space
+  offsets). Graceful `SsaError` refusals (pressure, phi/call cycles,
+  `r10` faulting loads) instead of miscompiles.
+- `ebpf-isa`: `AluOp::apply` (single ALU semantics source, shared by the
+  VM and the folder) and `encode_program`/`EncodeError` (wire serializer
+  with fixture + proptest roundtrips).
+- CLI: `optimize program -o out.bin` (single-program inputs;
+  `optimized: OLD -> NEW instructions` line, analysis refusals print as
+  `error:` with exit zero).
+- Fixtures: `opt_redundant` (6→2), `opt_copy_chain` (5→2),
+  `opt_dead_code` (3→2), `opt_branch_preserved` (shape-preserving).
+- Equivalence oracle (`ebpf-ssa/tests/equivalence.rs`): run-identical
+  (exit codes exact, faults equal modulo PC renumbering) across all
+  fixtures — including verifier-rejected ones — plus 128 random programs.
+- Benches: `ssa/wide_250/build` (~5.1 µs), `ssa/xdp_ethertype/build`
+  (~856 ns), `ssa/xdp_ethertype/opt` (~962 ns), `ssa/wide_250/lower`
+  (~11.3 µs).
+- v0.10 Part A — Packet/XDP simulator: `MemoryView` stages an 8-byte
+  `xdp_md` context (`data` @+0, `data_end` @+4, `XDP_MD_BASE`, read-only)
+  on `set_packet`; `ebpf-vm::xdp` adds `XdpAction`, hand-rolled
+  Eth/IPv4 parsers, `run_xdp` entry (`r1 = xdp_md`), and `Vm::install_xdp_packet`.
+- Verifier packet bounds: `RegType::XdpMdPtr` (entry `r1`) and
+  `RegType::PacketPtr { offset }` (range-tracked, joins keep precision,
+  `mov`/`add`/`sub`-by-constant preserve it); context loads yield the
+  packet base or absolute `data_end`; packet loads check bounds before
+  alignment against `VerifyConfig::packet_len`; reg–reg bound checks
+  (`pkt vs data_end`) refine the offset. New `VerifyError::PacketOutOfBounds`
+  and `VerifyError::NoPacketContext` (strict: `verify` without `--packet`
+  / `--packet-len` rejects XDP programs instead of guessing a length).
+  Trace renders `xdp_md_ptr` / `packet_ptr`.
+- CLI: `xdp program packet [--trace]` (verify-then-run, `xdp: ACTION (code)`
+  output, `--trace` annotates ethertype/proto loads) and
+  `verify --packet <file> --packet-len <n>` (file wins).
+- Fixtures: `xdp_pass`, `xdp_drop`, `xdp_ethertype_pass` (LE `jeq 8`
+  `htons` shape), `xdp_unguarded_access`, `xdp_store_rejected`, plus
+  `pkt_ipv4_tcp.pkt` (54 B), `pkt_arp.pkt` (42 B), `pkt_short.pkt` (10 B);
+  differential oracle covers verify+run agreement under a shared length.
+- Benches: `verify/xdp_ethertype` (verdict ~436 ns, trace ~3.6 µs) and
+  `vm/xdp_ethertype` (~117 ns) pin the packet transfer path; `Justfile`
+  `bench-release` now measures 10 s per benchmark (the 3 s window could
+  not complete 200 `wide_500/trace` samples).
+- Fuzz: `verify_pipeline` alternates packet context by input parity (even
+  first byte ⇒ 64-byte packet), so half the corpus exercises the XDP
+  entry transfers and half the strict no-context rejection; `fuzz/Cargo.lock`
+  refreshed for the 0.9.0 path deps.
+- `MapError::FdTooLarge { fd, max }`: fds above `MAX_MAP_FD` (1024)
+  reject before any table allocation, with unit, verifier-integration,
+  and CLI error-path pins.
+
+### Changed
+
+- Verifier worklist is block-indexed: `states`, `states_gen`,
+  `processed_gen`, and `block_iterations` are sized by block count
+  instead of instruction count, keyed by `NodeIndex`; the queue carries
+  nodes with an already-queued flag (no duplicate push/pop churn).
+- `ebpf-cfg`: `slot_maps` computed once per `build_cfg` (new private
+  `jump_targets` table shared by leader discovery and edge wiring, so
+  each jump resolves exactly once).
+- `MapStore::LruArray` shares key bytes by `Rc<[u8]>` across `data`,
+  `stamps`, and `stamp_of`: one allocation per live key instead of three.
+- `MemoryView::load_bytes`: bulk key/value read (classify once,
+  whole-range bounds check, single copy) with byte-wise fallback so
+  diagnostics name the exact faulting byte; `read_guest_bytes` delegates.
+
 ## [0.9.0] - 2026-09-25
 
 ### Added

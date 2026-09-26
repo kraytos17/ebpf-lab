@@ -19,6 +19,7 @@ ebpf-disasm.workspace = true
 ebpf-cfg.workspace = true
 ebpf-vm.workspace = true
 ebpf-verifier.workspace = true
+ebpf-ssa.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true

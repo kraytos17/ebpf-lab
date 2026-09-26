@@ -17,9 +17,11 @@
 //! ```
 
 pub mod decode;
+pub mod encode;
 pub mod insn;
 pub mod opcode;
 
 pub use decode::decode_program;
+pub use encode::{EncodeError, encode_program};
 pub use insn::{AluOp, DecodeError, Endian, Insn, JumpOp, MemSize, Operand, RawInsn, Reg, Width};
 pub use opcode::{LD_IMM_DW, class};

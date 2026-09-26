@@ -1,8 +1,9 @@
 //! Worklist algorithm and per-instruction verification.
 
-use ebpf_cfg::{Cfg, EdgeKind, Pc};
+use ebpf_cfg::{Cfg, EdgeKind};
 use ebpf_isa::insn::{AluOp, Insn, JumpOp, MemSize, Operand, Reg, Width};
-use ebpf_vm::maps::MapDesc;
+use ebpf_vm::maps::{MAX_MAP_FD, MapDesc};
+use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 use std::collections::VecDeque;
 
@@ -11,7 +12,7 @@ use crate::state::{Range, RegType, STACK_BYTES, VerifierState};
 use crate::trace::{TraceEntry, format_reg, format_stack};
 use crate::{VerifiedProgram, VerifyError};
 
-/// Semantic configuration for the verifier: widening and maps.
+/// Semantic configuration for the verifier: widening, maps, packets.
 ///
 /// Trace collection is deliberately *not* a field here — it is an
 /// entry-point choice ([`verify_traced`] vs [`verify_with_config`]), so
@@ -25,11 +26,16 @@ pub struct VerifyConfig {
     /// Map descriptors (from `--maps` JSON). Empty means no maps: any
     /// map-helper call rejects with [`VerifyError::BadMapFd`].
     pub maps: Vec<MapDesc>,
+    /// Concrete packet length for bound checks (`None` = no packet
+    /// context: packet-base and context loads reject with
+    /// [`VerifyError::NoPacketContext`]). Set from `--packet` /
+    /// `--packet-len` (CLI) or the `xdp` subcommand's packet file.
+    pub packet_len: Option<usize>,
 }
 
 impl Default for VerifyConfig {
     fn default() -> Self {
-        Self { widening_threshold: 16, maps: Vec::new() }
+        Self { widening_threshold: 16, maps: Vec::new(), packet_len: None }
     }
 }
 
@@ -37,7 +43,13 @@ impl VerifyConfig {
     /// Config with default widening settings and `maps` installed.
     #[must_use]
     pub const fn with_maps(maps: Vec<MapDesc>) -> Self {
-        Self { widening_threshold: 16, maps }
+        Self { widening_threshold: 16, maps, packet_len: None }
+    }
+
+    /// Config with default widening settings and a packet length installed.
+    #[must_use]
+    pub const fn with_packet_len(packet_len: usize) -> Self {
+        Self { widening_threshold: 16, maps: Vec::new(), packet_len: Some(packet_len) }
     }
 }
 
@@ -106,14 +118,16 @@ fn map_fd(state: &VerifierState, pc: usize) -> Result<Option<i64>, VerifyError> 
         RegType::Scalar(Range::Interval { lo, hi }) if lo == hi => Ok(Some(*lo)),
         RegType::Scalar(_) => Ok(None),
         RegType::NotInit => Err(VerifyError::UninitRegister { pc, reg: 1 }),
-        RegType::StackPtr { .. } | RegType::MapPtr { .. } | RegType::MaybeMapPtr { .. } => {
-            Err(VerifyError::TypeMismatch {
-                pc,
-                register: 1,
-                expected: "scalar file descriptor",
-                found: "pointer",
-            })
-        }
+        RegType::StackPtr { .. }
+        | RegType::MapPtr { .. }
+        | RegType::MaybeMapPtr { .. }
+        | RegType::XdpMdPtr
+        | RegType::PacketPtr { .. } => Err(VerifyError::TypeMismatch {
+            pc,
+            register: 1,
+            expected: "scalar file descriptor",
+            found: "pointer",
+        }),
     }
 }
 
@@ -121,7 +135,7 @@ fn map_fd(state: &VerifierState, pc: usize) -> Result<Option<i64>, VerifyError> 
 ///
 /// Proven pointers yield their fd; nullable pointers reject (a lookup
 /// miss leaves no value behind, so there is nothing safe to access);
-/// anything else yields `None` so the caller uses the stack path.
+/// anything else yields `None` so the caller uses the stack/packet path.
 const fn map_value_fd(
     state: &VerifierState,
     base: Reg,
@@ -132,7 +146,11 @@ const fn map_value_fd(
         RegType::MaybeMapPtr { fd } => {
             Err(VerifyError::NullMapPtrAccess { pc, register: base.0, fd })
         }
-        RegType::NotInit | RegType::Scalar(_) | RegType::StackPtr { .. } => Ok(None),
+        RegType::NotInit
+        | RegType::Scalar(_)
+        | RegType::StackPtr { .. }
+        | RegType::XdpMdPtr
+        | RegType::PacketPtr { .. } => Ok(None),
     }
 }
 
@@ -282,13 +300,18 @@ pub fn verify(insns: &[Insn], cfg: &Cfg) -> Result<VerifiedProgram, VerifyError>
 
 /// Build the fd-indexed map table (index 0 always `None`).
 ///
+/// The table is capped at [`MAX_MAP_FD`]: oversized fds are simply absent
+/// (lookups miss → [`VerifyError::BadMapFd`] at use), so a hostile
+/// `--maps` file can never force a multi-gigabyte allocation here.
 /// Duplicate fds were rejected when the descriptors were built, so a
 /// second claim here keeps the first (defensive; unreachable through
 /// [`build_stores`](ebpf_vm::maps::build_stores)).
 fn build_map_table(config: &VerifyConfig) -> Vec<Option<MapDesc>> {
     let max_fd = config.maps.iter().map(|d| d.fd).max().unwrap_or(0);
-    let table_len = usize::try_from(max_fd.max(0)).unwrap_or(0) + 1;
+    let capped = max_fd.clamp(0, MAX_MAP_FD);
+    let table_len = usize::try_from(capped).unwrap_or(0) + 1;
     let mut table: Vec<Option<MapDesc>> = Vec::with_capacity(table_len);
+
     table.resize_with(table_len, || None);
     for desc in &config.maps {
         if let Ok(i) = usize::try_from(desc.fd)
@@ -333,6 +356,38 @@ pub fn verify_traced(
     verify_core(insns, cfg, config, true)
 }
 
+/// Block-indexed worklist driver: the pending queue plus its
+/// already-queued flags.
+///
+/// Items are CFG nodes, never raw PCs — every worklist array below is
+/// sized by block count, not instruction count, so a single-block
+/// program keeps one live slot per array instead of hundreds of dead ones.
+/// The flag turns push-then-discard-late into push-only-if-pending: re-merges
+///  into an already-queued block skip the redundant push/pop pair entirely.
+struct BlockWorklist {
+    queue: VecDeque<NodeIndex>,
+    queued: Vec<bool>,
+}
+
+impl BlockWorklist {
+    fn with_capacity(blocks: usize) -> Self {
+        Self { queue: VecDeque::with_capacity(blocks), queued: vec![false; blocks] }
+    }
+
+    fn push(&mut self, node: NodeIndex) {
+        if !self.queued[node.index()] {
+            self.queued[node.index()] = true;
+            self.queue.push_back(node);
+        }
+    }
+
+    fn pop(&mut self) -> Option<NodeIndex> {
+        self.queue.pop_front().inspect(|node| {
+            self.queued[node.index()] = false;
+        })
+    }
+}
+
 /// Shared worklist core. `collect_trace` gates the disassembly render
 /// and every per-PC allocation: verdict-only runs build no trace strings
 /// at all (trace discipline).
@@ -351,24 +406,36 @@ fn verify_core(
         disasm.as_deref().map_or_else(Vec::new, |text| text.lines().collect());
 
     let map_table = build_map_table(config);
-    let mut states: Vec<Option<VerifierState>> = vec![None; insns.len()];
-    states[cfg.entry.index()] = Some(VerifierState::initial_with_maps(map_table));
+    // Worklist bookkeeping is block-indexed (sized by block count, not
+    // instruction count): only block starts ever carry states. `visited`
+    // below stays per-PC — it counts instructions, not blocks.
+    let block_count = cfg.graph.node_count();
+    let entry = cfg.entry.index();
+    let mut states: Vec<Option<VerifierState>> = vec![None; block_count];
+    // XDP entry (`r1 = xdp_md`) exactly when a packet length is configured;
+    // otherwise the legacy entry (`r1` uninitialized) so non-packet
+    // programs verify exactly as before.
+    states[entry] = Some(if config.packet_len.is_some() {
+        VerifierState::initial_xdp(config.packet_len, map_table)
+    } else {
+        VerifierState::initial_with_maps(map_table)
+    });
 
-    // `states_gen[pc]` bumps on every input change; `processed_gen[pc]`
+    // `states_gen[block]` bumps on every input change; `processed_gen[block]`
     // records the last generation processed. Equal generations mean the
     // block was already processed with this exact input
     // Terminates: joins are monotone, and widening after
     // `widening_threshold` re-joins forces finite ascent (each widening
     // strictly grows at least one register toward Top).
-    let mut states_gen: Vec<u32> = vec![0; insns.len()];
-    states_gen[cfg.entry.index()] = 1;
+    let mut states_gen: Vec<u32> = vec![0; block_count];
+    states_gen[entry] = 1;
 
-    let mut processed_gen: Vec<u32> = vec![u32::MAX; insns.len()];
-    let mut block_iterations: Vec<usize> = vec![0; insns.len()];
-    let mut worklist: VecDeque<usize> = VecDeque::with_capacity(insns.len());
+    let mut processed_gen: Vec<u32> = vec![u32::MAX; block_count];
+    let mut block_iterations: Vec<usize> = vec![0; block_count];
+    let mut worklist = BlockWorklist::with_capacity(block_count);
     // Use precomputed RPO from the CFG for the initial worklist seeding.
     for &node in cfg.rpo() {
-        worklist.push_back(cfg.graph[node].start.0);
+        worklist.push(node);
     }
 
     let mut trace: Vec<TraceEntry> =
@@ -376,27 +443,21 @@ fn verify_core(
 
     let mut visited = vec![false; insns.len()];
     let mut total_pc: usize = 0;
-    while let Some(pc_idx) = worklist.pop_front() {
-        if processed_gen[pc_idx] == states_gen[pc_idx] {
+    while let Some(node) = worklist.pop() {
+        let block = node.index();
+        if processed_gen[block] == states_gen[block] {
             continue;
         }
 
-        processed_gen[pc_idx] = states_gen[pc_idx];
-        // Find which block this PC belongs to.
-        let node = cfg.block_at(Pc(pc_idx));
+        processed_gen[block] = states_gen[block];
         let bb = &cfg.graph[node];
         let block_start = bb.start.0;
         let block_end = bb.end.0;
 
-        // If this PC is not the start of a block, we've already processed
-        // this block. Only process from block starts.
-        if pc_idx != block_start {
-            continue;
-        }
-
-        let Some(state) = states[pc_idx].clone() else { continue };
+        let Some(state) = states[block].clone() else { continue };
         let mut current = state;
         let last_jump = jump_info(&insns[block_end - 1]);
+        let last_jump_reg = jump_info_reg(&insns[block_end - 1]);
         for (i, insn) in insns[block_start..block_end].iter().enumerate() {
             let pc = block_start + i;
             check_and_transfer(pc, insn, &mut current, helpers)?;
@@ -427,29 +488,27 @@ fn verify_core(
             continue; // exit block: no successors
         }
         for edge in cfg.graph.edges(node).take(n_succ - 1) {
-            let target_pc = cfg.graph[edge.target()].start.0;
             let mut out = current.clone();
-            refine_edge(&mut out, *edge.weight(), last_jump);
+            refine_edge(&mut out, *edge.weight(), last_jump, last_jump_reg);
             merge_successor(
                 &mut states,
                 &mut states_gen,
                 &mut block_iterations,
                 &mut worklist,
-                target_pc,
+                edge.target(),
                 out,
                 config.widening_threshold,
             );
         }
         if let Some(edge) = cfg.graph.edges(node).nth(n_succ - 1) {
-            let target_pc = cfg.graph[edge.target()].start.0;
             let mut out = current;
-            refine_edge(&mut out, *edge.weight(), last_jump);
+            refine_edge(&mut out, *edge.weight(), last_jump, last_jump_reg);
             merge_successor(
                 &mut states,
                 &mut states_gen,
                 &mut block_iterations,
                 &mut worklist,
-                target_pc,
+                edge.target(),
                 out,
                 config.widening_threshold,
             );
@@ -463,52 +522,198 @@ fn verify_core(
 ///
 /// `out` is still the unrefined block-exit state (a fresh clone, or the
 /// moved block-exit state on the final edge), so the compared register's
-/// pre-edge value is read from `out` itself.
+/// pre-edge value is read from `out` itself. Immediate comparisons refine
+/// via [`refine_reg`]; register-register comparisons where exactly one
+/// side is a [`RegType::PacketPtr`] and the other an exact scalar refine
+/// the packet offset (the bound-check pattern — see
+/// [`refine_packet_reg`]).
 #[inline]
-fn refine_edge(out: &mut VerifierState, kind: EdgeKind, last_jump: Option<(JumpOp, Reg, i64)>) {
+fn refine_edge(
+    out: &mut VerifierState,
+    kind: EdgeKind,
+    last_jump: Option<(JumpOp, Reg, i64)>,
+    last_jump_reg: Option<(JumpOp, Reg, Reg)>,
+) {
     let taken = match kind {
         EdgeKind::BranchTrue => true,
         EdgeKind::BranchFalse => false,
         EdgeKind::Fallthrough | EdgeKind::Unconditional => return,
     };
 
-    let Some((op, dst, k)) = last_jump else { return };
-    let incoming = out.regs[dst.index()].clone();
-    refine_reg(&mut out.regs[dst.index()], &incoming, op, k, taken);
+    if let Some((op, dst, k)) = last_jump {
+        let incoming = out.regs[dst.index()].clone();
+        refine_reg(&mut out.regs[dst.index()], &incoming, op, k, taken);
+        return;
+    }
+    if let Some((op, dst, src)) = last_jump_reg {
+        refine_packet_edge(out, op, dst, src, taken);
+    }
+}
+
+/// Refine a packet bound check `dst op src` where one side is a packet
+/// pointer and the other an exact scalar (typically `data_end`).
+///
+/// Runtime compares absolute addresses (`PACKET_BASE + off` vs the scalar,
+/// which for `data_end` is itself `PACKET_BASE + len`), so the scalar is
+/// rebased by `PACKET_BASE` before narrowing the offset with [`refine`].
+/// Non-exact scalars, two packet pointers, or inexpressible ops leave the
+/// state unchanged (sound imprecision).
+fn refine_packet_edge(out: &mut VerifierState, op: JumpOp, dst: Reg, src: Reg, taken: bool) {
+    let dst_ty = out.regs[dst.index()].clone();
+    let src_ty = out.regs[src.index()].clone();
+    // Packet on the left, scalar on the right: `off op k_rel`.
+    if let (RegType::PacketPtr { offset }, RegType::Scalar(Range::Interval { lo, hi })) =
+        (&dst_ty, &src_ty)
+        && lo == hi
+        && let Some(k_rel) = lo.checked_sub(ebpf_vm::memory::PACKET_BASE)
+    {
+        out.regs[dst.index()] = RegType::PacketPtr { offset: refine(*offset, op, k_rel, taken) };
+        return;
+    }
+    // Scalar on the left, packet on the right: swap the comparison.
+    if let (RegType::Scalar(Range::Interval { lo, hi }), RegType::PacketPtr { offset }) =
+        (&dst_ty, &src_ty)
+        && lo == hi
+        && let Some(k_rel) = lo.checked_sub(ebpf_vm::memory::PACKET_BASE)
+        && let Some(swapped) = swap_op(op)
+    {
+        out.regs[src.index()] =
+            RegType::PacketPtr { offset: refine(*offset, swapped, k_rel, taken) };
+    }
+}
+
+/// Swap a comparison's operands (`a op b` ⟺ `b swapped a`).
+const fn swap_op(op: JumpOp) -> Option<JumpOp> {
+    match op {
+        JumpOp::Eq => Some(JumpOp::Eq),
+        JumpOp::Ne => Some(JumpOp::Ne),
+        JumpOp::Gt => Some(JumpOp::Lt),
+        JumpOp::Ge => Some(JumpOp::Le),
+        JumpOp::Lt => Some(JumpOp::Gt),
+        JumpOp::Le => Some(JumpOp::Ge),
+        JumpOp::Sgt => Some(JumpOp::Slt),
+        JumpOp::Sge => Some(JumpOp::Sle),
+        JumpOp::Slt => Some(JumpOp::Sgt),
+        JumpOp::Sle => Some(JumpOp::Sge),
+        JumpOp::Set | JumpOp::Always | JumpOp::Call | JumpOp::Exit => None,
+    }
 }
 
 /// Merge a successor's entry state: first write, or join (widen after the
 /// configured re-join threshold); bump the generation and requeue only
-/// when the entry changed.
+/// when the entry changed (and only if not already pending).
 #[inline]
 fn merge_successor(
     states: &mut [Option<VerifierState>],
     states_gen: &mut [u32],
     block_iterations: &mut [usize],
-    worklist: &mut VecDeque<usize>,
-    target_pc: usize,
+    worklist: &mut BlockWorklist,
+    target: NodeIndex,
     incoming: VerifierState,
     widening_threshold: usize,
 ) {
-    match &mut states[target_pc] {
+    let block = target.index();
+    match &mut states[block] {
         None => {
-            states[target_pc] = Some(incoming);
-            states_gen[target_pc] = states_gen[target_pc].wrapping_add(1);
-            worklist.push_back(target_pc);
+            states[block] = Some(incoming);
+            states_gen[block] = states_gen[block].wrapping_add(1);
+            worklist.push(target);
         }
         Some(existing) => {
-            block_iterations[target_pc] += 1;
-            let changed = if block_iterations[target_pc] > widening_threshold {
+            block_iterations[block] += 1;
+            let changed = if block_iterations[block] > widening_threshold {
                 existing.widen_assign(&incoming)
             } else {
                 existing.join_assign(&incoming)
             };
 
             if changed {
-                states_gen[target_pc] = states_gen[target_pc].wrapping_add(1);
-                worklist.push_back(target_pc);
+                states_gen[block] = states_gen[block].wrapping_add(1);
+                worklist.push(target);
             }
         }
+    }
+}
+
+/// Pointer fast path for [`alu_transfer`]: `mov` copies pointer-ness,
+/// `add`/`sub` by a constant shift stack offsets or packet ranges.
+///
+/// Returns true when the instruction was fully handled (caller returns
+/// `Ok(())`); false means fall through to the generic scalar path (which
+/// degrades pointers to `Top`). `r10` writes keep the frame pointer.
+#[inline]
+fn ptr_alu_transfer(state: &mut VerifierState, op: AluOp, dst: Reg, src: Operand) -> bool {
+    match op {
+        AluOp::Mov => {
+            if let Operand::Reg(r) = src
+                && !dst.is_frame_ptr()
+            {
+                match state.regs[r.index()] {
+                    RegType::StackPtr { offset } => {
+                        state.regs[dst.index()] = RegType::StackPtr { offset };
+                        return true;
+                    }
+                    RegType::PacketPtr { offset } => {
+                        state.regs[dst.index()] = RegType::PacketPtr { offset };
+                        return true;
+                    }
+                    RegType::XdpMdPtr => {
+                        state.regs[dst.index()] = RegType::XdpMdPtr;
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+            false
+        }
+        AluOp::Add | AluOp::Sub => {
+            if let RegType::StackPtr { offset } = state.regs[dst.index()] {
+                let delta: Option<i32> = match src {
+                    Operand::Imm(v) => Some(v),
+                    Operand::Reg(r) => match state.regs[r.index()] {
+                        RegType::Scalar(Range::Interval { lo, hi }) if lo == hi => {
+                            i32::try_from(lo).ok()
+                        }
+                        _ => None,
+                    },
+                };
+                if let Some(k) = delta {
+                    // Overflow (`sub` of `i32::MIN`) degrades to Top.
+                    let k = if matches!(op, AluOp::Sub) { k.checked_neg() } else { Some(k) };
+                    let next = k
+                        .and_then(|k| offset.checked_add(k))
+                        .map_or(RegType::Scalar(Range::Top), |off| RegType::StackPtr {
+                            offset: off,
+                        });
+                    if !dst.is_frame_ptr() {
+                        state.regs[dst.index()] = next;
+                    }
+                    return true;
+                }
+            }
+            if let RegType::PacketPtr { offset } = state.regs[dst.index()] {
+                let delta: Option<i64> = match src {
+                    Operand::Imm(v) => Some(i64::from(v)),
+                    Operand::Reg(r) => match state.regs[r.index()] {
+                        RegType::Scalar(Range::Interval { lo, hi }) if lo == hi => Some(lo),
+                        _ => None,
+                    },
+                };
+                if let Some(k) = delta {
+                    let k = if matches!(op, AluOp::Sub) { k.checked_neg() } else { Some(k) };
+                    let next = k.map_or(RegType::Scalar(Range::Top), |k| RegType::PacketPtr {
+                        offset: offset + Range::exact(k),
+                    });
+
+                    if !dst.is_frame_ptr() {
+                        state.regs[dst.index()] = next;
+                    }
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
     }
 }
 
@@ -536,50 +741,14 @@ fn alu_transfer(
         ensure_init(state, r, pc)?;
     }
     // Pointer arithmetic (64-bit only; ALU32 truncates pointers to Top
-    // via the generic path below): `mov` copies stack-pointer-ness and
+    // via the generic path below): `mov` copies pointer-ness and
     // `add`/`sub` by a constant shift the offset. Without this,
     // `r2 = r10; r2 -= 8` degrades to `Scalar(Top)` and every later
-    // stack access through `r2` mis-reports `TypeMismatch`.
-    if matches!(width, Width::B64) {
-        match op {
-            AluOp::Mov => {
-                if let Operand::Reg(r) = src
-                    && let RegType::StackPtr { offset } = state.regs[r.index()]
-                    && !dst.is_frame_ptr()
-                {
-                    state.regs[dst.index()] = RegType::StackPtr { offset };
-                    return Ok(());
-                }
-            }
-            AluOp::Add | AluOp::Sub => {
-                if let RegType::StackPtr { offset } = state.regs[dst.index()] {
-                    let delta: Option<i32> = match src {
-                        Operand::Imm(v) => Some(v),
-                        Operand::Reg(r) => match state.regs[r.index()] {
-                            RegType::Scalar(Range::Interval { lo, hi }) if lo == hi => {
-                                i32::try_from(lo).ok()
-                            }
-                            _ => None,
-                        },
-                    };
-                    if let Some(k) = delta {
-                        // Overflow (`sub` of `i32::MIN`) degrades to Top.
-                        let k = if matches!(op, AluOp::Sub) { k.checked_neg() } else { Some(k) };
-                        let next = k
-                            .and_then(|k| offset.checked_add(k))
-                            .map_or(RegType::Scalar(Range::Top), |off| RegType::StackPtr {
-                                offset: off,
-                            });
-                        if !dst.is_frame_ptr() {
-                            state.regs[dst.index()] = next;
-                        }
-                        return Ok(());
-                    }
-                    // Non-constant shift: fall through to Top below.
-                }
-            }
-            _ => {}
-        }
+    // stack access through `r2` mis-reports `TypeMismatch`. Packet
+    // pointers shift their range; context pointers copy on `mov` only
+    // (no offset arithmetic is meaningful on `xdp_md` itself).
+    if matches!(width, Width::B64) && ptr_alu_transfer(state, op, dst, src) {
+        return Ok(());
     }
 
     let lhs = state.regs[dst.index()].scalar_range();
@@ -638,6 +807,22 @@ fn check_and_transfer(
                 // Map value memory: the VM serves it from scratch, so an
                 // in-bounds read succeeds; the descriptor bounds it.
                 check_map_value_bounds(state, fd, *offset, *size, pc)?;
+                if !dst.is_frame_ptr() {
+                    state.regs[dst.index()] = RegType::Scalar(Range::Top);
+                }
+            } else if matches!(state.regs[base.index()], RegType::XdpMdPtr) {
+                // Context loads: `+0` yields the packet base, `+4` the
+                // packet end (absolute, matching the VM); anything else
+                // in-bounds degrades to `Top`.
+                let value = check_ctx_load(state, *offset, *size, pc)?;
+                if !dst.is_frame_ptr() {
+                    state.regs[dst.index()] = value;
+                }
+            } else if let RegType::PacketPtr { offset: base_off } = state.regs[base.index()] {
+                check_packet_bounds(state, base_off, *offset, *size, pc)?;
+                if !dst.is_frame_ptr() {
+                    state.regs[dst.index()] = RegType::Scalar(Range::Top);
+                }
             } else {
                 let (start, lo, hi) = check_mem_access(state, *base, *offset, *size, pc)?;
                 // Every spanned byte must be initialized — a partial store
@@ -645,9 +830,9 @@ fn check_and_transfer(
                 if !state.stack_range_init(lo, hi) {
                     return Err(VerifyError::UninitStackRead { pc, offset: start });
                 }
-            }
-            if !dst.is_frame_ptr() {
-                state.regs[dst.index()] = RegType::Scalar(Range::Top);
+                if !dst.is_frame_ptr() {
+                    state.regs[dst.index()] = RegType::Scalar(Range::Top);
+                }
             }
         }
         Insn::Store { size, base, offset, src } => {
@@ -661,6 +846,14 @@ fn check_and_transfer(
                 // Scratch is always readable/writable; the descriptor
                 // bounds the access and alignment still matches the VM.
                 check_map_value_bounds(state, fd, *offset, *size, pc)?;
+            } else if matches!(
+                state.regs[base.index()],
+                RegType::XdpMdPtr | RegType::PacketPtr { .. }
+            ) {
+                // Packet and context memory are read-only: the VM faults
+                // every store there, so the verifier rejects with the
+                // packet bound (bounds before alignment, same priority).
+                return Err(packet_store_error(state, *offset, *size, pc));
             } else {
                 let (_, lo, hi) = check_mem_access(state, *base, *offset, *size, pc)?;
                 state.mark_stack_range(lo, hi);
@@ -735,6 +928,14 @@ fn jump_info(insn: &Insn) -> Option<(JumpOp, Reg, i64)> {
     }
 }
 
+/// Extract the comparison op and both registers from a reg-reg jump.
+const fn jump_info_reg(insn: &Insn) -> Option<(JumpOp, Reg, Reg)> {
+    match insn {
+        Insn::Jump { op, dst, src: Operand::Reg(r), .. } => Some((*op, *dst, *r)),
+        _ => None,
+    }
+}
+
 /// Check a map-value access against the descriptor's `value_size`.
 ///
 /// Bounds before alignment mirrors the VM (`scratch_load` /
@@ -783,6 +984,135 @@ fn check_map_align(offset: i16, size: MemSize, pc: usize) -> Result<(), VerifyEr
         });
     }
     Ok(())
+}
+
+/// Check a context (`xdp_md`) load and compute the abstract result.
+///
+/// Bounds before alignment mirrors the VM (`xdp_md_load`). Requires a
+/// packet context (`None` → [`VerifyError::NoPacketContext`], strict by
+/// design). `W @+0` yields the packet base
+/// ([`RegType::PacketPtr`] at offset 0); `W @+4` yields the packet end as
+/// an exact absolute scalar (`PACKET_BASE + len`, matching the VM so the
+/// bound-check refinement can subtract the base back off). Any other
+/// in-bounds width/offset degrades to `Scalar(Top)`.
+fn check_ctx_load(
+    state: &VerifierState,
+    offset: i16,
+    size: MemSize,
+    pc: usize,
+) -> Result<RegType, VerifyError> {
+    let Some(len) = state.packet_len else {
+        return Err(VerifyError::NoPacketContext { pc });
+    };
+
+    let width = usize::from(size.bytes());
+    let out_of_bounds = || VerifyError::PacketOutOfBounds {
+        pc,
+        offset: i32::from(offset),
+        size: size.bytes(),
+        packet_len: len,
+    };
+
+    let start = usize::try_from(offset).map_err(|_| out_of_bounds())?;
+    let end = start.checked_add(width).ok_or_else(out_of_bounds)?;
+    if end > ebpf_vm::memory::XDP_MD_LEN {
+        return Err(out_of_bounds());
+    }
+    // Alignment after bounds (VM priority). `XDP_MD_BASE` is 8-aligned so
+    // relative ≡ absolute.
+    if width > 1 && i64::from(offset).rem_euclid(i64::from(size.bytes())) != 0 {
+        return Err(VerifyError::MisalignedAccess {
+            pc,
+            offset: i32::from(offset),
+            size: size.bytes(),
+        });
+    }
+    if offset == 0 && matches!(size, MemSize::W) {
+        return Ok(RegType::PacketPtr { offset: Range::exact(0) });
+    }
+    if offset == 4 && matches!(size, MemSize::W) {
+        let end_abs =
+            ebpf_vm::memory::PACKET_BASE.saturating_add(i64::try_from(len).unwrap_or(i64::MAX));
+        return Ok(RegType::Scalar(Range::exact(end_abs)));
+    }
+    Ok(RegType::Scalar(Range::Top))
+}
+
+/// Check a packet load against the concrete packet length.
+///
+/// Bounds before alignment mirrors the VM (`PacketBuffer::load`). `Bottom`
+/// offsets (dead branches) pass without checking. Alignment is
+/// conservative: multi-byte accesses require an exact aligned offset —
+/// any range spanning a misaligned address rejects.
+fn check_packet_bounds(
+    state: &VerifierState,
+    base_off: Range,
+    offset: i16,
+    size: MemSize,
+    pc: usize,
+) -> Result<(), VerifyError> {
+    let Some(len) = state.packet_len else {
+        return Err(VerifyError::NoPacketContext { pc });
+    };
+
+    if matches!(base_off, Range::Bottom) {
+        return Ok(());
+    }
+
+    let width = usize::from(size.bytes());
+    let out_of_bounds = || VerifyError::PacketOutOfBounds {
+        pc,
+        offset: i32::from(offset),
+        size: size.bytes(),
+        packet_len: len,
+    };
+
+    let (lo, hi) = match base_off {
+        Range::Interval { lo, hi } => (lo, hi),
+        Range::Top => (i64::MIN, i64::MAX),
+        Range::Bottom => return Ok(()),
+    };
+
+    let imm = i64::from(offset);
+    let start_lo = lo.checked_add(imm).ok_or_else(out_of_bounds)?;
+    let start_hi = hi.checked_add(imm).ok_or_else(out_of_bounds)?;
+    let end_hi = start_hi
+        .checked_add(i64::try_from(width).map_err(|_| out_of_bounds())?)
+        .ok_or_else(out_of_bounds)?;
+
+    let len_i64 = i64::try_from(len).map_err(|_| out_of_bounds())?;
+    if start_lo < 0 || end_hi > len_i64 {
+        return Err(out_of_bounds());
+    }
+    if width > 1
+        && (start_lo != start_hi
+            || start_lo.rem_euclid(i64::try_from(width).map_err(|_| out_of_bounds())?) != 0)
+    {
+        return Err(VerifyError::MisalignedAccess {
+            pc,
+            offset: i32::try_from(start_lo).unwrap_or(i32::MAX),
+            size: size.bytes(),
+        });
+    }
+    Ok(())
+}
+
+/// Error for stores through packet/context pointers (read-only memory).
+///
+/// The VM faults every such store as `OutOfBounds`; the verifier reports
+/// [`VerifyError::PacketOutOfBounds`] with the concrete length when known
+/// (bounds-shaped diagnostics), or [`VerifyError::NoPacketContext`] when
+/// no packet is configured.
+fn packet_store_error(state: &VerifierState, offset: i16, size: MemSize, pc: usize) -> VerifyError {
+    state.packet_len.map_or_else(
+        || VerifyError::NoPacketContext { pc },
+        |packet_len| VerifyError::PacketOutOfBounds {
+            pc,
+            offset: i32::from(offset),
+            size: size.bytes(),
+            packet_len,
+        },
+    )
 }
 
 /// Shared memory-access prologue for `Load`/`Store`.
@@ -872,6 +1202,18 @@ const fn ensure_stack_ptr(state: &VerifierState, r: Reg, pc: usize) -> Result<()
             expected: "stack pointer",
             found: "nullable map pointer",
         }),
+        RegType::XdpMdPtr => Err(VerifyError::TypeMismatch {
+            pc,
+            register: r.0,
+            expected: "stack pointer",
+            found: "xdp context pointer",
+        }),
+        RegType::PacketPtr { .. } => Err(VerifyError::TypeMismatch {
+            pc,
+            register: r.0,
+            expected: "stack pointer",
+            found: "packet pointer",
+        }),
     }
 }
 
@@ -902,7 +1244,11 @@ impl RegType {
     const fn scalar_range(&self) -> Range {
         match self {
             Self::Scalar(r) => *r,
-            Self::StackPtr { .. } | Self::MapPtr { .. } | Self::MaybeMapPtr { .. } => Range::Top,
+            Self::StackPtr { .. }
+            | Self::MapPtr { .. }
+            | Self::MaybeMapPtr { .. }
+            | Self::XdpMdPtr
+            | Self::PacketPtr { .. } => Range::Top,
             Self::NotInit => Range::Bottom,
         }
     }
@@ -920,10 +1266,11 @@ impl RegType {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use ebpf_isa::insn::JumpOp;
+    use ebpf_isa::insn::{JumpOp, Reg};
 
-    use super::refine_reg;
-    use crate::state::{Range, RegType};
+    use super::{refine_packet_edge, refine_reg, swap_op};
+    use crate::VerifyError;
+    use crate::state::{Range, RegType, VerifierState};
 
     /// Refine on one successor edge the way `verify` does: `out` starts as
     /// a clone of the block-exit state, `incoming` is the pre-edge state.
@@ -931,6 +1278,21 @@ mod tests {
         let mut out = incoming.clone();
         refine_reg(&mut out, incoming, op, k, taken);
         out
+    }
+
+    /// Packet edge the way `verify` does: `out` holds both registers at
+    /// block exit; the compared pair is `(dst, src)`.
+    fn packet_edge(
+        dst_ty: &RegType,
+        src_ty: &RegType,
+        op: JumpOp,
+        taken: bool,
+    ) -> (RegType, RegType) {
+        let mut out = VerifierState::initial_xdp(Some(64), Vec::new());
+        out.regs[2] = dst_ty.clone();
+        out.regs[3] = src_ty.clone();
+        refine_packet_edge(&mut out, op, Reg(2), Reg(3), taken);
+        (out.regs[2].clone(), out.regs[3].clone())
     }
 
     #[test]
@@ -984,5 +1346,51 @@ mod tests {
             edge(&scalar, JumpOp::Lt, 5, true),
             RegType::Scalar(Range::Interval { lo: 0, hi: 4 })
         );
+    }
+
+    #[test]
+    fn swap_op_table() {
+        assert_eq!(swap_op(JumpOp::Eq), Some(JumpOp::Eq));
+        assert_eq!(swap_op(JumpOp::Gt), Some(JumpOp::Lt));
+        assert_eq!(swap_op(JumpOp::Ge), Some(JumpOp::Le));
+        assert_eq!(swap_op(JumpOp::Lt), Some(JumpOp::Gt));
+        assert_eq!(swap_op(JumpOp::Sgt), Some(JumpOp::Slt));
+        assert_eq!(swap_op(JumpOp::Set), None);
+        assert_eq!(swap_op(JumpOp::Always), None);
+    }
+
+    #[test]
+    fn refine_packet_edge_narrows_offset() {
+        // `r2 = pkt+[0,100]`, `r3 = PACKET_BASE + 64` (data_end): the
+        // bound-check `jgt r2, r3` proves `off <= 64` on the fallthrough.
+        let base = ebpf_vm::memory::PACKET_BASE;
+        let pkt = RegType::PacketPtr { offset: Range::Interval { lo: 0, hi: 100 } };
+        let end = RegType::Scalar(Range::exact(base + 64));
+        let (false_pkt, _) = packet_edge(&pkt, &end, JumpOp::Gt, false);
+        assert_eq!(false_pkt, RegType::PacketPtr { offset: Range::Interval { lo: 0, hi: 64 } });
+        // Taken edge proves `off > 64`.
+        let (taken_pkt, _) = packet_edge(&pkt, &end, JumpOp::Gt, true);
+        assert_eq!(taken_pkt, RegType::PacketPtr { offset: Range::Interval { lo: 65, hi: 100 } });
+        // Swapped operands (`jlt end, pkt`) refine the packet register.
+        let (_, swapped) = packet_edge(&end, &pkt, JumpOp::Lt, false);
+        assert_eq!(swapped, RegType::PacketPtr { offset: Range::Interval { lo: 0, hi: 64 } });
+        // Non-exact scalars do not refine (sound imprecision).
+        let fuzzy = RegType::Scalar(Range::Interval { lo: base, hi: base + 128 });
+        let (untouched, _) = packet_edge(&pkt, &fuzzy, JumpOp::Gt, false);
+        assert_eq!(untouched, pkt);
+    }
+
+    #[test]
+    fn packet_store_error_names_context() {
+        let some = VerifierState::initial_xdp(Some(54), Vec::new());
+        assert!(matches!(
+            super::packet_store_error(&some, 0, ebpf_isa::MemSize::W, 0),
+            VerifyError::PacketOutOfBounds { packet_len: 54, .. }
+        ));
+        let none = VerifierState::initial();
+        assert!(matches!(
+            super::packet_store_error(&none, 0, ebpf_isa::MemSize::W, 0),
+            VerifyError::NoPacketContext { .. }
+        ));
     }
 }

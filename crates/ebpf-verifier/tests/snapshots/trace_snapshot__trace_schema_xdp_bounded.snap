@@ -1,0 +1,929 @@
+---
+source: crates/ebpf-verifier/tests/trace_snapshot.rs
+assertion_line: 79
+expression: "trace_json_packet(\"xdp_ethertype_pass.bin\", 54)"
+---
+[
+  {
+    "pc": 0,
+    "insns": "0   r2 = *(w *)(r1 + 0)",
+    "regs": [
+      {
+        "r": 0,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "xdp_md_ptr",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "packet_ptr",
+        "range": [
+          0,
+          0
+        ],
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "r2 = *(w *)(r1 + 0)"
+  },
+  {
+    "pc": 1,
+    "insns": "1   r3 = *(w *)(r1 + 4)",
+    "regs": [
+      {
+        "r": 0,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "xdp_md_ptr",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "packet_ptr",
+        "range": [
+          0,
+          0
+        ],
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "scalar",
+        "range": [
+          131126,
+          131126
+        ],
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "r3 = *(w *)(r1 + 4)"
+  },
+  {
+    "pc": 2,
+    "insns": "2   mov r4, r2",
+    "regs": [
+      {
+        "r": 0,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "xdp_md_ptr",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "packet_ptr",
+        "range": [
+          0,
+          0
+        ],
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "scalar",
+        "range": [
+          131126,
+          131126
+        ],
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "packet_ptr",
+        "range": [
+          0,
+          0
+        ],
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "r4 mov= r2"
+  },
+  {
+    "pc": 3,
+    "insns": "3   add r4, 14",
+    "regs": [
+      {
+        "r": 0,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "xdp_md_ptr",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "packet_ptr",
+        "range": [
+          0,
+          0
+        ],
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "scalar",
+        "range": [
+          131126,
+          131126
+        ],
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "packet_ptr",
+        "range": [
+          14,
+          14
+        ],
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "r4 add= 14"
+  },
+  {
+    "pc": 4,
+    "insns": "4   jgt r4, r3, +2",
+    "regs": [
+      {
+        "r": 0,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "xdp_md_ptr",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "packet_ptr",
+        "range": [
+          0,
+          0
+        ],
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "scalar",
+        "range": [
+          131126,
+          131126
+        ],
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "packet_ptr",
+        "range": [
+          14,
+          14
+        ],
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "jgt r4, r3, +2"
+  },
+  {
+    "pc": 5,
+    "insns": "5   r5 = *(h *)(r2 + 12)",
+    "regs": [
+      {
+        "r": 0,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "xdp_md_ptr",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "packet_ptr",
+        "range": [
+          0,
+          0
+        ],
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "scalar",
+        "range": [
+          131126,
+          131126
+        ],
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "packet_ptr",
+        "range": [
+          14,
+          14
+        ],
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "unknown",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "r5 = *(h *)(r2 + 12)"
+  },
+  {
+    "pc": 6,
+    "insns": "6   jeq r5, 8, +2",
+    "regs": [
+      {
+        "r": 0,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "xdp_md_ptr",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "packet_ptr",
+        "range": [
+          0,
+          0
+        ],
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "scalar",
+        "range": [
+          131126,
+          131126
+        ],
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "packet_ptr",
+        "range": [
+          14,
+          14
+        ],
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "unknown",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "jeq r5, 8, +2"
+  },
+  {
+    "pc": 9,
+    "insns": "9   mov r0, 2",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          2,
+          2
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "xdp_md_ptr",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "packet_ptr",
+        "range": [
+          0,
+          0
+        ],
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "scalar",
+        "range": [
+          131126,
+          131126
+        ],
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "packet_ptr",
+        "range": [
+          14,
+          14
+        ],
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "scalar",
+        "range": [
+          8,
+          8
+        ],
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "r0 mov= 2"
+  },
+  {
+    "pc": 10,
+    "insns": "10  exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          2,
+          2
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "xdp_md_ptr",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "packet_ptr",
+        "range": [
+          0,
+          0
+        ],
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "scalar",
+        "range": [
+          131126,
+          131126
+        ],
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "packet_ptr",
+        "range": [
+          14,
+          14
+        ],
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "scalar",
+        "range": [
+          8,
+          8
+        ],
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  },
+  {
+    "pc": 7,
+    "insns": "7   mov r0, 1",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          1
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "xdp_md_ptr",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "packet_ptr",
+        "range": [
+          0,
+          0
+        ],
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "scalar",
+        "range": [
+          131126,
+          131126
+        ],
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "packet_ptr",
+        "range": [
+          14,
+          14
+        ],
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "r0 mov= 1"
+  },
+  {
+    "pc": 8,
+    "insns": "8   exit",
+    "regs": [
+      {
+        "r": 0,
+        "type": "scalar",
+        "range": [
+          1,
+          1
+        ],
+        "offset": null
+      },
+      {
+        "r": 1,
+        "type": "xdp_md_ptr",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 2,
+        "type": "packet_ptr",
+        "range": [
+          0,
+          0
+        ],
+        "offset": null
+      },
+      {
+        "r": 3,
+        "type": "scalar",
+        "range": [
+          131126,
+          131126
+        ],
+        "offset": null
+      },
+      {
+        "r": 4,
+        "type": "packet_ptr",
+        "range": [
+          14,
+          14
+        ],
+        "offset": null
+      },
+      {
+        "r": 5,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 6,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 7,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 8,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 9,
+        "type": "not_init",
+        "range": null,
+        "offset": null
+      },
+      {
+        "r": 10,
+        "type": "stack_ptr",
+        "range": null,
+        "offset": 0
+      }
+    ],
+    "stack_init": [],
+    "action": "exit"
+  }
+]

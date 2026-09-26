@@ -19,6 +19,11 @@
 //! Note on hangs: the widening worklist is monotone with a finite-height
 //! lattice, so iteration always terminates; libFuzzer's timeout would flag
 //! a regression here as a hang, which is the intended signal.
+//!
+//! Packet context alternates by input parity (first byte even ⇒ 64-byte
+//! packet): half the corpus exercises the XDP entry (`xdp_md`/packet
+//! transfers, bound checks, reg–reg refinement), half the legacy entry
+//! (strict no-context rejection). Both must stay total.
 
 use libfuzzer_sys::fuzz_target;
 
@@ -56,6 +61,8 @@ fuzz_target!(|data: &[u8]| {
     let config = ebpf_verifier::VerifyConfig {
         widening_threshold: 16,
         maps: test_maps(),
+        // Split coverage across both entry modes (see header note).
+        packet_len: data.first().is_some_and(|b| b % 2 == 0).then_some(64),
     };
     let _ = ebpf_verifier::verify_with_config(&insns, &cfg, &config);
 });

@@ -98,6 +98,52 @@ fn accepted_fixtures_run_memory_clean() {
     }
 }
 
+#[test]
+fn xdp_fixtures_verify_and_run_memory_clean() {
+    // The oracle holds under a packet context when the
+    // verifier and the VM share the same concrete length (the `xdp`
+    // subcommand pairs them exactly this way).
+    for (name, packet_len) in [("xdp_pass", 64), ("xdp_drop", 64), ("xdp_ethertype_pass", 54)] {
+        let insns = load_fixture(name);
+        let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+        let config = ebpf_verifier::VerifyConfig::with_packet_len(packet_len);
+        ebpf_verifier::verify_with_config(&insns, &cfg, &config)
+            .unwrap_or_else(|e| panic!("{name} should verify: {e}"));
+        let packet = vec![0u8; packet_len];
+        let action = ebpf_vm::run_xdp(insns, &packet, Vec::new(), 10_000)
+            .unwrap_or_else(|e| panic!("{name} should run: {e}"));
+        assert!(
+            matches!(
+                action,
+                ebpf_vm::XdpAction::Pass | ebpf_vm::XdpAction::Drop | ebpf_vm::XdpAction::Aborted
+            ),
+            "{name}: unexpected action {action}"
+        );
+    }
+}
+
+#[test]
+fn rejected_xdp_fixtures_agree_with_vm() {
+    // Every rejected XDP program faults (or would fault) in the VM with
+    // the memory error its verifier diagnostic names.
+    for (name, packet_len, verdict, runtime) in [
+        ("xdp_unguarded_access", 54, "packet out of bounds", "out-of-bounds"),
+        ("xdp_store_rejected", 54, "packet out of bounds", "out-of-bounds"),
+    ] {
+        let insns = load_fixture(name);
+        let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+        let config = ebpf_verifier::VerifyConfig::with_packet_len(packet_len);
+        let err = ebpf_verifier::verify_with_config(&insns, &cfg, &config).unwrap_err();
+        assert!(err.to_string().contains(verdict), "{name}: unexpected verdict {err}");
+        let packet = vec![0u8; packet_len];
+        let mut vm = Vm::new(insns);
+        vm.install_xdp_packet(ebpf_vm::PacketBuffer::from(packet.as_slice()));
+        let err = vm.run(10_000).unwrap_err();
+        assert!(matches!(err, VmError::Memory(_)), "{name}: unexpected runtime {err}");
+        assert!(err.to_string().contains(runtime), "{name}: unexpected runtime {err}");
+    }
+}
+
 /// One raw instruction word, packed little-endian like the fixtures.
 #[derive(Debug, Clone, Copy)]
 struct Raw {

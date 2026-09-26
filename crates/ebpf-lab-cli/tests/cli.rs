@@ -29,6 +29,22 @@ fn run_ok(args: &[&str]) -> String {
     String::from_utf8(out.stdout).expect("stdout is utf8")
 }
 
+/// Unique temp output path per test (parallel-safe).
+fn temp_out(test: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join("ebpf-lab-cli-opt-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join(format!("{test}-{}.bin", std::process::id()))
+}
+
+/// Optimize a fixture, returning its output path.
+fn optimize_fixture(name: &str, test: &str) -> PathBuf {
+    let out = temp_out(test);
+    let report =
+        run_ok(&["optimize", &fixture(name).to_string_lossy(), "-o", &out.to_string_lossy()]);
+    assert!(report.starts_with("optimized: "), "report: {report}");
+    out
+}
+
 #[test]
 fn inspect_shows_header_and_disassembly() {
     let out = run_ok(&["inspect", &fixture("mov_exit.bin").to_string_lossy()]);
@@ -240,7 +256,193 @@ fn maps_malformed_json_errors() {
 }
 
 #[test]
+fn maps_oversized_fd_errors() {
+    let dir = std::env::temp_dir().join("ebpf-lab-cli-test-bigfd");
+    std::fs::create_dir_all(&dir).unwrap();
+    let big = dir.join("big-fd-maps.json");
+    std::fs::write(
+        &big,
+        br#"[{"fd":9999999999,"type":"hash","key_size":4,"value_size":8,"max_entries":2}]"#,
+    )
+    .unwrap();
+    let out = cli()
+        .args(["run", "--maps", &big.to_string_lossy(), &fixture("mov_exit.bin").to_string_lossy()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "oversized fd should fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("exceeds maximum"), "stderr names the ceiling: {err}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn missing_file_errors() {
     let out = cli().args(["inspect", "/nonexistent/program.bin"]).output().unwrap();
     assert!(!out.status.success(), "missing file should fail");
+}
+
+#[test]
+fn xdp_pass_and_drop_actions() {
+    let pass = run_ok(&[
+        "xdp",
+        &fixture("xdp_ethertype_pass.bin").to_string_lossy(),
+        &fixture("pkt_ipv4_tcp.pkt").to_string_lossy(),
+    ]);
+    assert!(pass.contains("xdp: XDP_PASS (2)"), "out: {pass}");
+    let drop = run_ok(&[
+        "xdp",
+        &fixture("xdp_ethertype_pass.bin").to_string_lossy(),
+        &fixture("pkt_arp.pkt").to_string_lossy(),
+    ]);
+    assert!(drop.contains("xdp: XDP_DROP (1)"), "out: {drop}");
+}
+
+#[test]
+fn xdp_rejects_unguarded_packet_access() {
+    let out = run_ok(&[
+        "xdp",
+        &fixture("xdp_unguarded_access.bin").to_string_lossy(),
+        &fixture("pkt_ipv4_tcp.pkt").to_string_lossy(),
+    ]);
+    assert!(out.contains("rejected:"), "out: {out}");
+    assert!(out.contains("packet out of bounds"), "out: {out}");
+}
+
+#[test]
+fn xdp_trace_shows_packet_loads() {
+    let out = run_ok(&[
+        "xdp",
+        "--trace",
+        &fixture("xdp_ethertype_pass.bin").to_string_lossy(),
+        &fixture("pkt_ipv4_tcp.pkt").to_string_lossy(),
+    ]);
+    assert!(out.contains("PC 0"), "out: {out}");
+    assert!(out.contains("ethertype=IPv4"), "out: {out}");
+    assert!(out.contains("xdp: XDP_PASS (2)"), "out: {out}");
+}
+
+#[test]
+fn verify_packet_len_flag_accepts_bounded_access() {
+    let out = run_ok(&[
+        "verify",
+        "--packet-len",
+        "54",
+        &fixture("xdp_ethertype_pass.bin").to_string_lossy(),
+    ]);
+    assert!(out.contains("verified:"), "out: {out}");
+}
+
+#[test]
+fn verify_without_packet_context_rejects() {
+    let out = run_ok(&["verify", &fixture("xdp_ethertype_pass.bin").to_string_lossy()]);
+    assert!(out.contains("rejected:"), "out: {out}");
+    assert!(out.contains("uninitialized register r1"), "out: {out}");
+}
+
+#[test]
+fn xdp_missing_packet_file_errors() {
+    let out = cli()
+        .args(["xdp", &fixture("xdp_pass.bin").to_string_lossy(), "/nonexistent/pkt.bin"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "missing packet file should fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("packet"), "stderr names the packet file: {err}");
+}
+
+#[test]
+fn optimize_shrinks_redundant() {
+    let out = temp_out("shrinks_redundant");
+    let report = run_ok(&[
+        "optimize",
+        &fixture("opt_redundant.bin").to_string_lossy(),
+        "-o",
+        &out.to_string_lossy(),
+    ]);
+    assert!(report.contains("optimized: 6 -> 2 instructions"), "report: {report}");
+    let run = run_ok(&["run", &out.to_string_lossy()]);
+    assert!(run.contains("exit: 30"), "run: {run}");
+}
+
+#[test]
+fn optimize_shrinks_copies_and_dead_code() {
+    let out = temp_out("shrinks_copies");
+    let report = run_ok(&[
+        "optimize",
+        &fixture("opt_copy_chain.bin").to_string_lossy(),
+        "-o",
+        &out.to_string_lossy(),
+    ]);
+    assert!(report.contains("optimized: 5 -> 2 instructions"), "report: {report}");
+    let out = temp_out("shrinks_dead");
+    let report = run_ok(&[
+        "optimize",
+        &fixture("opt_dead_code.bin").to_string_lossy(),
+        "-o",
+        &out.to_string_lossy(),
+    ]);
+    assert!(report.contains("optimized: 3 -> 2 instructions"), "report: {report}");
+}
+
+#[test]
+fn optimize_preserves_branches() {
+    // The diamond keeps its shape (exit 25 on the taken path) while the
+    // per-arm constants fold: run both, compare exit lines.
+    let out = temp_out("preserves_branches");
+    let report = run_ok(&[
+        "optimize",
+        &fixture("opt_branch_preserved.bin").to_string_lossy(),
+        "-o",
+        &out.to_string_lossy(),
+    ]);
+    assert!(report.contains("optimized:"), "report: {report}");
+    let before = run_ok(&["run", &fixture("opt_branch_preserved.bin").to_string_lossy()]);
+    let after = run_ok(&["run", &out.to_string_lossy()]);
+    assert!(before.contains("exit: 25"), "before: {before}");
+    assert!(after.contains("exit: 25"), "after: {after}");
+}
+
+#[test]
+fn optimize_is_idempotent() {
+    let once = optimize_fixture("opt_redundant.bin", "idempotent_once");
+    let twice_path = temp_out("idempotent_twice");
+    run_ok(&["optimize", &once.to_string_lossy(), "-o", &twice_path.to_string_lossy()]);
+    let (once, twice) = (std::fs::read(&once).unwrap(), std::fs::read(&twice_path).unwrap());
+    assert_eq!(twice, once, "second pass must be a fixpoint");
+}
+
+#[test]
+fn optimize_missing_input_errors() {
+    let out = cli()
+        .args(["optimize", "/nonexistent/program.bin", "-o", "/tmp/ebpf-lab-nope.bin"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "missing input should fail");
+}
+
+#[test]
+fn optimize_bad_output_errors() {
+    let out = cli()
+        .args([
+            "optimize",
+            &fixture("mov_exit.bin").to_string_lossy(),
+            "-o",
+            "/nonexistent-dir-ebpf-lab/out.bin",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "unwritable output should fail");
+}
+
+#[test]
+fn optimize_illegal_errors() {
+    // `Unknown` opcodes refuse at construction with a printed error line.
+    let out = temp_out("illegal");
+    let run = cli()
+        .args(["optimize", &fixture("illegal.bin").to_string_lossy(), "-o", &out.to_string_lossy()])
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "refusal prints, exit stays zero");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("error:"), "stdout: {stdout}");
 }

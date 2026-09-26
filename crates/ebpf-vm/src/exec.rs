@@ -339,6 +339,18 @@ mod tests {
             include_bytes!("../../../tests/fixtures/map_lookup_null_load.bin").as_slice(),
             include_bytes!("../../../tests/fixtures/map_value_oob.bin").as_slice(),
             include_bytes!("../../../tests/fixtures/map_value_misaligned.bin").as_slice(),
+            // XDP fixtures lower trap-free (packet faults are runtime
+            // `MemError`, not load-time traps — same as stack OOB).
+            include_bytes!("../../../tests/fixtures/xdp_pass.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/xdp_drop.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/xdp_ethertype_pass.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/xdp_unguarded_access.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/xdp_store_rejected.bin").as_slice(),
+            // Optimizer fixtures are plain ALU/jump shapes.
+            include_bytes!("../../../tests/fixtures/opt_redundant.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/opt_copy_chain.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/opt_dead_code.bin").as_slice(),
+            include_bytes!("../../../tests/fixtures/opt_branch_preserved.bin").as_slice(),
         ] {
             let exec = load(&decode_bytes(bytes));
             assert!(!exec.iter().any(|e| matches!(e, ExecInsn::Trap(_))), "trap lowered");
@@ -358,6 +370,10 @@ mod tests {
         assert_eq!(run(include_bytes!("../../../tests/fixtures/loop.bin")), Ok(10));
         assert_eq!(run(include_bytes!("../../../tests/fixtures/stack.bin")), Ok(42));
         assert_eq!(run(include_bytes!("../../../tests/fixtures/endian.bin")), Ok(0x1234_5678));
+        assert_eq!(run(include_bytes!("../../../tests/fixtures/opt_redundant.bin")), Ok(30));
+        assert_eq!(run(include_bytes!("../../../tests/fixtures/opt_copy_chain.bin")), Ok(7));
+        assert_eq!(run(include_bytes!("../../../tests/fixtures/opt_dead_code.bin")), Ok(1));
+        assert_eq!(run(include_bytes!("../../../tests/fixtures/opt_branch_preserved.bin")), Ok(25));
         assert_eq!(
             Vm::new(decode_bytes(include_bytes!("../../../tests/fixtures/loop_1000_iters.bin")))
                 .run(10_000),

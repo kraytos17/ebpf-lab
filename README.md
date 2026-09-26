@@ -4,13 +4,15 @@
 [![fuzz](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml/badge.svg)](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml)
 [![msrv](https://img.shields.io/badge/MSRV-1.98-blue)](https://github.com/kraytos17/ebpf-lab)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-205-blue)](https://github.com/kraytos17/ebpf-lab)
-[![fixtures](https://img.shields.io/badge/fixtures-25-orange)](tests/fixtures/)
+[![tests](https://img.shields.io/badge/tests-285-blue)](https://github.com/kraytos17/ebpf-lab)
+[![fixtures](https://img.shields.io/badge/fixtures-34-orange)](tests/fixtures/)
 
 An eBPF laboratory in Rust: inspect, verify, execute, and optimize eBPF programs.
 
 Currently implements the **decode → disassemble → CFG → VM → verify** pipeline with basic memory model
-(uninitialized-stack detection, alignment enforcement, packet region), 25 hand-assembled fixtures,
+(uninitialized-stack detection, alignment enforcement, packet region), XDP packet simulator
+(`xdp` subcommand, `xdp_md` staging, `PacketPtr` bound checks), SSA optimizer
+(`optimize` subcommand, verified run-equivalence oracle), 34 hand-assembled fixtures,
 libFuzzer harnesses, and property-based tests.
 
 ## Quickstart
@@ -36,6 +38,10 @@ cargo build --workspace
 | `verify --trace` | Per-PC abstract-state trace as JSON | `ebpf-lab verify --trace program.bin` |
 | `verify --max-iterations N` | Widening threshold for loops (default 16) | `ebpf-lab verify --max-iterations 32 program.bin` |
 | `verify/run --maps M` | Map descriptors with initial values (JSON) | `ebpf-lab verify --maps maps.json program.bin` |
+| `verify --packet P` / `--packet-len N` | Packet context for bound checks (file wins) | `ebpf-lab verify --packet pkt.bin program.bin` |
+| `xdp` | Verify then run an XDP program against a packet | `ebpf-lab xdp program.bin packet.bin` |
+| `xdp --trace` | Per-step trace with packet-field annotations | `ebpf-lab xdp --trace program.bin packet.bin` |
+| `optimize` | SSA-optimize to flat bytecode (`-o` output) | `ebpf-lab optimize program.bin -o opt.bin` |
 
 Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
 
@@ -63,12 +69,13 @@ Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
 
 | Crate | Purpose | Key types |
 |-------|---------|-----------|
-| [`ebpf-isa`](crates/ebpf-isa) | Instruction encoding/decoding | `RawInsn`, `Insn`, `Reg`, `MemSize`, `Width` |
+| [`ebpf-isa`](crates/ebpf-isa) | Instruction encoding/decoding | `RawInsn`, `Insn`, `Reg`, `MemSize`, `Width`, `encode_program`, `AluOp::apply` |
 | [`ebpf-elf`](crates/ebpf-elf) | ELF `.o` parsing, section extraction | `ElfProgram`, `ProgType`, `SectionKind` |
 | [`ebpf-disasm`](crates/ebpf-disasm) | Bytecode → human-readable text | `disassemble`, `Display for Insn` |
 | [`ebpf-cfg`](crates/ebpf-cfg) | Control-flow graph construction | `BasicBlock`, `Cfg`, `Pc`, `Slot`, `to_dot` |
-| [`ebpf-vm`](crates/ebpf-vm) | Interpreter + memory + map simulator | `Vm`, `ExecInsn`, `MemoryView`, `MemError`, `MapStore`, `MapDesc` |
-| [`ebpf-verifier`](crates/ebpf-verifier) | Static verifier (interval lattice, widening, typed + map helpers) | `verify`, `verify_with_config`, `verify_traced`, `Range`, `VerifierState`, `VerifyError`, `HelperSignature`, `MapPtr`, `MaybeMapPtr` |
+| [`ebpf-vm`](crates/ebpf-vm) | Interpreter + memory + map/XDP simulator | `Vm`, `ExecInsn`, `MemoryView`, `MemError`, `MapStore`, `MapDesc`, `XdpAction`, `run_xdp` |
+| [`ebpf-verifier`](crates/ebpf-verifier) | Static verifier (interval lattice, widening, typed + map helpers, packet bounds) | `verify`, `verify_with_config`, `verify_traced`, `Range`, `VerifierState`, `VerifyError`, `HelperSignature`, `MapPtr`, `MaybeMapPtr`, `PacketPtr` |
+| [`ebpf-ssa`](crates/ebpf-ssa) | Register SSA + optimizer (Braun construction, fold/copy/DCE, lowering) | `build_ssa`, `optimize`, `lower`, `SsaProgram`, `SsaError` |
 | [`ebpf-lab-cli`](crates/ebpf-lab-cli) | `ebpf-lab` binary | clap derive, tracing |
 
 ## Memory model (v0.4)
@@ -82,6 +89,8 @@ The interpreter's `MemoryView` routes every load/store through a single chokepoi
 | Misaligned access | `Misaligned` | Natural alignment enforced, togglable |
 | Packet with no buffer | `NoPacket` | Read-only region at `PACKET_BASE` |
 | Packet OOB | `OutOfBounds` | Same variant for unknown regions |
+| XDP context (`xdp_md`) | `OutOfBounds` past 8 B | Read-only struct at `XDP_MD_BASE`: `data` (u32) @+0, `data_end` (u32) @+4, staged by `set_packet`; `r1` points here on XDP entry |
+| XDP context stores | `OutOfBounds` | Read-only, like packet |
 | Map scratch OOB | `OutOfBounds` | Readable scratch at `MAP_SCRATCH_BASE` (latest lookup value) |
 | Map scratch misaligned | `Misaligned` | Natural alignment enforced, togglable |
 
@@ -90,9 +99,10 @@ range fault — matching the kernel verifier's diagnostic priority.
 
 ## Test fixtures
 
-25 hand-assembled `.bin` programs exercising the happy path *and* canonical
-rejections. See [`tests/fixtures/README.md`](tests/fixtures/README.md) for
-the full table (bytes, assembly, exit code, what each exercises).
+34 hand-assembled `.bin` programs + 3 raw `.pkt` packets exercising the
+happy path *and* canonical rejections. See
+[`tests/fixtures/README.md`](tests/fixtures/README.md) for the full table
+(bytes, assembly, exit code, what each exercises).
 
 Highlights:
 
@@ -114,6 +124,13 @@ Highlights:
 | `map_array_update.bin` | Array update, exit 0 |
 | `map_bad_fd.bin` | `BadMapFd` rejection |
 | `uninit_read.bin` | `UninitializedRead` rejection |
+| `xdp_ethertype_pass.bin` | XDP ethertype dispatch: `XDP_PASS` (IPv4) / `XDP_DROP` (ARP), `PacketPtr` bounds |
+| `xdp_unguarded_access.bin` | `PacketOutOfBounds` rejection (unguarded load) |
+| `xdp_store_rejected.bin` | `PacketOutOfBounds` rejection (read-only store) |
+| `opt_redundant.bin` | Fold + copy + DCE showcase (6 → 2 insns, exit 30) |
+| `opt_copy_chain.bin` | Copy-propagation chain (5 → 2 insns, exit 7) |
+| `opt_dead_code.bin` | Dead-def elimination (3 → 2 insns, exit 1) |
+| `opt_branch_preserved.bin` | Passes respect control flow (exit 25, shape preserved) |
 | `join_uninit.bin` | Merge-point rejection (fixed-point regression test) |
 | `misaligned.bin` | `Misaligned` rejection (v0.4 path) |
 | `illegal.bin` | Unknown opcode → `IllegalInstruction` |
@@ -168,9 +185,10 @@ cargo bench -p ebpf-isa --bench decode
 cargo bench -p ebpf-cfg --bench cfg
 cargo bench -p ebpf-vm --bench vm
 cargo bench -p ebpf-verifier --bench verify
+cargo bench -p ebpf-ssa --bench ssa
 ```
 
-Baselines (current main, `profile.release`, criterion, 3s/200 samples):
+Baselines (current main, `profile.release`, criterion, 10s/200 samples):
 
 | Benchmark | Result |
 |-----------|--------|
@@ -178,12 +196,19 @@ Baselines (current main, `profile.release`, criterion, 3s/200 samples):
 | `decode/mixed_512_slots` | ~2.8 µs (cross-class dispatch) |
 | `cfg/4096_slots` | ~56 µs (~73 Melem/s) |
 | `vm/straight_1000_adds` | ~3.4 µs (~299 Melem/s) |
+| `vm/xdp_ethertype` | ~117 ns (~94 Melem/s, 11-insn dispatch over a 54 B packet) |
 | `vm/loop_1000_iters` | ~7.2 µs (~415 Melem/s) |
 | `memory/store_load` | ~31 ns per access |
 | `verify/arith/verdict` | ~175 ns |
-| `verify/wide_500/verdict` | ~4.7 µs (~9.4 ns/insn, linear) |
-| `verify/wide_500/trace` | ~163 µs (trace building dominates: ~35× verdict; rendering now inside `verify_traced`) |
+| `verify/wide_500/verdict` | ~3.8 µs (~7.6 ns/insn, linear) |
+| `verify/wide_500/trace` | ~152 µs (trace building dominates: ~40× verdict; rendering now inside `verify_traced`) |
 | `verify/map_guarded_value_access/verdict` | ~508 ns (null-guarded lookup + descriptor-bounded access) |
+| `verify/xdp_ethertype/verdict` | ~436 ns (context loads + `data_end` refinement, 54 B packet) |
+| `verify/xdp_ethertype/trace` | ~3.6 µs |
+| `ssa/wide_250/build` | ~5.1 µs (~20 ns/insn, linear construction) |
+| `ssa/xdp_ethertype/build` | ~856 ns |
+| `ssa/xdp_ethertype/opt` | ~962 ns (fold + copy + DCE to fixpoint) |
+| `ssa/wide_250/lower` | ~11.3 µs (~45 ns/insn: allocation + edge-split + emit) |
 
 No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 
@@ -209,14 +234,14 @@ No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 - [x] **v0.7** — Map simulator (HASH, ARRAY, LRU_ARRAY, `--maps` JSON, `MapPtr`)
 - [x] **v0.8** — Nullable, bounded map values (`MaybeMapPtr`, `value_size` bounds, `NullMapPtrAccess`/`MapValueOutOfBounds`)
 - [x] **v0.9** — Performance audit (RPO worklist, state shrink, CFG optimization, Display impls, idiomatic Rust)
-- **v0.10** — Packet/XDP simulator, SSA construction + optimization passes
+- **v0.10** — Packet/XDP simulator (Part A: `xdp` subcommand, `xdp_md` staging, `PacketPtr` verifier, 5 fixtures + 3 packets), SSA construction + optimization passes (Part B: `ebpf-ssa` crate, `optimize` subcommand, run-equivalence oracle, 4 fixtures)
 - **v1.0** — Real-world compatibility (BTF, relocs, bounded loops)
 
 ## Contributing
 
 1. `git clone` → `cargo build --workspace`
 2. Add fixtures to `tests/fixtures/` (see [the guide](tests/fixtures/README.md))
-3. Run `just verify` — all 205 tests + clippy + doc must be green
+3. Run `just verify` — all 285 tests + clippy + doc must be green
 4. Run `cargo insta review` after disassembler/CFG changes to accept new snapshots
 5. Run `just fuzz-smoke` before touching the decoder or verifier
 

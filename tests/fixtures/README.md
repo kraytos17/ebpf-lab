@@ -8,7 +8,7 @@ They load at compile time via `include_bytes!`, so they must exist before
 generation step. The fuzz seed corpus (`fuzz/corpus/`, gitignored) is
 staged *from* these files by `fuzz/build.rs`; fixtures are its upstream.
 
-## The twenty-five programs
+## The thirty-four programs
 
 | File | Slots | Program | Exit | Exercises |
 |---|---|---|---|---|
@@ -37,6 +37,23 @@ staged *from* these files by `fuzz/build.rs`; fixtures are its upstream.
 | `illegal.bin` | 2 | `unknown 0x00; exit` | ❌ `IllegalInstruction` (pc 0) | Class-0 opcode → `Unknown` → `Trap`; disassembler roundtrip pinned |
 | `misaligned.bin` | 3 | `mov r1, 1; stw [r10-7], 1; exit` | ❌ `Misaligned` (@0xfff9, needs 4) | In-bounds (505+4 ≤ 512) but unaligned; v0.4 alignment path |
 | `join_uninit.bin` | 8 | `mov r1, 10; jeq r1, 10, +2; mov r0, 0; ja +2; stxdw [r10-8], r1; ja +0; ldxdw r0, [r10-8]; exit` | ❌ `UninitStackRead` (merge) | Taken path stores, fallthrough doesn't; merge must reject (worklist fixed-point regression test) |
+| `xdp_pass.bin` | 2 | `mov r0, 2; exit` | `XDP_PASS` (2) | Trivial XDP accept, no packet touch (v0.10 Part A) |
+| `xdp_drop.bin` | 2 | `mov r0, 1; exit` | `XDP_DROP` (1) | Trivial XDP drop (v0.10 Part A) |
+| `xdp_ethertype_pass.bin` | 11 | `ldxw r2, [r1+0]; ldxw r3, [r1+4]; mov r4, r2; add r4, 14; jgt r4, r3, +2; ldxh r5, [r2+12]; jeq r5, 8, +2; mov r0, 1; exit; mov r0, 2; exit` | `XDP_PASS` (ipv4) / `XDP_DROP` (arp) | `xdp_md` loads, `PacketPtr` arithmetic, `data_end` guard, ethertype dispatch. Compares LE `8` (`htons(ETH_P_IP)` shape). Rejects on short packets (v0.10 Part A) |
+| `xdp_unguarded_access.bin` | 3 | `ldxw r2, [r1+0]; ldxh r0, [r2+100]; exit` | ❌ `PacketOutOfBounds` (offset 100, len 54) | Unguarded packet load (v0.10 Part A) |
+| `xdp_store_rejected.bin` | 3 | `ldxw r2, [r1+0]; stw [r2+0], 0; exit` | ❌ `PacketOutOfBounds` (read-only) | Packet store rejection (v0.10 Part A) |
+| `opt_redundant.bin` | 6 | `mov r1, 10; mov r2, 20; mov r3, r1; add r3, r2; mov r0, r3; exit` | 30 (optimized: 2 insns, `mov r0, 30; exit`) | Fold + copy + DCE showcase (v0.10 Part B) |
+| `opt_copy_chain.bin` | 5 | `mov r1, 7; mov r2, r1; mov r3, r2; mov r0, r3; exit` | 7 (optimized: 2 insns) | Copy-propagation chain (v0.10 Part B) |
+| `opt_dead_code.bin` | 3 | `mov r0, 1; mov r1, 99 (dead); exit` | 1 (optimized: 2 insns) | Dead-def elimination (v0.10 Part B) |
+| `opt_branch_preserved.bin` | 7 | `mov r1, 5; jeq r1, 5, +2; mov r0, 1; ja +1; mov r0, 2; add r0, 5; exit` | 25 (taken path; shape preserved) | Passes respect control flow; per-arm constants fold (v0.10 Part B) |
+
+## The three packets (raw bytes, `.pkt`)
+
+| File | Length | Contents | Used by |
+|---|---|---|---|
+| `pkt_ipv4_tcp.pkt` | 54 | Eth (EtherType `0800`) + IPv4 (proto 6) + 20 B TCP stub | `xdp` pass path (`XDP_PASS`), `--packet` context, `--trace` annotation demo |
+| `pkt_arp.pkt` | 42 | Eth (EtherType `0806`) + 28 B zeros | `xdp` drop path (`XDP_DROP`) |
+| `pkt_short.pkt` | 10 | Truncated frame | Verifier rejection demo (bound check proves `14 > 10` → drop block; direct over-reads reject) |
 
 Expected disassembly (from `ebpf-lab disasm`):
 
@@ -53,11 +70,13 @@ stack:     mov r1, 42 / *(dw *)(r10 + -8) = r1 / r0 = *(dw *)(r10 + -8) / exit
 
 - `ebpf-disasm` golden snapshots: `mov_exit`, `arith`, `branch`, `branch_untaken`, `diamond`, `ldimm`, `loop` (jump rendering), `stack` (memory ops), `endian` (`BPF_END`)
 - `ebpf-cfg` golden DOT snapshots: `branch`, `diamond` (merge shape), `arith`, `ldimm`, `loop` (back edge)
-- `ebpf-verifier` trace snapshots: `mov_exit`, `diamond`, `stack`, `loop` (widened intervals), `map_hash_lookup` (`maybe_map_ptr`), `map_guarded_value_access` (`maybe_map_ptr` → `map_ptr` across the null guard)
-- `ebpf-vm` exec tests: all twenty-five fixtures trap-free at load (`all_fixtures_trap_free`), exit codes pinned (`fixture_exit_codes`), rejections pinned at load (`invalid_fixtures_trap_at_load`) and runtime (`rejection_fixtures_fail_at_runtime`); `branch`/`loop`/`diamond` target resolution + CFG differential pin
-- `ebpf-verifier` fixture tests: valid fixtures verify (incl. loops via widening + typed helpers + guarded map access), rejections pin exact `VerifyError` variants (incl. `NullMapPtrAccess`, `MapValueOutOfBounds`)
-- `ebpf-verifier` differential tests: accepted map fixtures run `MemError`-free with pinned exit codes; rejected map-value fixtures fault in the VM with the matching `MemError` variant
-- Fuzz seeds: all twenty-five, via `fuzz/build.rs`
+- `ebpf-verifier` trace snapshots: `mov_exit`, `diamond`, `stack`, `loop` (widened intervals), `map_hash_lookup` (`maybe_map_ptr`), `map_guarded_value_access` (`maybe_map_ptr` → `map_ptr` across the null guard), `xdp_ethertype_pass` (`xdp_md_ptr`, `packet_ptr` with refined offsets)
+- `ebpf-vm` exec tests: all thirty-four fixtures trap-free at load (`all_fixtures_trap_free`), exit codes pinned (`fixture_exit_codes`), rejections pinned at load (`invalid_fixtures_trap_at_load`) and runtime (`rejection_fixtures_fail_at_runtime`); `branch`/`loop`/`diamond` target resolution + CFG differential pin
+- `ebpf-verifier` fixture tests: valid fixtures verify (incl. loops via widening + typed helpers + guarded map access + XDP bounded access with `--packet-len`), rejections pin exact `VerifyError` variants (incl. `NullMapPtrAccess`, `MapValueOutOfBounds`, `PacketOutOfBounds`, strict no-context `UninitRegister`)
+- `ebpf-verifier` differential tests: accepted map fixtures run `MemError`-free with pinned exit codes; rejected map-value fixtures fault in the VM with the matching `MemError` variant; XDP fixtures verify + run clean under a shared concrete length, rejections agree with VM faults
+- `ebpf-ssa` equivalence oracle: all fixtures (incl. verifier-rejected ones — passes preserve faults) run identically before/after `optimize`; `opt_*` pins sizes (6→2, 5→2) and branch preservation
+- `ebpf-lab-cli` e2e: `optimize` subcommand (size lines, run-both-compare, idempotence, error paths)
+- Fuzz seeds: all thirty-four programs, via `fuzz/build.rs`
 - `maps_example.json`: `--maps` demo (fd 1 hash + fd 2 array with initial values)
 
 ## Adding a fixture

@@ -64,3 +64,17 @@ fn trace_schema_map_guarded() {
     // scalar zero on the null edge, `map_ptr` on the guarded access path.
     insta::assert_snapshot!(trace_json_maps("map_guarded_value_access.bin"));
 }
+
+fn trace_json_packet(name: &str, packet_len: usize) -> String {
+    let insns = fixtures::decode_fixture(name);
+    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+    let config = ebpf_verifier::VerifyConfig::with_packet_len(packet_len);
+    ebpf_verifier::verify_traced(&insns, &cfg, &config).unwrap().to_json().unwrap()
+}
+
+#[test]
+fn trace_schema_xdp_bounded() {
+    // Pins `xdp_md_ptr` (r1 at entry) and `packet_ptr` with refined
+    // offsets (r4 after the `data_end` bound check) rendering.
+    insta::assert_snapshot!(trace_json_packet("xdp_ethertype_pass.bin", 54));
+}
