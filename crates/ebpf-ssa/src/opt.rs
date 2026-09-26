@@ -126,8 +126,9 @@ fn constant_fold(prog: &mut SsaProgram) -> bool {
 /// passthroughs). Self-only phis are left for unreachable elimination.
 /// Never creates immediate `lhs` operands and never alters control flow.
 fn copy_propagate(prog: &mut SsaProgram) -> bool {
-    // Collect rewrites first (immutable scan), apply after.
-    let mut rewrites: Vec<(SsaValue, SsaValue)> = Vec::new();
+    // Collect rewrites first (immutable scan), apply after. At most one
+    // rewrite per instruction (each copy/move/phi contributes one).
+    let mut rewrites: Vec<(SsaValue, SsaValue)> = Vec::with_capacity(prog.len());
     for node in prog.graph.node_indices() {
         let bb = &prog.graph[node];
         if !bb.live {
@@ -396,9 +397,8 @@ fn uses_of(insn: &SsaInsn) -> Vec<SsaValue> {
 /// sentinel `rebuild_def_sites` leaves for defs in dead blocks, or any
 /// out-of-range site — callers treat those as having nothing to mark).
 fn def_index(prog: &SsaProgram, value: SsaValue) -> Option<usize> {
-    usize::try_from(value.0)
-        .ok()
-        .and_then(|id| prog.def_sites.get(id))
+    prog.def_sites
+        .get(value.checked_index(prog.def_sites.len())?)
         .copied()
         .filter(|&idx| idx != usize::MAX && idx < prog.insns.len())
 }

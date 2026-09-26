@@ -26,6 +26,7 @@
 use object::{Object, ObjectSection};
 use std::fmt;
 use std::path::Path;
+use std::str::FromStr;
 use thiserror::Error;
 
 /// eBPF program type inferred from the ELF section name.
@@ -33,9 +34,8 @@ use thiserror::Error;
 /// The two catch-all variants differ: [`Other`](Self::Other) preserves a
 /// *recognised* program section name that has no dedicated variant, while
 /// [`Unknown`](Self::Unknown) is the fallback for names that are not program
-/// sections at all. See [`ProgType::from_section_name`] for the fallible
-/// lookup and [`From<&str>`](#impl-From<%26str>-for-ProgType) for the
-/// infallible one.
+/// sections at all. See [`ProgType::from_section_name`] for the lossless
+/// `Option` lookup and [`std::str::FromStr`] for the fallible parse.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProgType {
     /// `xdp` / `xdp/...`.
@@ -142,6 +142,35 @@ impl SectionKind {
     }
 }
 
+/// Failure parsing a [`ProgType`] from a section name.
+///
+/// `#[non_exhaustive]` so future parse failures can add variants without
+/// breaking matches.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum ProgTypeError {
+    /// The name is a valid section but not an eBPF program section
+    /// (`.maps`, `.BTF`, `.symtab`, …).
+    #[error("section `{0}` is not an eBPF program section")]
+    NotAProgram(String),
+}
+
+impl FromStr for ProgType {
+    type Err = ProgTypeError;
+
+    /// Parses the program type from a section name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProgTypeError::NotAProgram`] for a section that is not an
+    /// eBPF program (maps, BTF, debug info). For a lossless, infallible
+    /// mapping use [`ProgType::from_section_name`] with its `Option`, or
+    /// [`SectionKind::classify`] which names every section.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_section_name(s).ok_or_else(|| ProgTypeError::NotAProgram(s.to_string()))
+    }
+}
+
 impl fmt::Display for ProgType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -153,17 +182,6 @@ impl fmt::Display for ProgType {
             Self::Other(s) => write!(f, "{s}"),
             Self::Unknown => write!(f, "unknown"),
         }
-    }
-}
-
-impl From<&str> for ProgType {
-    /// Infers the type from a section name, falling back to [`Self::Unknown`]
-    /// for names that are not program sections (maps, BTF, debug info).
-    ///
-    /// Use [`ProgType::from_section_name`] when the distinction between "not
-    /// a program" and "unknown program" matters.
-    fn from(s: &str) -> Self {
-        Self::from_section_name(s).unwrap_or(Self::Unknown)
     }
 }
 
@@ -228,6 +246,27 @@ pub enum ElfError {
     /// Flat `.bin` length is not a multiple of 8.
     #[error("raw program length {0} is not a multiple of 8")]
     BadRawLength(usize),
+}
+
+impl PartialEq for ElfError {
+    /// Compares by variant and comparable payload.
+    ///
+    /// `std::io::Error` and `object::Error` have no `PartialEq`, so `Io`
+    /// compares the path plus the I/O error kind, and `Parse` compares the
+    /// rendered message. Enough for tests to `assert_eq!` failures without
+    /// falling back to `matches!`.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Io { path: a_path, source: a_src },
+                Self::Io { path: b_path, source: b_src },
+            ) => a_path == b_path && a_src.kind() == b_src.kind(),
+            (Self::Parse(a), Self::Parse(b)) => a.to_string() == b.to_string(),
+            (Self::NoPrograms(a), Self::NoPrograms(b)) => a == b,
+            (Self::BadRawLength(a), Self::BadRawLength(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 /// Loads all eBPF programs from an object file at `path`.
@@ -336,11 +375,11 @@ mod tests {
 
     #[test]
     fn prog_type_from_str() {
-        assert_eq!(ProgType::from("xdp"), ProgType::Xdp);
-        assert_eq!(ProgType::from("kprobe/sys_exec"), ProgType::Kprobe);
-        assert_eq!(ProgType::from("my_prog"), ProgType::Other("my_prog".into()));
-        assert_eq!(ProgType::from(".maps"), ProgType::Unknown);
-        assert_eq!(ProgType::from(".symtab"), ProgType::Unknown);
+        assert_eq!("xdp".parse::<ProgType>(), Ok(ProgType::Xdp));
+        assert_eq!("kprobe/sys_exec".parse::<ProgType>(), Ok(ProgType::Kprobe));
+        assert_eq!("my_prog".parse::<ProgType>(), Ok(ProgType::Other("my_prog".into())));
+        assert_eq!(".maps".parse::<ProgType>(), Err(ProgTypeError::NotAProgram(".maps".into())));
+        assert!(matches!(".symtab".parse::<ProgType>(), Err(ProgTypeError::NotAProgram(_))));
     }
 
     #[test]
@@ -376,7 +415,7 @@ mod tests {
         let bad = dir.join("bad.bin");
         std::fs::write(&bad, [0x95u8, 0, 0]).unwrap();
         let err = load_raw_bytes(&bad).unwrap_err();
-        assert!(matches!(err, ElfError::BadRawLength(3)));
+        assert_eq!(err, ElfError::BadRawLength(3));
         std::fs::remove_dir_all(&dir).ok();
     }
 

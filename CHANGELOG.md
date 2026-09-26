@@ -71,6 +71,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **BREAKING** `ProgType::from_section_name` stays the lossless `Option`
+  lookup, and parsing moves to `FromStr` with a new `ProgTypeError::NotAProgram`
+  for non-program sections; the lossy infallible `From<&str>` (which silently
+  mapped non-programs to `Unknown`) is removed.
+- `VerifyError` and `ElfError` implement `PartialEq` (`ElfError::Io` compares
+  the path plus the I/O error kind, `Parse` compares the rendered message),
+  so tests pin exact diagnostics with `assert_eq!` instead of `matches!`.
+- `Range` implements `Sub` (sound interval subtraction, overflow to `Top`),
+  and the packet-pointer transfer uses it directly instead of negating the
+  shift amount first.
+- `SsaValue::checked_index` centralizes the `u32` id → bounds-checked `usize`
+  conversion every home/def lookup repeated; `AsRef<[u8]> for PacketBuffer`
+  lets the buffer flow into slice APIs.
+- Hot-path vectors pre-size (`rpo_nodes`, call sites, copy-prop rewrites,
+  `format_stack`) instead of growing from empty.
 - Workspace-wide documentation pass to stdlib quality (see `AGENTS.md`
   §4b): every crate's public items state their contract, `# Errors` /
   `# Panics` / `# Examples` where they apply, version tags and bug history

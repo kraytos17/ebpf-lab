@@ -88,7 +88,10 @@ pub const fn format_reg(index: usize, reg: &RegType) -> RegSummary {
 /// init-tracking metadata, not a range.
 #[must_use]
 pub fn format_stack(init: &[u64; 8]) -> Vec<StackSummary> {
-    let mut out = Vec::new();
+    // Upper bound of one entry per set bit (full words collapse to one),
+    // so the common case never reallocates.
+    let mut out =
+        Vec::with_capacity(init.iter().map(|word| word.count_ones() as usize).sum::<usize>());
     // r10-relative start offset of slot 0. `STACK_BYTES_I32` is the
     // compile-time signed twin, so this is a plain negation.
     let base = -STACK_BYTES_I32;

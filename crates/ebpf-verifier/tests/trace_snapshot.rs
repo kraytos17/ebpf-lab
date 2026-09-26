@@ -78,3 +78,18 @@ fn trace_schema_xdp_bounded() {
     // offsets (r4 after the `data_end` bound check) rendering.
     insta::assert_snapshot!(trace_json_packet("xdp_ethertype_pass.bin", 54));
 }
+
+#[test]
+fn trace_schema_helper() {
+    // Pins the effectful-helper arm: a `call` transfers `r0` to the
+    // helper's declared return range (`bpf_get_prandom_u32` → `[0,
+    // i32::MAX]`) and the rendered `call` action.
+    insta::assert_snapshot!(trace_json("helper_prandom.bin"));
+}
+
+#[test]
+fn trace_schema_endian() {
+    // Pins the `BPF_END` transfer: an exact-width byte swap keeps a
+    // singleton scalar range through the instruction.
+    insta::assert_snapshot!(trace_json("endian.bin"));
+}

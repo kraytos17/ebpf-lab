@@ -1185,7 +1185,7 @@ mod tests {
         for (pos, value) in prog.reg_uses() {
             let block = block_of_pos[pos];
             if block != usize::MAX && cyclic[block] {
-                let id = usize::try_from(value.0).unwrap();
+                let id = value.checked_index(prog.def_sites.len()).expect("test value in range");
                 assert_eq!(ranges[id].1, prog.len(), "use of {value} in a cycle must pin to end");
                 pinned += 1;
             }

@@ -51,7 +51,7 @@ pub struct VerifiedProgram {
 /// `#[non_exhaustive]` so later verifier stages can add variants without
 /// breaking matches. Each variant is a distinct, pinned diagnostic — the
 /// display strings are part of the CLI contract.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq)]
 #[non_exhaustive]
 pub enum VerifyError {
     /// Register used before initialization.

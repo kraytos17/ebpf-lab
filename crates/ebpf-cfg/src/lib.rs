@@ -445,7 +445,7 @@ pub fn build_cfg(insns: &[Insn]) -> Result<Cfg, CfgError> {
     }
 
     // Precomputed once for the verifier's worklist.
-    let mut rpo_nodes = Vec::new();
+    let mut rpo_nodes = Vec::with_capacity(graph.node_count());
     {
         use petgraph::visit::DfsPostOrder;
         let mut dfs = DfsPostOrder::new(&graph, nodes[0]);

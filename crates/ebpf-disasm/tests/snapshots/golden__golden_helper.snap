@@ -1,0 +1,8 @@
+---
+source: crates/ebpf-disasm/tests/golden.rs
+expression: "disasm_fixture(\"helper_prandom.bin\")"
+---
+0   call 43
+1   *(dw *)(r10 + -8) = r0
+2   r0 = *(dw *)(r10 + -8)
+3   exit

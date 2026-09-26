@@ -109,6 +109,15 @@ pub(crate) fn const_value(prog: &SsaProgram, operand: SsaOperand) -> Option<i64>
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SsaValue(pub u32);
 
+impl SsaValue {
+    /// Bounds-checked index into a `count`-sized table, or `None` when the
+    /// id is out of range.
+    #[must_use]
+    pub(crate) fn checked_index(self, count: usize) -> Option<usize> {
+        usize::try_from(self.0).ok().filter(|&id| id < count)
+    }
+}
+
 impl fmt::Display for SsaValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "v{}", self.0)
@@ -338,9 +347,8 @@ impl SsaProgram {
     /// Defining instruction of a version, if recorded.
     #[must_use]
     pub fn def_of(&self, value: SsaValue) -> Option<&SsaInsn> {
-        usize::try_from(value.0)
-            .ok()
-            .and_then(|id| self.def_sites.get(id))
+        self.def_sites
+            .get(value.checked_index(self.def_sites.len())?)
             .and_then(|&idx| self.insns.get(idx))
     }
 
@@ -447,7 +455,7 @@ impl SsaProgram {
             }
             for (idx, insn) in self.insns[bb.start..bb.end].iter().enumerate() {
                 if let Some(dst) = insn.def_dst()
-                    && let Ok(id) = usize::try_from(dst.0)
+                    && let Some(id) = dst.checked_index(self.def_sites.len())
                     && let Some(slot) = self.def_sites.get_mut(id)
                 {
                     *slot = bb.start + idx;

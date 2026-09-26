@@ -68,3 +68,16 @@ fn golden_endian() {
     // Pins `BPF_END` rendering.
     insta::assert_snapshot!(disasm_fixture("endian.bin"));
 }
+
+#[test]
+fn golden_helper() {
+    // Pins `call` rendering (no other golden fixture contains a helper call).
+    insta::assert_snapshot!(disasm_fixture("helper_prandom.bin"));
+}
+
+#[test]
+fn golden_xdp() {
+    // Pins packet-load rendering (`ldxw`/`ldxh` off a packet pointer) and
+    // the bound-check/dispatch guard chain.
+    insta::assert_snapshot!(disasm_fixture("xdp_ethertype_pass.bin"));
+}

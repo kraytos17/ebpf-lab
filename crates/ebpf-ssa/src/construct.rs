@@ -564,7 +564,11 @@ impl<'a> Builder<'a> {
             }
         }
 
-        let mut insns = Vec::new();
+        let mut insns = Vec::with_capacity(
+            self.heads.iter().map(Vec::len).sum::<usize>()
+                + self.bodies.iter().map(Vec::len).sum::<usize>(),
+        );
+
         let mut head_lens = vec![0usize; blocks];
         for node in graph.node_indices() {
             let i = node.index();
@@ -582,7 +586,7 @@ impl<'a> Builder<'a> {
         for (value, block, is_head, pos) in &self.def_order {
             let base =
                 graph[*block].start + if *is_head { *pos } else { head_lens[block.index()] + *pos };
-            if let Ok(id) = usize::try_from(value.0)
+            if let Some(id) = value.checked_index(def_sites.len())
                 && let Some(slot) = def_sites.get_mut(id)
             {
                 *slot = base;

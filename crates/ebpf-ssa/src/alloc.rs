@@ -34,7 +34,7 @@ use crate::{SsaError, SsaInsn, SsaOperand, SsaProgram, SsaValue};
 
 /// Home recorded for a version in a homes table.
 fn home_of_version(homes: &[Option<Reg>], value: SsaValue) -> Option<Reg> {
-    usize::try_from(value.0).ok().and_then(|id| homes.get(id)).copied().flatten()
+    value.checked_index(homes.len()).and_then(|id| homes[id])
 }
 
 /// Homes for every value id: `None` means no location needed (imm-only
@@ -47,7 +47,7 @@ pub(crate) struct Allocation {
 impl Allocation {
     /// Home register of a version, if it has one.
     pub(crate) fn home(&self, value: SsaValue) -> Option<Reg> {
-        usize::try_from(value.0).ok().and_then(|id| self.homes.get(id)).copied().flatten()
+        value.checked_index(self.homes.len()).and_then(|id| self.homes[id])
     }
 }
 
@@ -89,7 +89,7 @@ pub(crate) fn live_ranges(prog: &SsaProgram) -> Vec<(usize, usize)> {
         }
     }
     for (pos, value) in prog.reg_uses() {
-        let Some(id) = usize::try_from(value.0).ok().filter(|&id| id < count) else { continue };
+        let Some(id) = value.checked_index(count) else { continue };
         let (start, end) = &mut ranges[id];
         let pinned = block_of_pos.get(pos).is_some_and(|&b| b != usize::MAX && cyclic[b]);
         // A use at `pos` needs the value live THROUGH `pos`: with the
@@ -109,7 +109,7 @@ pub(crate) fn live_ranges(prog: &SsaProgram) -> Vec<(usize, usize)> {
     // Vanishing pseudos (`FramePtr`/`EntryCtx`) never emit, so they
     // stay exempt — sharing their home is what elides the start move.
     for (pos, value) in prog.start_uses() {
-        let Some(id) = usize::try_from(value.0).ok().filter(|&id| id < count) else { continue };
+        let Some(id) = value.checked_index(count) else { continue };
         let (start, end) = &mut ranges[id];
         let pinned = block_of_pos.get(pos).is_some_and(|&b| b != usize::MAX && cyclic[b])
             && !matches!(
@@ -169,9 +169,7 @@ pub(crate) fn allocate(prog: &SsaProgram) -> Result<Allocation, SsaError> {
     let ranges = live_ranges(prog);
     let mut used = vec![false; count];
     for (_, value) in prog.reg_uses().into_iter().chain(prog.start_uses()) {
-        if let Ok(id) = usize::try_from(value.0)
-            && id < count
-        {
+        if let Some(id) = value.checked_index(count) {
             used[id] = true;
         }
     }
@@ -182,8 +180,7 @@ pub(crate) fn allocate(prog: &SsaProgram) -> Result<Allocation, SsaError> {
     // (`dst: None`) stay unmapped — lowering refuses those gracefully.
     for insn in &prog.insns {
         if let SsaInsn::Load { dst: Some(v), .. } = insn
-            && let Ok(id) = usize::try_from(v.0)
-            && id < count
+            && let Some(id) = v.checked_index(count)
         {
             used[id] = true;
         }
@@ -194,8 +191,7 @@ pub(crate) fn allocate(prog: &SsaProgram) -> Result<Allocation, SsaError> {
     for insn in &prog.insns {
         if let SsaInsn::BinOp { dst, op: ebpf_isa::insn::AluOp::End(_), rhs, .. } = insn
             && !matches!(crate::const_value(prog, *rhs), Some(16 | 32 | 64))
-            && let Ok(id) = usize::try_from(dst.0)
-            && id < count
+            && let Some(id) = dst.checked_index(count)
         {
             used[id] = true;
         }
@@ -217,8 +213,7 @@ pub(crate) fn allocate(prog: &SsaProgram) -> Result<Allocation, SsaError> {
     for insn in &prog.insns {
         if let SsaInsn::Call { args, .. } = insn {
             for (i, arg) in args.iter().enumerate() {
-                if let Ok(id) = usize::try_from(arg.0)
-                    && id < count
+                if let Some(id) = arg.checked_index(count)
                     && let Ok(n) = u8::try_from(i + 1)
                     && let Ok(reg) = Reg::new(n)
                 {
@@ -232,7 +227,7 @@ pub(crate) fn allocate(prog: &SsaProgram) -> Result<Allocation, SsaError> {
     order.sort_by_key(|&id| ranges[id].0);
     // Call sites (flat positions, live blocks only) gate `r0` homing:
     // anything live across a call can never sit in `r0`.
-    let mut calls = Vec::new();
+    let mut calls = Vec::with_capacity(prog.len());
     for node in prog.graph.node_indices() {
         let bb = &prog.graph[node];
         if !bb.live {
@@ -287,9 +282,7 @@ fn pinned_homes(prog: &SsaProgram, count: usize) -> Vec<(usize, Reg)> {
             SsaInsn::EntryCtx { dst } => (*dst, Reg(1)),
             _ => continue,
         };
-        if let Ok(n) = usize::try_from(value.0)
-            && n < count
-        {
+        if let Some(n) = value.checked_index(count) {
             out.push((n, home));
         }
     }
@@ -321,7 +314,7 @@ fn coalesce_binop_lhs(
     };
 
     let home = home_of_version(homes, *lhs)?;
-    let lhs_id = usize::try_from(lhs.0).ok()?;
+    let lhs_id = lhs.checked_index(homes.len())?;
     let free = active.iter().all(|&(live, active_end, holder)| {
         live != home
             || (holder == Some(lhs_id)
@@ -345,8 +338,8 @@ fn coalesce_phi_home(
 ) -> Option<Reg> {
     let SsaInsn::Phi { inputs, .. } = prog.def_of(value)? else { return None };
     inputs.iter().find_map(|&(_, input)| {
-        let id = usize::try_from(input.0).ok()?;
-        let home = (*homes.get(id)?)?;
+        let id = input.checked_index(homes.len())?;
+        let home = homes[id]?;
         (home != Reg(10) && active.iter().all(|&(live, _, _)| live != home)).then_some(home)
     })
 }

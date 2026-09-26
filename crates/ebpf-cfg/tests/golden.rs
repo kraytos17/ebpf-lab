@@ -46,3 +46,10 @@ fn golden_loop_dot() {
     // Pins back-edge rendering: the only cyclic CFG in the corpus.
     insta::assert_snapshot!(dot_fixture("loop.bin"));
 }
+
+#[test]
+fn golden_xdp_dot() {
+    // Pins a multi-branch dispatch chain: a linear guard block splitting
+    // into two exit blocks (the only 4-block/4-edge shape in the corpus).
+    insta::assert_snapshot!(dot_fixture("xdp_ethertype_pass.bin"));
+}

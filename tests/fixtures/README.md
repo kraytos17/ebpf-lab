@@ -68,9 +68,9 @@ stack:     mov r1, 42 / *(dw *)(r10 + -8) = r1 / r0 = *(dw *)(r10 + -8) / exit
 
 ## Consumed by
 
-- `ebpf-disasm` golden snapshots: `mov_exit`, `arith`, `branch`, `branch_untaken`, `diamond`, `ldimm`, `loop` (jump rendering), `stack` (memory ops), `endian` (`BPF_END`)
-- `ebpf-cfg` golden DOT snapshots: `branch`, `diamond` (merge shape), `arith`, `ldimm`, `loop` (back edge)
-- `ebpf-verifier` trace snapshots: `mov_exit`, `diamond`, `stack`, `loop` (widened intervals), `map_hash_lookup` (`maybe_map_ptr`), `map_guarded_value_access` (`maybe_map_ptr` → `map_ptr` across the null guard), `xdp_ethertype_pass` (`xdp_md_ptr`, `packet_ptr` with refined offsets)
+- `ebpf-disasm` golden snapshots (11): `mov_exit`, `arith`, `branch`, `branch_untaken`, `diamond`, `ldimm`, `loop` (jump rendering), `stack` (memory ops), `endian` (`BPF_END`), `helper_prandom` (`call`), `xdp_ethertype_pass` (packet loads)
+- `ebpf-cfg` golden DOT snapshots (6): `branch`, `diamond` (merge shape), `arith`, `ldimm`, `loop` (back edge), `xdp_ethertype_pass` (multi-branch guard chain)
+- `ebpf-verifier` trace snapshots (9): `mov_exit`, `diamond`, `stack`, `loop` (widened intervals), `map_hash_lookup` (`maybe_map_ptr`), `map_guarded_value_access` (`maybe_map_ptr` → `map_ptr` across the null guard), `xdp_ethertype_pass` (`xdp_md_ptr`, `packet_ptr` with refined offsets), `helper_prandom` (effectful-helper `Top` range), `endian` (`BPF_END` transfer)
 - `ebpf-vm` exec tests: all thirty-four fixtures trap-free at load (`all_fixtures_trap_free`), exit codes pinned (`fixture_exit_codes`), rejections pinned at load (`invalid_fixtures_trap_at_load`) and runtime (`rejection_fixtures_fail_at_runtime`); `branch`/`loop`/`diamond` target resolution + CFG differential pin
 - `ebpf-verifier` fixture tests: valid fixtures verify (incl. loops via widening + typed helpers + guarded map access + XDP bounded access with `--packet-len`), rejections pin exact `VerifyError` variants (incl. `NullMapPtrAccess`, `MapValueOutOfBounds`, `PacketOutOfBounds`, strict no-context `UninitRegister`)
 - `ebpf-verifier` differential tests: accepted map fixtures run `MemError`-free with pinned exit codes; rejected map-value fixtures fault in the VM with the matching `MemError` variant; XDP fixtures verify + run clean under a shared concrete length, rejections agree with VM faults

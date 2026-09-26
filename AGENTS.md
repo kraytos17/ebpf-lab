@@ -123,8 +123,9 @@ ebpf-ssa ← ebpf-lab-cli
 - **Newtypes with `Display` + `From`**: `Reg` (`Display` as `rN`,
   `From<Reg> for usize` as the non-`const` twin of `index()`),
   `RawInsn` (`From<[u8; 8]>` / `From<RawInsn>` as non-`const` twins of
-  `from_bytes`/`to_bytes`), `ProgType` (`From<&str>`, fallback `Unknown`),
-  `PacketBuffer` (`From<Vec<u8>>`, `From<&[u8]>`), `MapType`/`MapDesc`
+  `from_bytes`/`to_bytes`), `ProgType` (`FromStr` with `ProgTypeError`,
+  lossless `from_section_name`),
+  `PacketBuffer` (`From<Vec<u8>>`, `From<&[u8]>`, `AsRef<[u8]>`), `MapType`/`MapDesc`
   (`Display` matching the `--maps` JSON spelling),
   `UpdateFlags` (`TryFrom<u64>`, never a bespoke `from_bits`).
 - **Type aliases over single-field wrappers**: `StackSlot = RegType`
@@ -282,8 +283,8 @@ behaviour without reading the body.
 |-------|----------|----------|
 | Unit | `src/*.rs` `mod tests` | transfer fns, lattice ops, CRUD, error variants |
 | Proptest (256 cases) | `state.rs`, `maps.rs`, `memory.rs`, `decode.rs`/`encode.rs` | lattice laws, model properties (roundtrip, delete-then-miss, LRU capacity), wire roundtrip, never-panics |
-| Golden (insta) | `ebpf-disasm/tests/golden.rs` (6+3), `ebpf-cfg/tests/golden.rs` (4+1) | disassembly text, DOT graphs — incl. loop back-edge |
-| Trace snapshots (insta) | `ebpf-verifier/tests/trace_snapshot.rs` (7) | JSON schema incl. widened intervals + `maybe_map_ptr`/`map_ptr` |
+| Golden (insta) | `ebpf-disasm/tests/golden.rs` (11), `ebpf-cfg/tests/golden.rs` (6) | disassembly text, DOT graphs — incl. loop back-edge, `call`, packet loads, multi-branch dispatch |
+| Trace snapshots (insta) | `ebpf-verifier/tests/trace_snapshot.rs` (9) | JSON schema incl. widened intervals, `maybe_map_ptr`/`map_ptr`, `xdp_md_ptr`/`packet_ptr`, helper `Top` ranges, `BPF_END` |
 | Fixture accept/reject | `ebpf-verifier/tests/fixtures.rs`, `ebpf-vm/src/exec.rs` | exact `VerifyError`/`VmError` variants, pinned exit codes |
 | Differential oracle | `ebpf-verifier/tests/differential.rs` | fixtures + 256 random programs |
 | CLI e2e | `ebpf-lab-cli/tests/cli.rs` (38) | every subcommand/flag via `CARGO_BIN_EXE`, incl. `--maps` errors |

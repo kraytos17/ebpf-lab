@@ -195,6 +195,13 @@ impl From<&[u8]> for PacketBuffer {
     }
 }
 
+impl AsRef<[u8]> for PacketBuffer {
+    /// Raw packet bytes, so the buffer flows into any `&[u8]` API.
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 /// The 512-byte program stack with a 512-bit initialization bitset.
 ///
 /// One bit per byte in `[u64; 8]` (8× smaller than a byte bitmap); an access
@@ -657,6 +664,9 @@ mod tests {
         let b = PacketBuffer::from(v.as_slice());
         assert_eq!(b.as_slice(), v.as_slice());
         assert_eq!(a.len(), 3);
+
+        let via_ref: &[u8] = a.as_ref();
+        assert_eq!(via_ref, v.as_slice());
     }
 
     #[test]

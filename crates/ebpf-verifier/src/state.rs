@@ -137,6 +137,25 @@ impl std::ops::Add for Range {
     }
 }
 
+impl std::ops::Sub for Range {
+    type Output = Self;
+
+    /// Sound interval subtraction: `[l1, h1] - [l2, h2] = [l1 - h2, h1 - l2]`.
+    /// Overflow degrades to `Top`, matching [`Add`](std::ops::Add).
+    fn sub(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Bottom, _) | (_, Self::Bottom) => Self::Bottom,
+            (Self::Top, _) | (_, Self::Top) => Self::Top,
+            (Self::Interval { lo: l1, hi: h1 }, Self::Interval { lo: l2, hi: h2 }) => {
+                match (l1.checked_sub(h2), h1.checked_sub(l2)) {
+                    (Some(lo), Some(hi)) => Self::Interval { lo, hi },
+                    _ => Self::Top,
+                }
+            }
+        }
+    }
+}
+
 impl std::ops::BitAnd for Range {
     type Output = Self;
 
@@ -742,6 +761,20 @@ mod tests {
         let a = Range::Interval { lo: i64::MAX - 1, hi: i64::MAX };
         let b = Range::Interval { lo: 1, hi: 1 };
         assert_eq!(a + b, Range::Top);
+    }
+
+    #[test]
+    fn range_sub_sound() {
+        let a = Range::Interval { lo: 10, hi: 20 };
+        let b = Range::Interval { lo: 1, hi: 5 };
+        assert_eq!(a - b, Range::Interval { lo: 5, hi: 19 });
+    }
+
+    #[test]
+    fn range_sub_overflow() {
+        let a = Range::Interval { lo: i64::MIN, hi: i64::MIN };
+        let b = Range::Interval { lo: 1, hi: 1 };
+        assert_eq!(a - b, Range::Top);
     }
 
     #[test]

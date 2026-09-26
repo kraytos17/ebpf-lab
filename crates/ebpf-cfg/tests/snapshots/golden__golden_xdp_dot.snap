@@ -1,0 +1,15 @@
+---
+source: crates/ebpf-cfg/tests/golden.rs
+expression: "dot_fixture(\"xdp_ethertype_pass.bin\")"
+---
+digraph cfg {
+  node [shape=box, fontname="monospace"];
+  n0 [label="block 0 [slots 0..5]\l0   r2 = *(w *)(r1 + 0)\l1   r3 = *(w *)(r1 + 4)\l2   mov r4, r2\l3   add r4, 14\l4   jgt r4, r3, +2\l"];
+  n1 [label="block 1 [slots 5..7]\l0   r5 = *(h *)(r2 + 12)\l1   jeq r5, 8, +2\l"];
+  n2 [label="block 2 [slots 7..9]\l0   mov r0, 1\l1   exit\l"];
+  n3 [label="block 3 [slots 9..11]\l0   mov r0, 2\l1   exit\l"];
+  n0 -> n2 [label="true"];
+  n0 -> n1 [label="false"];
+  n1 -> n3 [label="true"];
+  n1 -> n2 [label="false"];
+}

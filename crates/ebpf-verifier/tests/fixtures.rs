@@ -33,6 +33,19 @@ fn verify_map_bytes(bytes: &[u8]) -> Result<ebpf_verifier::VerifiedProgram, Veri
 }
 
 #[test]
+fn verify_error_compares_by_value() {
+    // `PartialEq` lets tests pin exact diagnostics with `assert_eq!`.
+    assert_eq!(
+        VerifyError::UninitRegister { pc: 0, reg: 1 },
+        VerifyError::UninitRegister { pc: 0, reg: 1 }
+    );
+    assert_ne!(
+        VerifyError::UninitRegister { pc: 0, reg: 1 },
+        VerifyError::UninitRegister { pc: 0, reg: 2 }
+    );
+}
+
+#[test]
 fn accepts_valid_fixtures() {
     for name in [
         "mov_exit.bin",

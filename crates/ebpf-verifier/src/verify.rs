@@ -711,10 +711,12 @@ fn ptr_alu_transfer(state: &mut VerifierState, op: AluOp, dst: Reg, src: Operand
                     },
                 };
                 if let Some(k) = delta {
-                    let k = if matches!(op, AluOp::Sub) { k.checked_neg() } else { Some(k) };
-                    let next = k.map_or(RegType::Scalar(Range::Top), |k| RegType::PacketPtr {
-                        offset: offset + Range::exact(k),
-                    });
+                    let next = RegType::PacketPtr {
+                        offset: match op {
+                            AluOp::Add => offset + Range::exact(k),
+                            _ => offset - Range::exact(k),
+                        },
+                    };
 
                     if !dst.is_frame_ptr() {
                         state.regs[dst.index()] = next;
