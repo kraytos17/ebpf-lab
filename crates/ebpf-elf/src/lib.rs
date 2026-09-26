@@ -1,8 +1,27 @@
 //! ELF object loading for eBPF `.o` files.
 //!
-//! Extracts program sections (by libbpf `SEC()` name convention), their raw
-//! bytes, and relocations so later stages can resolve map fds and subprogram
-//! calls. BTF parsing is deferred to v1.0.
+//! # What is loaded
+//!
+//! eBPF programs are located by the libbpf `SEC()` naming convention: each
+//! section name is classified by [`SectionKind::classify`], and sections that
+//! hold a program become one [`ElfProgram`] carrying the raw instruction
+//! bytes and that section's relocations. Programs are returned in the object
+//! file's section order. Sections that are not programs (`.maps`, `.BTF`,
+//! `.symtab`, debug info, anything with a leading `.`) are skipped.
+//!
+//! Instruction bytes are returned verbatim; no verification or disassembly is
+//! performed here. Relocations are collected but not consumed — resolving map
+//! fds and subprogram calls belongs to a later stage. BTF is not parsed.
+//!
+//! # Choosing a loader
+//!
+//! - [`load_object`] — read and parse an object file from a path.
+//! - [`load_bytes`] — parse object bytes already in memory (used by tests).
+//! - [`load_raw_bytes`] — read flat instruction bytes with no ELF wrapper,
+//!   the escape hatch for hand-assembled fixtures.
+//!
+//! Only [`load_raw_bytes`] checks that the length is a multiple of 8, because
+//! an object section carries no such guarantee until it is linked.
 
 use object::{Object, ObjectSection};
 use std::fmt;
@@ -10,6 +29,13 @@ use std::path::Path;
 use thiserror::Error;
 
 /// eBPF program type inferred from the ELF section name.
+///
+/// The two catch-all variants differ: [`Other`](Self::Other) preserves a
+/// *recognised* program section name that has no dedicated variant, while
+/// [`Unknown`](Self::Unknown) is the fallback for names that are not program
+/// sections at all. See [`ProgType::from_section_name`] for the fallible
+/// lookup and [`From<&str>`](#impl-From<%26str>-for-ProgType) for the
+/// infallible one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProgType {
     /// `xdp` / `xdp/...`.
@@ -22,18 +48,30 @@ pub enum ProgType {
     Socket,
     /// `tracepoint/...`.
     Tracepoint,
-    /// Any other recognised section name, preserved verbatim.
+    /// A recognised program section whose name has no dedicated variant,
+    /// preserved verbatim.
     Other(String),
-    /// Fallback for permissive loading.
+    /// Fallback for names that are not program sections.
     Unknown,
 }
 
 impl ProgType {
-    /// Infer the program type from a libbpf section name.
+    /// Infers the program type from a libbpf section name.
     ///
     /// Returns `None` for sections that are not eBPF programs
     /// (`.maps`, `.BTF`, `.symtab`, …). Prefer [`SectionKind::classify`],
     /// which names the skipped sections instead of erasing them.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ebpf_elf::ProgType;
+    ///
+    /// assert_eq!(ProgType::from_section_name("xdp"), Some(ProgType::Xdp));
+    /// assert_eq!(ProgType::from_section_name("kprobe/sys_exec"), Some(ProgType::Kprobe));
+    /// assert_eq!(ProgType::from_section_name("my_prog"), Some(ProgType::Other("my_prog".into())));
+    /// assert_eq!(ProgType::from_section_name(".maps"), None);
+    /// ```
     #[must_use]
     pub fn from_section_name(name: &str) -> Option<Self> {
         match SectionKind::classify(name) {
@@ -46,8 +84,8 @@ impl ProgType {
 /// Classification of an ELF section by libbpf `SEC()` name convention.
 ///
 /// Unlike [`ProgType::from_section_name`]'s `Option`, every section gets a
-/// nameable variant — so when v1.0 starts parsing `.maps`/BTF metadata,
-/// those stages match exhaustively here instead of re-parsing names.
+/// nameable variant, so stages that later consume `.maps`/BTF metadata can
+/// match exhaustively here instead of re-parsing names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SectionKind {
     /// An eBPF program section; carries its inferred type.
@@ -61,7 +99,23 @@ pub enum SectionKind {
 }
 
 impl SectionKind {
-    /// Classify a section name.
+    /// Classifies a section name.
+    ///
+    /// Only the part before the first `/` selects the kind, so `xdp/eth`
+    /// classifies as [`Program`](Self::Program). A name with a leading `.` or
+    /// an empty name is [`Ignored`](Self::Ignored); any other unrecognised
+    /// name is a program of type [`ProgType::Other`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use ebpf_elf::{ProgType, SectionKind};
+    ///
+    /// assert_eq!(SectionKind::classify("xdp/eth"), SectionKind::Program(ProgType::Xdp));
+    /// assert_eq!(SectionKind::classify(".maps"), SectionKind::Maps);
+    /// assert_eq!(SectionKind::classify(".BTF.ext"), SectionKind::Btf);
+    /// assert_eq!(SectionKind::classify(".symtab"), SectionKind::Ignored);
+    /// ```
     #[must_use]
     pub fn classify(name: &str) -> Self {
         let base = name.split('/').next().unwrap_or(name);
@@ -103,8 +157,11 @@ impl fmt::Display for ProgType {
 }
 
 impl From<&str> for ProgType {
-    /// Infer from a section name, falling back to [`Self::Unknown`] for
-    /// non-program sections (maps, BTF, debug info).
+    /// Infers the type from a section name, falling back to [`Self::Unknown`]
+    /// for names that are not program sections (maps, BTF, debug info).
+    ///
+    /// Use [`ProgType::from_section_name`] when the distinction between "not
+    /// a program" and "unknown program" matters.
     fn from(s: &str) -> Self {
         Self::from_section_name(s).unwrap_or(Self::Unknown)
     }
@@ -112,16 +169,21 @@ impl From<&str> for ProgType {
 
 /// A relocation entry inside a program section.
 ///
-/// Informational in v0.7 (collected, never consumed): map-fd and
-/// subprogram resolution arrive with v1.0 relocations.
+/// Relocations are collected but not consumed: map-fd and subprogram
+/// resolution is a later stage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relocation {
     /// Byte offset of the instruction slot to fix up.
     pub offset: u64,
     /// Symbol index / name the relocation refers to, when known.
     pub symbol: Option<String>,
-    /// `object`-crate `RelocationKind` discriminant (variant order, NOT the
-    /// ELF `r_type` code — raw type codes arrive with v1.0 resolution).
+    /// The `object` crate's `RelocationKind` discriminant.
+    ///
+    /// This is the variant order of `object`'s enum, **not** the ELF `r_type`
+    /// code; raw type codes belong to a later resolution stage. The value
+    /// fits in `u8` because the enum has few variants, but the mapping is an
+    /// implementation detail of the `object` crate and may shift between its
+    /// releases.
     pub kind: u8,
 }
 
@@ -132,7 +194,10 @@ pub struct ElfProgram {
     pub name: String,
     /// Inferred program type.
     pub prog_type: ProgType,
-    /// Raw instruction bytes (multiple of 8 once linked).
+    /// Raw instruction bytes, taken verbatim from the section.
+    ///
+    /// [`load_raw_bytes`] guarantees the length is a multiple of 8; an object
+    /// section carries no such guarantee until the program is linked.
     pub bytes: Vec<u8>,
     /// Relocations that must be resolved before execution.
     pub relocations: Vec<Relocation>,
@@ -140,8 +205,8 @@ pub struct ElfProgram {
 
 /// ELF loading errors.
 ///
-/// `#[non_exhaustive]` so future stages (BTF parsing, relocation
-/// resolution) can add variants without breaking downstream matches.
+/// `#[non_exhaustive]` so later stages can add variants without breaking
+/// downstream matches.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ElfError {
@@ -165,23 +230,30 @@ pub enum ElfError {
     BadRawLength(usize),
 }
 
-/// Load all eBPF programs from an object file.
+/// Loads all eBPF programs from an object file at `path`.
+///
+/// Programs are returned in section order; non-program sections are skipped.
 ///
 /// # Errors
 ///
-/// Returns [`ElfError`] on I/O or parse failures. Sections that are not
-/// eBPF programs (maps, BTF, debug info) are skipped silently.
+/// - [`ElfError::Io`] if the file cannot be read.
+/// - [`ElfError::Parse`] if the bytes are not a valid object file.
+/// - [`ElfError::NoPrograms`] if no section classifies as a program.
 pub fn load_object(path: &Path) -> Result<Vec<ElfProgram>, ElfError> {
     let data = std::fs::read(path)
         .map_err(|source| ElfError::Io { path: path.display().to_string(), source })?;
     load_bytes(&data, &path.display().to_string())
 }
 
-/// Load programs from in-memory object bytes (useful for tests).
+/// Loads programs from in-memory object bytes.
+///
+/// `label` names the source in [`ElfError::NoPrograms`]; callers pass a file
+/// path or a test name. Use [`load_object`] to read from a path.
 ///
 /// # Errors
 ///
-/// Returns [`ElfError::Parse`] when bytes are not a valid object file.
+/// - [`ElfError::Parse`] when `data` is not a valid object file.
+/// - [`ElfError::NoPrograms`] when no section classifies as a program.
 pub fn load_bytes(data: &[u8], label: &str) -> Result<Vec<ElfProgram>, ElfError> {
     let obj = object::File::parse(data)?;
     let mut programs = Vec::new();
@@ -209,15 +281,17 @@ pub fn load_bytes(data: &[u8], label: &str) -> Result<Vec<ElfProgram>, ElfError>
     Ok(programs)
 }
 
-/// Load raw instruction bytes from a flat `.bin` file (no ELF wrapper).
+/// Loads raw instruction bytes from a flat `.bin` file with no ELF wrapper.
 ///
-/// This is the escape hatch for hand-assembled fixtures and tests:
-/// the file must be a multiple of 8 bytes.
+/// This is the escape hatch for hand-assembled fixtures and tests. Unlike
+/// [`load_object`], it enforces that the file length is a multiple of 8
+/// ([`ebpf_isa::RawInsn::SIZE`]); the returned program has
+/// [`ProgType::Unknown`], no relocations, and the path as its name.
 ///
 /// # Errors
 ///
-/// Returns [`ElfError::Io`] on read failure or when the length is not a
-/// multiple of 8.
+/// - [`ElfError::Io`] if the file cannot be read.
+/// - [`ElfError::BadRawLength`] if the length is not a multiple of 8.
 pub fn load_raw_bytes(path: &Path) -> Result<ElfProgram, ElfError> {
     let bytes = std::fs::read(path)
         .map_err(|source| ElfError::Io { path: path.display().to_string(), source })?;
@@ -248,6 +322,7 @@ mod tests {
         assert_eq!(ProgType::from_section_name("my_prog"), Some(ProgType::Other("my_prog".into())));
     }
 
+    /// Non-program sections get a named `SectionKind` rather than `None`.
     #[test]
     fn section_kind_names_skips() {
         assert_eq!(SectionKind::classify(".maps"), SectionKind::Maps);
@@ -285,6 +360,8 @@ mod tests {
         assert!(matches!(err, ElfError::Parse(_)));
     }
 
+    /// `load_raw_bytes` enforces the 8-byte length rule and defaults to a
+    /// reloc-free `Unknown` program.
     #[test]
     fn raw_bytes_roundtrip_and_length_check() {
         let dir = std::env::temp_dir().join("ebpf-lab-elf-test");

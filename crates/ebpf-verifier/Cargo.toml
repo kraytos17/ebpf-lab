@@ -1,6 +1,6 @@
 [package]
 name = "ebpf-verifier"
-description = "Academic-clean eBPF verifier (interval lattice, widening, typed + map helpers)"
+description = "eBPF verifier: interval abstract interpretation with threshold widening and typed helpers"
 keywords = ["ebpf", "bpf", "verifier", "abstract-interpretation"]
 version.workspace = true
 edition.workspace = true

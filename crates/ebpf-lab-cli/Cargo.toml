@@ -1,6 +1,6 @@
 [package]
 name = "ebpf-lab-cli"
-description = "ebpf-lab command-line interface (inspect, disasm, cfg, verify, run)"
+description = "ebpf-lab command-line interface: inspect, disassemble, verify, run, and optimize eBPF programs"
 keywords = ["ebpf", "bpf", "cli"]
 version.workspace = true
 edition.workspace = true

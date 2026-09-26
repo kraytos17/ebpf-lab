@@ -13,8 +13,8 @@ use thiserror::Error;
 
 /// Encoding failure.
 ///
-/// `#[non_exhaustive]` so future ISA extensions (new classes, atomic ops)
-/// can add variants without breaking matches.
+/// `#[non_exhaustive]` so future ISA extensions (new classes, atomic ops) can
+/// add variants without breaking matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum EncodeError {
@@ -42,17 +42,17 @@ pub enum EncodeError {
     },
 }
 
-/// Serialize a decoded program to flat little-endian bytes.
+/// Serializes a decoded program to flat little-endian bytes.
 ///
-/// `LoadImm64` occupies two slots, like on the wire.
+/// [`Insn::LoadImm64`] occupies two slots, like on the wire.
 ///
 /// # Errors
 ///
-/// Returns [`EncodeError`] for values outside the decoder's image
-/// ([`EncodeError::UnknownInstruction`], [`EncodeError::InvalidJump`],
-/// [`EncodeError::InvalidEnd`]).
+/// Returns [`EncodeError`] for values outside the decoder's image:
+/// [`EncodeError::UnknownInstruction`], [`EncodeError::InvalidJump`], or
+/// [`EncodeError::InvalidEnd`].
 ///
-/// # Example
+/// # Examples
 ///
 /// ```
 /// # use ebpf_isa::decode::decode_program;
@@ -70,7 +70,7 @@ pub fn encode_program(insns: &[Insn]) -> Result<Vec<u8>, EncodeError> {
     Ok(raws.into_iter().flat_map(|raw| raw.to_bytes()).collect())
 }
 
-/// ALU operation nibble (upper nibble of ALU/ALU64 opcodes).
+/// ALU operation nibble, the inverse of [`AluOp::from_opcode`].
 const fn alu_nibble(op: AluOp) -> u8 {
     match op {
         AluOp::Add => 0x0,
@@ -90,7 +90,7 @@ const fn alu_nibble(op: AluOp) -> u8 {
     }
 }
 
-/// Jump operation nibble (upper nibble of JMP/JMP32 opcodes).
+/// Jump operation nibble, the inverse of [`JumpOp::from_opcode`].
 const fn jump_nibble(op: JumpOp) -> u8 {
     match op {
         JumpOp::Always => 0x0,
@@ -110,7 +110,7 @@ const fn jump_nibble(op: JumpOp) -> u8 {
     }
 }
 
-/// Memory size bits (inverse of [`MemSize::from_opcode`]).
+/// `BPF_SIZE` bits, the inverse of [`MemSize::from_opcode`].
 const fn size_bits(size: MemSize) -> u8 {
     match size {
         MemSize::W => 0x0,

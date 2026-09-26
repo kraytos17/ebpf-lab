@@ -6,19 +6,21 @@
 use crate::insn::{AluOp, DecodeError, Insn, JumpOp, MemSize, Operand, RawInsn, Reg, Width};
 use crate::opcode::{self, class};
 
-/// Decode a whole program from raw bytes.
+/// Decodes a whole program from raw bytes.
 ///
-/// Byte length must be a multiple of 8; a trailing partial slot is an error.
-/// A `LD_IMM_DW` (`0x18`) consumes two slots and yields one [`Insn::LoadImm64`].
+/// The byte length must be a multiple of 8; a trailing partial slot is an
+/// error. A `LD_IMM_DW` (`0x18`) consumes two slots and yields one
+/// [`Insn::LoadImm64`]; every other instruction consumes one slot.
+///
+/// This function never panics: every slice access is fallible and mapped to a
+/// [`DecodeError`].
 ///
 /// # Errors
 ///
-/// Returns [`DecodeError`] on truncation, bad registers, or unknown classes/ops.
+/// Returns [`DecodeError`] on truncation, a bad register, or an unknown
+/// class or operation nibble.
 ///
-/// This function never panics: every slice access is fallible and mapped to
-/// [`DecodeError`].
-///
-/// # Example
+/// # Examples
 ///
 /// ```
 /// # use ebpf_isa::decode::decode_program;
@@ -44,7 +46,8 @@ pub fn decode_program(bytes: &[u8]) -> Result<Vec<Insn>, DecodeError> {
     Ok(out)
 }
 
-/// Decode a single instruction; returns the instruction plus bytes consumed (8 or 16).
+/// Decodes a single instruction, returning it plus the bytes it consumed
+/// (8, or 16 for a wide load).
 fn decode_one(raw: RawInsn, rest: &[u8]) -> Result<(Insn, usize), DecodeError> {
     match raw.opcode {
         opcode::JMP_EXIT => return Ok((Insn::Exit, RawInsn::SIZE)),
@@ -116,7 +119,7 @@ fn decode_one(raw: RawInsn, rest: &[u8]) -> Result<(Insn, usize), DecodeError> {
     }
 }
 
-/// Choose register vs immediate source for ALU/JMP operands.
+/// Chooses the register vs immediate source for an ALU/JMP operand.
 fn decode_operand(raw: RawInsn) -> Result<Operand, DecodeError> {
     if opcode::is_imm_source(raw.opcode) {
         Ok(Operand::Imm(raw.imm))

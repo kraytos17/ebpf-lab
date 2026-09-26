@@ -91,12 +91,13 @@ impl Reg {
 
     /// Array index for this register.
     ///
-    /// The single `as` cast in the codebase for register indexing: `Reg`
-    /// is validated to `0..=10` at decode, so every other site indexes
-    /// through `Index<Reg>` impls instead of casting.
+    /// `Reg` is validated to `0..=10` at decode, so callers index through
+    /// `Index<Reg>` impls rather than converting themselves.
     #[inline]
     #[must_use]
     pub const fn index(self) -> usize {
+        // The one `as` cast for register indexing: exact by the `0..=10`
+        // validation at decode.
         self.0 as usize
     }
 
@@ -153,8 +154,10 @@ impl fmt::Display for Operand {
 }
 
 /// Operand width: 32-bit operations (`BPF_ALU` / `BPF_JMP32`) vs 64-bit
-/// (`BPF_ALU64` / `BPF_JMP`). A named enum instead of an `is64: bool` flag
-/// so call sites read `Width::B64` rather than a bare `true`.
+/// (`BPF_ALU64` / `BPF_JMP`).
+///
+/// A named enum rather than an `is64: bool` flag, so call sites read
+/// `Width::B64` instead of a bare `true`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Width {
     /// 32-bit semantics (results truncated, jumps compare low words).
@@ -181,8 +184,9 @@ impl fmt::Display for Width {
 }
 
 /// Byte-swap direction for `BPF_END`: little-endian vs big-endian output.
-/// A named enum instead of a `to_be: bool` flag so matches read as
-/// `Endian::Be` rather than a bare boolean.
+///
+/// A named enum for the same reason as [`Width`] — `Endian::Be` reads better
+/// than a bare `to_be: bool`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Endian {
     /// Little-endian output (`BPF_TO_LE`): mask to the width.
@@ -283,20 +287,28 @@ impl AluOp {
         }
     }
 
-    /// Apply the operation to concrete values: the single source of truth
-    /// for ALU semantics, shared by the interpreter and the optimizer's
-    /// constant folder (so folding is correct by construction).
+    /// Applies the operation to concrete values.
     ///
-    /// Thin dispatcher over the width halves: the width branch happens once
-    /// here so each half is a straight jump-table match. Division or modulo
-    /// by zero yields zero (kernel behavior, no trap). For [`AluOp::End`],
-    /// `rhs` carries the width immediate (16/32/64); other widths hit an
-    /// unreachable arm — producers (the VM loader, the verifier) validate
+    /// This is the single source of truth for ALU semantics: the interpreter
+    /// and the optimizer's constant folder both call it, so folding is correct
+    /// by construction. The width branch happens once here; each half
+    /// ([`alu64`](self) / [`alu32`](self)) is then a straight jump-table
+    /// match.
+    ///
+    /// The arithmetic is *defined as* wrapping at the operand width, with
+    /// truncation on narrowing; division and modulo by zero yield zero
+    /// (matching the kernel, no trap). For [`AluOp::End`], `rhs` carries the
+    /// width immediate (16/32/64); any other width hits an unreachable arm,
+    /// because producers (the VM loader, the verifier) validate the width
     /// before evaluating.
     ///
-    /// Cast allows below are intentional: eBPF arithmetic is *defined* as
-    /// wrapping at the operand width with truncation on narrowing, so every
-    /// `as` here implements the ISA semantic rather than hiding a bug.
+    /// # Casts
+    ///
+    /// Every `as` in `alu64`/`alu32`/`endian_swap` is an ISA semantic, not a
+    /// lossy shortcut: eBPF arithmetic is defined as wrapping at the operand
+    /// width and truncating on narrowing, so the casts implement exactly that
+    /// behavior. Each carries a targeted `#[allow]` where the lint cannot see
+    /// the semantic.
     #[must_use]
     #[inline]
     pub fn apply(self, lhs: i64, rhs: i64, width: Width) -> i64 {
@@ -307,7 +319,8 @@ impl AluOp {
     }
 }
 
-/// 64-bit ALU (see [`AluOp::apply`] for the casting rationale).
+/// 64-bit ALU; see [`AluOp::apply`] for the semantics and the casting
+/// rationale.
 // Shift amounts narrow `rhs` to `u32` (masked to 6 bits right after);
 // everything else here reinterprets in-width via `cast_signed`/`cast_unsigned`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -343,7 +356,8 @@ fn alu64(op: AluOp, lhs: i64, rhs: i64) -> i64 {
     }
 }
 
-/// 32-bit ALU with zero-extended result (see [`AluOp::apply`]).
+/// 32-bit ALU with zero-extended result; see [`AluOp::apply`] for the
+/// semantics and the casting rationale.
 #[inline]
 fn alu32(op: AluOp, lhs: i64, rhs: i64) -> i64 {
     // Low words: BPF_ALU32 operates on the low 32 bits, so truncation here
@@ -381,15 +395,12 @@ fn alu32(op: AluOp, lhs: i64, rhs: i64) -> i64 {
     i64::from(w)
 }
 
-/// `BPF_END`: mask to `width` bits (from the immediate), then byte-swap
+/// `BPF_END`: masks to `width` bits (from the immediate), then byte-swaps
 /// within the width when big-endian output was requested. Little-endian
 /// output is a plain mask on little-endian hosts like this lab's.
 ///
-/// Widths are validated by producers before evaluating (see
-/// [`AluOp::apply`]), so the dead arm is unreachable by construction.
-///
-/// The `as` casts truncate to the operand width per the ISA semantic
-/// (see [`AluOp::apply`]).
+/// See [`AluOp::apply`] for why the caller's width validation makes the dead
+/// arm unreachable and why the casts are ISA semantics.
 #[inline]
 fn endian_swap(value: i64, width_imm: i64, endian: Endian) -> i64 {
     let masked: u64 = match width_imm {
@@ -421,9 +432,9 @@ fn endian_swap(value: i64, width_imm: i64, endian: Endian) -> i64 {
     swapped.cast_signed()
 }
 
-/// 32-bit variant of [`endian_swap`] (result is zero-extended by the caller).
+/// 32-bit variant of [`endian_swap`] (the caller zero-extends the result).
 ///
-/// Same producer-validation rationale as [`endian_swap`].
+/// See [`AluOp::apply`] for the width-validation and cast rationale.
 #[inline]
 fn endian_swap_32(value: u32, width_imm: i64, endian: Endian) -> u32 {
     let masked: u32 = match width_imm {
@@ -599,8 +610,9 @@ impl fmt::Display for MemSize {
 
 /// A decoded eBPF instruction.
 ///
-/// `Copy` : at 16 bytes the interpreter copies instructions
-/// by value in its hot loop instead of cloning per step.
+/// `Copy` and small (16 bytes or fewer) so the interpreter copies one
+/// instruction per step in its hot loop instead of cloning. The size bound is
+/// pinned by the `insn_stays_compact` test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Insn {
     /// ALU32/ALU64 operation.
@@ -699,8 +711,8 @@ impl fmt::Display for Insn {
 
 /// Decode failure.
 ///
-/// `#[non_exhaustive]` so future decoder diagnostics (BTF-aware errors,
-/// relocation failures) don't break downstream matches.
+/// `#[non_exhaustive]` so future decoder diagnostics can add variants without
+/// breaking downstream matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum DecodeError {

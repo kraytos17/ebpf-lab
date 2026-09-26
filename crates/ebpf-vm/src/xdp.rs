@@ -1,10 +1,12 @@
 //! XDP driver for the lab VM: packet parsers, action codes, entry point.
 //!
-//! [`run_xdp`] installs the packet (which also stages the `xdp_md`
-//! context in `MemoryView`), points `r1` at `XDP_MD_BASE`, runs to
-//! completion, and maps the exit code to [`XdpAction`]. Parsers are
-//! hand-rolled (Ethernet/IPv4 only) for learning value — no
-//! packet-parsing dependency.
+//! [`run_xdp`] installs the packet (which also stages the `xdp_md` context
+//! in `MemoryView`), points `r1` at `XDP_MD_BASE`, runs to completion, and
+//! maps the exit code to [`XdpAction`]. The `xdp_md` layout (`data` at `+0`,
+//! `data_end` at `+4`) is documented on
+//! [`memory::XDP_MD_BASE`](crate::memory::XDP_MD_BASE). Parsers are
+//! hand-rolled (Ethernet/IPv4 only) for learning value — no packet-parsing
+//! dependency.
 
 use std::fmt;
 use std::net::Ipv4Addr;

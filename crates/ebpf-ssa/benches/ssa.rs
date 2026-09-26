@@ -1,5 +1,9 @@
-//! Baseline: SSA construction, optimization, and lowering time (wide
-//! straight line, XDP dispatch).
+//! Scaling check: SSA construction, optimization, and lowering time.
+//!
+//! Three cases: `wide_250/build` (construction scaling vs program size),
+//! `xdp_ethertype/opt` (the fixed-point pass over packet transfers), and
+//! `wide_250/lower` (allocation, edge-splitting, and emission). Setup runs
+//! outside `iter_batched` so only the measured stage is timed.
 //!
 //! Run with `cargo bench -p ebpf-ssa`.
 

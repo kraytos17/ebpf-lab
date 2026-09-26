@@ -1,6 +1,6 @@
 [package]
 name = "ebpf-elf"
-description = "ELF object loading for eBPF programs (sections, relocations)"
+description = "eBPF ELF object loading: program sections, bytes, and relocations"
 keywords = ["ebpf", "bpf", "elf"]
 version.workspace = true
 edition.workspace = true

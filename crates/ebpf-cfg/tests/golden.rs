@@ -1,7 +1,10 @@
-//! Golden-file tests: fixture `.bin` → DOT snapshots.
+//! Golden-file tests: fixture `.bin` programs rendered to DOT snapshots.
 //!
-//! Run `cargo insta review` to accept updated snapshots after intentional
-//! CFG changes.
+//! Each test decodes a fixture, builds its CFG, and compares [`to_dot`] output
+//! against a committed snapshot. Run `cargo insta review` to accept updated
+//! snapshots after intentional CFG changes.
+//!
+//! [`to_dot`]: ebpf_cfg::to_dot
 
 #![allow(clippy::unwrap_used)]
 

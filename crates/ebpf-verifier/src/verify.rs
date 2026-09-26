@@ -1,4 +1,15 @@
 //! Worklist algorithm and per-instruction verification.
+//!
+//! Verification is a fixed-point forward walk over the CFG: block states are
+//! seeded in reverse-postorder and re-joined until they stop changing, with
+//! [`VerifierState::widen`] taking over after `widening_threshold` re-joins
+//! at a block to force convergence on loops. Each instruction has a transfer
+//! function (`*_transfer`) and, for memory access, a bounds/type check
+//! (`check_*`).
+//!
+//! Trace collection is an entry-point choice, not configuration:
+//! [`verify_traced`] renders the per-PC trace, [`verify_with_config`] and
+//! [`verify`] do not, so the verdict-only paths never allocate trace strings.
 
 use ebpf_cfg::{Cfg, EdgeKind};
 use ebpf_isa::insn::{AluOp, Insn, JumpOp, MemSize, Operand, Reg, Width};
@@ -1340,7 +1351,8 @@ mod tests {
 
     #[test]
     fn refine_reg_scalar_keeps_interval_refinement() {
-        // Scalars keep the pre-v0.8 behavior: interval meet via `refine`.
+        // A scalar refines by interval meet through `refine`, not by
+        // degrading to `Top`.
         let scalar = RegType::Scalar(Range::Interval { lo: 0, hi: 10 });
         assert_eq!(
             edge(&scalar, JumpOp::Lt, 5, true),

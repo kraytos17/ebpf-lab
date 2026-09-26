@@ -18,6 +18,11 @@ fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_ebpf-lab"))
 }
 
+/// Runs the binary with `args` and returns stdout, asserting a zero exit.
+///
+/// The zero-exit assertion is deliberate: verifier rejections and interpreter
+/// errors are printed but exit 0, so a non-zero status here means a genuine
+/// CLI failure (bad I/O, malformed input).
 fn run_ok(args: &[&str]) -> String {
     let out =
         cli().args(args).output().unwrap_or_else(|e| panic!("spawn failed for {args:?}: {e}"));

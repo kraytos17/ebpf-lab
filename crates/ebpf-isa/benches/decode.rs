@@ -1,9 +1,9 @@
-//! Baseline: `decode_program` throughput over synthetic programs.
+//! Scaling check: `decode_program` throughput over synthetic programs.
 //!
-//! `mov_chain` pins the common case; `mixed_ops` exercises dispatch
-//! across classes (ALU/JMP/LDX/STX). Numbers are informational —
-//! `bench-quick` guards against order-of-magnitude regressions only.
-//! Run with `cargo bench -p ebpf-isa`.
+//! `mov_chain` pins the common case; `mixed_ops` exercises dispatch across
+//! classes (ALU/JMP/LDX/STX); `encode_4096_slots` times the inverse
+//! serializer. Numbers are informational — `bench-quick` guards against
+//! order-of-magnitude regressions only. Run with `cargo bench -p ebpf-isa`.
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use ebpf_isa::decode::decode_program;
@@ -67,8 +67,8 @@ fn bench_decode(c: &mut Criterion) {
     group.bench_function("mixed_512_slots", |b| {
         b.iter(|| decode_program(black_box(&mixed)).expect("bench program decodes"));
     });
-    // Encode path (v0.10 Part B serializer): decode once in setup so only
-    // the serializer is timed.
+
+    // Encode path: decode once in setup so only the serializer is timed.
     let bytes = mov_chain(4096);
     let insns = decode_program(&bytes).expect("bench program decodes");
     group.throughput(Throughput::Bytes(bytes.len() as u64));

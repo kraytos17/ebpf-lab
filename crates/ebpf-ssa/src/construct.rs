@@ -1,22 +1,26 @@
 //! SSA construction (Braun et al., "Simple and Efficient Construction of
 //! Static Single Assignment Form").
 //!
-//! Processes blocks in [`Cfg::rpo`] order with sealing: a block is sealed
-//! before filling once every predecessor is sealed, so straight-line and
-//! diamond code never mints incomplete phis — only loop headers do (their
-//! backedge predecessors are still unsealed). No dominance frontiers, no
-//! dominance tree; predecessor lists plus the sealed flags suffice.
+//! Blocks are processed in [`Cfg::rpo`] order with sealing: a block is
+//! sealed before filling once every predecessor is sealed, so straight-line
+//! and diamond code never mints incomplete phis — only loop headers do (their
+//! backedge predecessors are still unsealed). No dominance frontiers and no
+//! dominance tree are needed; predecessor lists plus the sealed flags
+//! suffice.
 //!
-//! Correctness notes:
+//! # Correctness
 //!
-//! - The total entry prelude (every register versioned up front) means
-//!   every read chain bottoms out at a real definition — trivial-phi
-//!   removal is unnecessary (redundant phis die in copy propagation
-//!   instead) and no `undef` value exists.
-//! - Unreachable blocks never appear in RPO, so they are never filled;
-//!   their ranges stay empty and `live` stays false.
-//! - Reads in unsealed blocks mint operandless phis completed at seal
-//!   time; memoization (`cur`) makes every recursive read terminate.
+//! - The total entry prelude (every register versioned up front) means every
+//!   read chain bottoms out at a real definition. Trivial-phi removal is
+//!   unnecessary (redundant phis die in copy propagation instead) and no
+//!   `undef` value exists.
+//! - Unreachable blocks never appear in RPO, so they are never filled; their
+//!   ranges stay empty and `live` stays false.
+//! - Reads in unsealed blocks mint operandless phis completed at seal time;
+//!   memoization (`cur`) makes every recursive read terminate.
+//!
+//! Regression: the pinned inputs in `fuzz_crashers_agree` cover the
+//! entry-loop, stale-backedge, and sealing-latch cases.
 
 use ebpf_cfg::{Cfg, EdgeKind};
 use ebpf_isa::insn::{AluOp, Insn, JumpOp, Operand, Reg, Width};
@@ -93,22 +97,22 @@ struct Builder<'a> {
     /// Stale backedge inputs: `(block, head position, input index,
     /// predecessor, variable)`. A phi input read from a not-yet-filled
     /// predecessor names a placeholder or mid-fill version, not the
-    /// predecessor's final value (fuzzer-caught: a two-block loop
-    /// orphaned its body adds, looping forever). `repair` re-resolves
-    /// each against the filled predecessor afterwards.
+    /// predecessor's final value — a two-block loop would then orphan its
+    /// body definitions and loop forever. `repair` re-resolves each
+    /// against the filled predecessor afterwards.
     stale: Vec<(NodeIndex, usize, usize, NodeIndex, Reg)>,
     /// Entry versions per register (prelude).
     entry_env: [SsaValue; 11],
-    /// Whether the entry block has an incoming edge. Every predecessor
-    /// of the entry is a backedge (the entry has no forward
-    /// predecessors): the block re-executes, so pre-seeded entry
-    /// versions would mask loop-carried reads (every read would hit the
-    /// prelude instead of minting a merge phi, so a counter would reset
-    /// each iteration — a fuzzer-caught infinite loop, both for
-    /// self-edges and for longer loops through the entry). When set,
-    /// the prelude seeds only `r10` and entry reads mint incomplete
-    /// phis completed with a start-sentinel inflow plus the backedge
-    /// values (re-resolved by `repair` when the latch fills later).
+    /// Whether the entry block has an incoming edge. Every predecessor of
+    /// the entry is a backedge (the entry has no forward predecessors):
+    /// the block re-executes, so pre-seeded entry versions would mask
+    /// loop-carried reads — every read would hit the prelude instead of
+    /// minting a merge phi, so a counter would reset each iteration and
+    /// the loop would never exit (for self-edges and for longer loops
+    /// through the entry alike). When set, the prelude seeds only `r10`
+    /// and entry reads mint incomplete phis completed with a
+    /// start-sentinel inflow plus the backedge values (re-resolved by
+    /// `repair` when the latch fills later).
     entry_loop: bool,
     /// Next fresh value id (ids are dense from 0).
     next: u32,
@@ -119,19 +123,16 @@ struct Builder<'a> {
     def_order: Vec<(SsaValue, NodeIndex, bool, usize)>,
     /// In-flight resolutions: `(block, variable)` pairs whose value is
     /// currently being determined higher up the call stack. Re-entering
-    /// one means a shortcut cycle (filled single-predecessor loop with
-    /// the register untouched throughout keeps following itself), so
-    /// the re-entry names the merge with a phi instead of recursing
-    /// forever (fuzzer-caught stack overflow).
+    /// one means a shortcut cycle (a filled single-predecessor loop with
+    /// the register untouched throughout keeps following itself), so the
+    /// re-entry names the merge with a phi instead of recursing forever.
     resolving: Vec<(NodeIndex, Reg)>,
     /// Blocks currently inside [`seal`](Self::seal) (at most one: seals
-    /// never nest). A filled predecessor under seal still holds
-    /// incomplete phis being completed, so its memoized versions are
-    /// not final yet — the single-predecessor shortcut must not follow
-    /// them (fuzzer-caught: an untouched loop-invariant register
-    /// shortcut through the sealing latch into the latch's own
-    /// incomplete phi, a self-input that copy propagation then
-    /// collapsed onto a dead block's placeholder).
+    /// never nest). A filled predecessor under seal still holds incomplete
+    /// phis being completed, so its memoized versions are not final yet;
+    /// the single-predecessor shortcut must not follow them, or it reads
+    /// the latch's own incomplete phi (a self-input that copy propagation
+    /// then collapses onto a dead block's placeholder).
     sealing: Vec<bool>,
 }
 
@@ -294,9 +295,9 @@ impl<'a> Builder<'a> {
             // mid-completion placeholders, including this very
             // resolution). An unfilled predecessor is mid-fill (a
             // backedge into ongoing work): shortcutting would return its
-            // not-yet-final version (or, worse, this very resolution
-            // through memoization — a fuzzer-caught self-feeding counter
-            // that looped forever), so name the merge with a phi instead.
+            // not-yet-final version, or this very resolution through
+            // memoization (a self-feeding counter that never advances),
+            // so name the merge with a phi instead.
             if self.filled[pred.index()] && !self.sealing[pred.index()] {
                 let value = self.read(pred, reg);
                 self.cur[block.index()][reg.index()] = Some(value);
@@ -319,7 +320,7 @@ impl<'a> Builder<'a> {
     fn mint_phi(&mut self, block: NodeIndex, reg: Reg) -> (SsaValue, usize) {
         let value = self.fresh();
         self.cur[block.index()][reg.index()] = Some(value);
-        
+
         let pos = self.heads[block.index()].len();
         self.emit_head(block, SsaInsn::Phi { dst: value, inputs: Vec::new() });
         if block == self.cfg.entry && self.entry_loop {
@@ -396,13 +397,13 @@ impl<'a> Builder<'a> {
                     // Writes to r10 are ignored by the VM; drop the def —
                     // except a bad-width `End`, which traps when reached
                     // (`InvalidEndWidth`). Dropping it would erase the
-                    // fault (fuzzer-caught: the fault became fall-off-end),
-                    // so it is kept with a dummy destination: it always
-                    // traps, hence nothing after it is observable and the
-                    // home never matters. Valid-width `End`s (and all
-                    // other ALU ops) are pure, so dropping them stays sound.
-                    // The decoder only ever produces `End` with an
-                    // immediate width, so the check is static.
+                    // fault, turning it into a fall-off-end, so it is kept
+                    // with a dummy destination: it always traps, hence
+                    // nothing after it is observable and the home never
+                    // matters. Valid-width `End`s (and all other ALU ops)
+                    // are pure, so dropping them stays sound. The decoder
+                    // only ever produces `End` with an immediate width, so
+                    // the check is static.
                     if dst.is_frame_ptr() && !is_bad_end(op, src) {
                         continue;
                     }
@@ -765,9 +766,9 @@ mod tests {
     fn r10_bad_end_preserved() {
         // `end r10, 0` traps when reached (`InvalidEndWidth`), so
         // construction keeps it despite the dropped `r10` destination
-        // (fuzzer-caught: dropping it turned the fault into
-        // fall-off-end). A valid-width `end r10, 32` stays dropped: it
-        // is a pure no-op since the VM ignores `r10` writes.
+        // (dropping it would turn the fault into fall-off-end). A
+        // valid-width `end r10, 32` stays dropped: it is a pure no-op
+        // since the VM ignores `r10` writes.
         let prog = build(&[w(0xd7, 10, 0, 0, 0), w(0x95, 0, 0, 0, 0)].concat());
         assert!(prog.insns.iter().any(|i| matches!(i, SsaInsn::BinOp { op: AluOp::End(_), .. })));
         assert_defs_total(&prog);

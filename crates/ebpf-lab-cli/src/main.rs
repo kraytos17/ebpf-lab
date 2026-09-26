@@ -1,7 +1,33 @@
-//! `ebpf-lab` — inspect, verify, execute, and optimize eBPF programs.
+//! `ebpf-lab` — inspect, disassemble, analyze, verify, execute, and optimize
+//! eBPF programs.
 //!
-//! Current surface: `inspect`, `disasm`, `cfg`, `verify`, `run`,
-//! and `xdp`. Later milestones add `trace`, `optimize`, and `map`.
+//! # Subcommands
+//!
+//! `inspect`, `disasm`, `cfg`, `verify`, `run`, `xdp`, and `optimize`.
+//!
+//! # Inputs
+//!
+//! Every command takes one program path: an ELF object (`.o`) or a flat
+//! `.bin` of raw instruction slots. The CLI auto-detects: it parses the path
+//! as ELF first, and falls back to raw bytes for a `.bin` file or when the
+//! object contains no program sections. A `.o` holding several programs is
+//! processed program by program (`optimize` accepts exactly one).
+//!
+//! # Exit codes
+//!
+//! Failures split into two classes:
+//!
+//! - **Fatal** — an [`anyhow::Error`] (unreadable file, malformed ELF, bad
+//!   `--maps` JSON, configure/output I/O) is returned from `main`, printed as
+//!   `error: …` on stderr, and exits non-zero.
+//! - **Non-fatal** — a verifier rejection, an interpreter error, or an
+//!   optimizer refusal is printed to **stdout** as `rejected: …` / `error: …`
+//!   and the process still exits **0**. These are expected outcomes of
+//!   running an untrusted program, not CLI failures, so scripts inspect the
+//!   output rather than the exit status.
+//!
+//! Program output (`exit:`, `xdp:`, traces, disassembly) goes to stdout;
+//! diagnostics and `-v` logs go to stderr, so piped output stays clean.
 
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
@@ -15,7 +41,8 @@ use tracing::info;
 #[derive(Debug, Parser)]
 #[command(name = "ebpf-lab", version, about)]
 struct Cli {
-    /// Increase log verbosity (`-v`, `-vv`).
+    /// Increase log verbosity: `-v` for info, `-vv` (or more) for debug.
+    /// Logs go to stderr.
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     verbose: u8,
     #[command(subcommand)]
@@ -25,7 +52,8 @@ struct Cli {
 /// Top-level subcommands.
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Show program header (type, instruction count) plus disassembly.
+    /// Show program header (type, instruction count, relocations) plus
+    /// disassembly.
     Inspect {
         /// Program input.
         #[command(flatten)]
@@ -47,11 +75,14 @@ enum Command {
         dot: bool,
     },
     /// Execute the program in the interpreter (`r0` is the exit code).
+    ///
+    /// On success prints `exit: <code>`; an interpreter error prints
+    /// `error: …` and still exits 0 (see the crate-level exit-code notes).
     Run {
         /// Program input.
         #[command(flatten)]
         input: ProgramInput,
-        /// Print each step (instruction plus changed registers).
+        /// Print each step: the instruction plus registers it changed.
         #[arg(long)]
         trace: bool,
         /// Path to a `--maps` JSON file (map descriptors with initial values).
@@ -59,6 +90,9 @@ enum Command {
         maps: Option<PathBuf>,
     },
     /// Verify the program statically (interval analysis, widening for loops).
+    ///
+    /// Accepts, or prints `rejected: …` and exits 0 (a rejection is a normal
+    /// verdict, not a CLI failure; see the crate-level exit-code notes).
     Verify {
         /// Program input.
         #[command(flatten)]
@@ -73,21 +107,24 @@ enum Command {
         #[arg(long)]
         maps: Option<PathBuf>,
         /// Path to a raw packet file (its length is the packet context).
-        /// Wins over `--packet-len` when both are given.
         #[arg(long)]
         packet: Option<PathBuf>,
-        /// Concrete packet length for bound checks.
+        /// Concrete packet length for bound checks. Ignored when `--packet`
+        /// is also given.
         #[arg(long)]
         packet_len: Option<usize>,
     },
     /// Run an XDP program against a packet (verify, then execute).
+    ///
+    /// Prints `xdp: <action> (<code>)` on success; a rejection or interpreter
+    /// error prints `rejected: …` / `error: …` and exits 0.
     Xdp {
         /// Program input.
         #[command(flatten)]
         input: ProgramInput,
         /// Path to a raw packet file.
         packet: PathBuf,
-        /// Print each step (instruction plus changed registers).
+        /// Print each step: the instruction plus registers it changed.
         #[arg(long)]
         trace: bool,
         /// Path to a `--maps` JSON file (map descriptors with initial values).
@@ -97,8 +134,11 @@ enum Command {
         #[arg(long, default_value_t = 16)]
         max_iterations: usize,
     },
-    /// Optimize a program (SSA constant folding, copy propagation, dead
-    /// code and unreachable block elimination) and write flat bytecode.
+    /// Optimize a program (SSA constant folding, copy propagation, dead-code
+    /// and unreachable-block elimination) and write flat bytecode.
+    ///
+    /// Accepts exactly one program. An analysis refusal prints `error: …` and
+    /// exits 0; only I/O failures are fatal.
     Optimize {
         /// Program input (single-program `.bin` or `.o`).
         #[command(flatten)]
@@ -131,8 +171,13 @@ fn load_maps(path: Option<&PathBuf>) -> anyhow::Result<Vec<ebpf_vm::MapDesc>> {
 
 /// Load programs from `path`, accepting either ELF `.o` or flat `.bin`.
 ///
-/// `.bin` is tried implicitly when ELF parsing yields "no programs" and the
-/// extension is `.bin`, or when ELF parsing fails outright on a `.bin` file.
+/// The object is parsed as ELF first. Raw bytes are used instead when:
+///
+/// - ELF parsing fails and the path has a `.bin` extension, or
+/// - ELF parsing succeeds but finds no program sections
+///   ([`ebpf_elf::ElfError::NoPrograms`]), regardless of extension.
+///
+/// Any other ELF failure is propagated.
 #[tracing::instrument]
 fn load_programs(path: &Path) -> anyhow::Result<Vec<ebpf_elf::ElfProgram>> {
     let is_bin = path.extension().is_some_and(|e| e == "bin");
@@ -169,6 +214,8 @@ fn load_decoded(path: &Path) -> anyhow::Result<Vec<DecodedProgram>> {
     load_programs(path)?.into_iter().map(DecodedProgram::decode).collect()
 }
 
+/// Print a header (name, type, instruction count, relocations) followed by
+/// the program's disassembly.
 fn cmd_inspect(path: &Path) -> anyhow::Result<()> {
     for prog in &load_decoded(path)? {
         println!("Program: {}", prog.meta.name);
@@ -181,6 +228,7 @@ fn cmd_inspect(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Print each program's disassembly, with no header.
 fn cmd_disasm(path: &Path) -> anyhow::Result<()> {
     for prog in &load_decoded(path)? {
         print!("{}", ebpf_disasm::disassemble(&prog.insns));
@@ -188,6 +236,10 @@ fn cmd_disasm(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Print the CFG as a block listing, or as Graphviz DOT when `dot` is set.
+///
+/// The listing renders each block with program-global slot numbers, so it
+/// lines up with the full-program disassembly.
 fn cmd_cfg(path: &Path, dot: bool) -> anyhow::Result<()> {
     for prog in &load_decoded(path)? {
         let insns = &prog.insns;
@@ -208,6 +260,11 @@ fn cmd_cfg(path: &Path, dot: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Verify every program, printing an accept line or `rejected: …`.
+///
+/// A `--packet` path supplies the context length by reading the file; it takes
+/// precedence over `--packet-len`. With `--trace`, the JSON abstract-state
+/// trace is printed instead of the summary line.
 fn cmd_verify(
     path: &Path,
     trace: bool,
@@ -261,6 +318,12 @@ fn cmd_verify(
 /// Default step budget for `run` (bounds infinite loops).
 const DEFAULT_MAX_STEPS: usize = 1_000_000;
 
+/// Execute every program in the interpreter, printing `exit: <code>` or
+/// `error: …`.
+///
+/// With `--trace`, steps are printed directly (instruction plus changed
+/// registers) instead of the final outcome. `maps` installs a map store when
+/// present.
 fn cmd_run(path: &Path, trace: bool, maps: Option<&PathBuf>) -> anyhow::Result<()> {
     use ebpf_vm::StepResult;
     let descs = load_maps(maps)?;
@@ -314,6 +377,13 @@ fn cmd_run(path: &Path, trace: bool, maps: Option<&PathBuf>) -> anyhow::Result<(
     Ok(())
 }
 
+/// Verify then execute an XDP program against a packet, printing
+/// `xdp: <action> (<code>)`.
+///
+/// The program is verified against the packet length first; a rejection
+/// prints `rejected: …` and skips execution. Verified programs stage the
+/// packet and step manually rather than calling `run`, so `--trace` can
+/// annotate packet loads with decoded header fields.
 fn cmd_xdp(
     path: &Path,
     packet_path: &Path,
@@ -398,9 +468,9 @@ fn cmd_xdp(
 /// Best-effort packet-load annotation for `xdp --trace`.
 ///
 /// Inspects the instruction at `pc`: when it is a load whose base register
-/// currently holds a packet-derived address, resolve the concrete offset
-/// and ask the header parsers for a suffix (`" ; ethertype=IPv4"`), else
-/// empty. Never fails — unknown shapes yield no annotation.
+/// currently holds a packet-derived address, resolve the concrete offset and
+/// ask [`ebpf_vm::annotate_packet_load`] for a suffix (`" ; ethertype=IPv4"`),
+/// else empty. Never fails — unknown shapes yield no annotation.
 fn packet_annotation(vm: &ebpf_vm::Vm, pc: usize, packet: &[u8]) -> String {
     use ebpf_isa::Insn;
     let Some(insn) = vm.insns().get(pc) else { return String::new() };
@@ -421,6 +491,11 @@ fn packet_annotation(vm: &ebpf_vm::Vm, pc: usize, packet: &[u8]) -> String {
         .map_or_else(String::new, |note| format!(" ; {note}"))
 }
 
+/// Optimize a single program and write the lowered flat bytecode to `output`.
+///
+/// Prints `optimized: <before> -> <after> instructions` on success. An
+/// analysis refusal prints `error: …` and returns `Ok` (exit 0); only I/O
+/// failures (unreadable input, unwritable output) are fatal.
 fn cmd_optimize(path: &Path, output: &Path) -> anyhow::Result<()> {
     let programs = load_decoded(path)?;
     let [prog] = programs.as_slice() else {
@@ -453,6 +528,10 @@ fn cmd_optimize(path: &Path, output: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Entry point: parse arguments, install the logger, dispatch the subcommand.
+///
+/// Verbosity maps to a `ebpf_lab` log filter: 0 → `warn`, 1 → `info`, 2+ →
+/// `debug`. Logs are written to stderr; program output stays on stdout.
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let filter = match cli.verbose {

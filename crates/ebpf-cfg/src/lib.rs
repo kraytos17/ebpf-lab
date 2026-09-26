@@ -1,24 +1,56 @@
 //! Control-flow graph construction over decoded eBPF instructions.
 //!
-//! [`build_cfg`] partitions a [`Insn`] slice into basic
-//! blocks and links them with typed edges in a [`petgraph`] directed graph.
+//! [`build_cfg`] partitions a decoded [`Insn`] slice into basic blocks and
+//! links them with typed edges in a [`petgraph`] directed graph.
 //!
-//! # A note on program counters
+//! # Guarantees
+//!
+//! For any non-empty instruction slice, [`build_cfg`] produces a graph in
+//! which:
+//!
+//! - Every instruction belongs to exactly one block: the block ranges are a
+//!   partition of `0..insns.len()`.
+//! - [`Cfg::entry`] is the block starting at decoded index 0.
+//! - Edges mirror control transfer exactly and carry an [`EdgeKind`]; a
+//!   conditional terminator emits both a [`EdgeKind::BranchTrue`] and a
+//!   [`EdgeKind::BranchFalse`] edge.
+//! - [`Cfg::rpo`] holds a reverse-postorder traversal computed once at
+//!   build time.
+//!
+//! # Program counters and slots
 //!
 //! eBPF jump offsets count 8-byte *slots*, but [`decode`](ebpf_isa::decode)
-//! collapses the 16-byte `ld_imm_dw` into a single [`Insn`].
-//! This crate therefore tracks both numberings with distinct types:
-//! [`Pc`] is a decoded-instruction index, [`Slot`] is an 8-byte slot number.
-//! Jumps resolve in slot space, then translate back. A jump landing out of
-//! bounds or in the middle of a wide instruction is a [`CfgError`],
-//! not a panic.
+//! collapses the 16-byte `ld_imm_dw` into a single [`Insn`]. This crate
+//! tracks both numberings with distinct types — [`Pc`] for a
+//! decoded-instruction index, [`Slot`] for an 8-byte slot number — and
+//! resolves every jump in slot space before translating back. A jump that
+//! lands outside the program, or on the second half of a wide instruction,
+//! is a [`CfgError`] rather than a panic.
 
 use ebpf_isa::insn::{Insn, JumpOp};
 use petgraph::graph::{DiGraph, NodeIndex};
 use thiserror::Error;
 
-/// Decoded-instruction index into the [`Insn`] slice (not a byte offset,
-/// not a slot number — see [`Slot`]).
+/// Index of a decoded instruction within an [`Insn`] slice.
+///
+/// This is neither a byte offset nor a [`Slot`] number. The two differ
+/// whenever a program contains a wide (`ld_imm_dw`) load, which occupies
+/// two slots but decodes to one instruction:
+///
+/// ```
+/// # use ebpf_cfg::{Pc, Slot};
+/// # use ebpf_isa::decode::decode_program;
+/// // ld_imm_dw r0, 0 (two slots); mov r0, 1 (one slot)
+/// let bytes = [
+///     0x18u8, 0, 0, 0, 1, 0, 0, 0, //
+///     0x00, 0, 0, 0, 2, 0, 0, 0, //
+///     0xb7, 0, 0, 0, 3, 0, 0, 0, //
+/// ];
+/// let insns = decode_program(&bytes).unwrap();
+/// let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+/// // The move is decoded instruction 1, but lives at slot 2.
+/// assert_eq!(cfg.slot_at(Pc(1)), Slot(2));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pc(pub usize);
 
@@ -28,9 +60,11 @@ impl std::fmt::Display for Pc {
     }
 }
 
-/// 8-byte slot number: the numbering eBPF jump offsets count in.
-/// A `ld_imm_dw` occupies two slots but decodes to one [`Insn`], so
-/// `Slot` and [`Pc`] diverge whenever a program contains a wide load.
+/// 8-byte slot number: the unit eBPF jump offsets count in.
+///
+/// A wide (`ld_imm_dw`) load occupies two slots while decoding to a single
+/// [`Insn`], so `Slot` and [`Pc`] diverge in any program containing one.
+/// See [`Pc`] for a worked example.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Slot(pub u32);
 
@@ -41,22 +75,28 @@ impl std::fmt::Display for Slot {
 }
 
 impl Slot {
-    /// Slot number as a `usize` (for display and slicing).
+    /// Widens the slot number to `usize` for indexing and display.
     ///
-    /// The single `u32 as usize` cast for slots; slot tables are bounded
-    /// by program length, so this always fits on 32-bit targets and up.
+    /// Slot tables are bounded by program length, so the widening is always
+    /// lossless.
     #[must_use]
     pub const fn as_usize(self) -> usize {
+        // The one `u32 as usize` cast for slots: exact by the bound above.
         self.0 as usize
     }
 }
 
-/// A single basic block: half-open range of decoded instruction indices.
+/// A basic block: a half-open range of decoded instruction indices.
+///
+/// The range is `start..end` with `start <= end`; an empty block has
+/// `start == end` and contains no instructions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BasicBlock {
     /// First decoded instruction index in the block.
     pub start: Pc,
     /// One past the last decoded instruction index.
+    ///
+    /// Always at least [`start`](Self::start).
     pub end: Pc,
 }
 
@@ -67,7 +107,7 @@ impl BasicBlock {
         self.end.0 - self.start.0
     }
 
-    /// Whether the block is empty.
+    /// Whether the block contains no instructions.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.start.0 >= self.end.0
@@ -75,6 +115,11 @@ impl BasicBlock {
 }
 
 /// How control reaches the successor block.
+///
+/// Edge kinds are not exclusive: a block ending in a conditional jump emits
+/// both a [`BranchTrue`](Self::BranchTrue) and a [`BranchFalse`](Self::BranchFalse)
+/// edge, and a block with no terminator emits a single
+/// [`Fallthrough`](Self::Fallthrough) edge to the next block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EdgeKind {
     /// Straight-line fallthrough (no branch).
@@ -89,37 +134,54 @@ pub enum EdgeKind {
 
 /// A control-flow graph over decoded instructions.
 ///
-/// The index maps are private: use [`Cfg::block_at`] and [`Cfg::slot_at`]
-/// with a [`Pc`] so decoded-index and slot-number confusion is a type
-/// error, not a wrong answer.
+/// The index maps are private: [`Cfg::block_at`] and [`Cfg::slot_at`] take a
+/// [`Pc`] so mixing decoded indices with slot numbers is a type error rather
+/// than a wrong answer.
 #[derive(Debug, Clone)]
 pub struct Cfg {
     /// Block graph; edge weights are [`EdgeKind`].
+    ///
+    /// Nodes are numbered in decoded-instruction order, so `graph[entry]` is
+    /// the block starting at decoded index 0.
     pub graph: DiGraph<BasicBlock, EdgeKind>,
     /// Entry block (always the block starting at decoded index 0).
     pub entry: NodeIndex,
-    /// Decoded index → containing block.
+    /// Decoded index → containing block. Indexed by [`Pc`].
     block_of_pc: Vec<NodeIndex>,
-    /// Decoded index → slot number.
+    /// Decoded index → slot number. Indexed by [`Pc`].
     slot_of: Vec<Slot>,
-    /// Reverse-postorder traversal of the CFG (blocks, not PCs).
+    /// Reverse-postorder traversal over the blocks (not the decoded
+    /// indices), computed once at build time. The entry block comes first.
     rpo: Vec<NodeIndex>,
 }
 
 impl Cfg {
-    /// Containing block for a decoded instruction index.
+    /// Containing block of a decoded instruction index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `pc` is not a valid index into the program the graph was
+    /// built from, i.e. `pc.0 >= insns.len()`.
     #[must_use]
     pub fn block_at(&self, pc: Pc) -> NodeIndex {
         self.block_of_pc[pc.0]
     }
 
-    /// Slot number for a decoded instruction index.
+    /// Slot number of a decoded instruction index.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `pc` is not a valid index into the program the graph was
+    /// built from, i.e. `pc.0 >= insns.len()`.
     #[must_use]
     pub fn slot_at(&self, pc: Pc) -> Slot {
         self.slot_of[pc.0]
     }
 
-    /// Reverse-postorder block indices (precomputed at CFG build time).
+    /// Reverse-postorder block indices, entry block first.
+    ///
+    /// Computed once at CFG build time for the verifier's worklist; the
+    /// order is fixed for a given graph.
     #[must_use]
     pub fn rpo(&self) -> &[NodeIndex] {
         &self.rpo
@@ -139,17 +201,20 @@ pub enum CfgError {
     /// Jump target is outside the program.
     #[error("jump at slot {pc} targets out-of-bounds slot {target}")]
     JumpOutOfBounds {
-        /// Slot PC of the jumping instruction.
+        /// Slot of the jumping instruction.
         pc: u32,
-        /// Target slot PC.
+        /// Target slot, signed because the computed target can be negative
+        /// before the bounds check rejects it.
         target: i64,
     },
-    /// Jump target lands in the middle of a wide (`ld_imm_dw`) instruction.
+    /// Jump target lands on the second half of a wide (`ld_imm_dw`)
+    /// instruction, which is not a valid branch destination.
     #[error("jump at slot {pc} targets middle of wide instruction at slot {target}")]
     JumpIntoWide {
-        /// Slot PC of the jumping instruction.
+        /// Slot of the jumping instruction.
         pc: u32,
-        /// Target slot PC.
+        /// Target slot, unsigned because it is known to lie inside the
+        /// program by the time this variant is built.
         target: u32,
     },
 }
@@ -162,8 +227,11 @@ const fn slot_width(insn: &Insn) -> u32 {
     }
 }
 
-/// Slot number of every decoded instruction, plus the reverse map
-/// (slot → decoded index; `usize::MAX` marks the second half of a wide load).
+/// Builds the slot number of each decoded instruction, plus the inverse
+/// `slot → decoded index` map.
+///
+/// The inverse map stores *one-based* decoded indices and reserves 0 for
+/// "unmapped", which is exactly the second slot of a wide load.
 fn slot_maps(insns: &[Insn]) -> (Vec<Slot>, Vec<usize>) {
     let mut slot_of = Vec::with_capacity(insns.len());
     let mut slot = Slot(0);
@@ -172,8 +240,6 @@ fn slot_maps(insns: &[Insn]) -> (Vec<Slot>, Vec<usize>) {
         slot.0 += slot_width(insn);
     }
 
-    // 0 = unmapped (was usize::MAX); decoded indices are 1-based so
-    // that the zero sentinel is distinguishable from any valid index.
     let mut decoded_of_slot = vec![0usize; slot.as_usize()];
     for (i, &s) in slot_of.iter().enumerate() {
         decoded_of_slot[s.as_usize()] = i + 1;
@@ -181,13 +247,16 @@ fn slot_maps(insns: &[Insn]) -> (Vec<Slot>, Vec<usize>) {
     (slot_of, decoded_of_slot)
 }
 
-/// Resolve a jump at decoded index `i` with relative `offset` to a decoded
-/// target index.
+/// Resolves the jump at decoded index `i` with relative `offset` to a
+/// decoded target index.
+///
+/// The target is computed in slot space and then mapped back through
+/// `decoded_of_slot`; a target of 0 is the second slot of a wide load.
 ///
 /// # Errors
 ///
-/// Returns [`CfgError::JumpOutOfBounds`] or [`CfgError::JumpIntoWide`] for
-/// invalid targets.
+/// Returns [`CfgError::JumpOutOfBounds`] for a target outside the program or
+/// [`CfgError::JumpIntoWide`] for one on a wide load's trailing slot.
 fn resolve_target(
     slot_of: &[Slot],
     decoded_of_slot: &[usize],
@@ -206,8 +275,6 @@ fn resolve_target(
         .and_then(|t| decoded_of_slot.get(t))
         .copied()
         .ok_or(CfgError::JumpOutOfBounds { pc, target })?;
-    // A slot that is the *second* half of a wide load maps to 0
-    // (see slot_maps); landing there is a malformed program.
     if decoded == 0 {
         let target_slot =
             u32::try_from(target_u).map_err(|_| CfgError::JumpOutOfBounds { pc, target })?;
@@ -216,13 +283,15 @@ fn resolve_target(
     Ok(Pc(decoded - 1))
 }
 
-/// Resolve every jump site once: `targets[i]` is `Some` exactly where
-/// `insns[i]` is a `Jump`, holding its decoded target.
+/// Resolves every jump site: `targets[i]` is `Some` exactly where `insns[i]`
+/// is a `Jump`, holding its decoded target.
 ///
-/// Both leader discovery and edge wiring used to re-resolve each jump
-/// independently; sharing one table means one resolution per jump site.
-/// Errors surface here, in instruction order (same order `find_leaders`
-/// reported them in).
+/// Sharing one table across leader discovery and edge wiring means each jump
+/// resolves once, and errors surface in instruction order.
+///
+/// # Errors
+///
+/// Propagates the first invalid jump target, in instruction order.
 fn jump_targets(
     insns: &[Insn],
     slot_of: &[Slot],
@@ -240,8 +309,12 @@ fn jump_targets(
         .collect()
 }
 
-/// Leader collection over a pre-resolved target table (total: the table
-/// already carries every resolution error, so this cannot fail).
+/// Collects basic-block entry points ("leaders") as decoded indices, sorted
+/// and deduplicated.
+///
+/// Leaders are index 0, every jump target, the fallthrough after every jump,
+/// and the instruction after every `exit`. `targets` must already hold every
+/// jump resolution, so this step cannot fail.
 fn collect_leaders(insns: &[Insn], targets: &[Option<Pc>]) -> Vec<Pc> {
     let mut leaders = Vec::with_capacity(insns.len().min(1024));
     leaders.push(Pc(0));
@@ -259,14 +332,15 @@ fn collect_leaders(insns: &[Insn], targets: &[Option<Pc>]) -> Vec<Pc> {
     leaders
 }
 
-/// Find basic-block entry points ("leaders") as decoded indices.
+/// Finds the basic-block entry points ("leaders") of a decoded program.
 ///
-/// Leaders are: index 0, every jump target, the fallthrough after every
-/// jump, and the instruction after every `exit`.
+/// Leaders are index 0, every jump target, the fallthrough after every jump,
+/// and the instruction after every `exit`.
 ///
 /// # Errors
 ///
-/// Propagates [`CfgError`] from invalid jump targets.
+/// Returns [`CfgError::EmptyProgram`] for empty input, or a target error for
+/// an out-of-bounds or mid-wide jump.
 pub fn find_leaders(insns: &[Insn]) -> Result<Vec<Pc>, CfgError> {
     if insns.is_empty() {
         return Err(CfgError::EmptyProgram);
@@ -277,14 +351,21 @@ pub fn find_leaders(insns: &[Insn]) -> Result<Vec<Pc>, CfgError> {
     Ok(collect_leaders(insns, &targets))
 }
 
-/// Build the control-flow graph for a decoded program.
+/// Builds the control-flow graph for a decoded program.
+///
+/// Blocks are the intervals between consecutive [`find_leaders`] results,
+/// and each block's terminator determines its outgoing edges: `ja` yields
+/// one [`EdgeKind::Unconditional`], a conditional jump yields
+/// [`EdgeKind::BranchTrue`] plus [`EdgeKind::BranchFalse`] when a fallthrough
+/// follows, `exit` yields none, and anything else falls through to the next
+/// block.
 ///
 /// # Errors
 ///
-/// Returns [`CfgError::EmptyProgram`] for empty input, or target errors for
-/// out-of-bounds / mid-wide jumps.
+/// Returns [`CfgError::EmptyProgram`] for empty input, or a target error for
+/// an out-of-bounds or mid-wide jump.
 ///
-/// # Example
+/// # Examples
 ///
 /// ```
 /// # use ebpf_cfg::build_cfg;
@@ -310,8 +391,8 @@ pub fn build_cfg(insns: &[Insn]) -> Result<Cfg, CfgError> {
     let targets = jump_targets(insns, &slot_of, &decoded_of_slot)?;
     let leaders = collect_leaders(insns, &targets);
 
-    // Block ranges computed once: each leader pairs with the next leader
-    // (or the program end), so no loop rescans the leader list.
+    // Each leader pairs with the next leader (or the program end) to form one
+    // block range; computing the ranges up front avoids rescanning the list.
     let end_of_program = Pc(insns.len());
     let ranges: Vec<(Pc, Pc)> = leaders
         .iter()
@@ -331,10 +412,10 @@ pub fn build_cfg(insns: &[Insn]) -> Result<Cfg, CfgError> {
     }
     for (idx, &(_, end)) in ranges.iter().enumerate() {
         let last = end.0 - 1;
-        // Targets come from the shared `jump_targets` table built above,
-        // so every `Jump` site resolved exactly once. The `else` arm names
-        // the validation site: the table was built from this same `insns`
-        // slice, so a `Jump` without an entry is unreachable.
+        // Targets come from the shared `jump_targets` table built above, so
+        // every `Jump` site resolved exactly once. The `unreachable!` names
+        // its validation site: the table was built from this same `insns`
+        // slice, so a `Jump` without an entry cannot occur.
         let target_at = |pc: usize| {
             let Some(target) = targets[pc] else {
                 unreachable!("jump target table built from identical insns slice");
@@ -363,7 +444,7 @@ pub fn build_cfg(insns: &[Insn]) -> Result<Cfg, CfgError> {
         }
     }
 
-    // Precompute reverse-postorder traversal for the verifier worklist.
+    // Precomputed once for the verifier's worklist.
     let mut rpo_nodes = Vec::new();
     {
         use petgraph::visit::DfsPostOrder;
@@ -379,18 +460,18 @@ pub fn build_cfg(insns: &[Insn]) -> Result<Cfg, CfgError> {
 
 /// Whether the graph contains a cycle (a loop).
 ///
-/// Since v0.6 the verifier accepts loops via threshold widening instead of
-/// rejecting them; this predicate remains for diagnostics and tests.
+/// This is a thin wrapper over [`petgraph::algo::is_cyclic_directed`],
+/// retained for diagnostics and tests.
 #[must_use]
 pub fn has_back_edge(cfg: &Cfg) -> bool {
     petgraph::algo::is_cyclic_directed(&cfg.graph)
 }
 
-/// Write one block's disassembly lines into DOT label text.
+/// Appends one block's disassembly to a DOT label.
 ///
-/// Gutter is block-local (from slot 0), matching `disassemble` numbering
-/// for a slice. Streaming per line avoids the intermediate `String` that
-/// `disassemble` + `replace` would allocate per block.
+/// The gutter restarts at slot 0 for every block, matching the numbering
+/// [`disassemble`](ebpf_disasm) uses for an isolated slice; lines are
+/// streamed to avoid an intermediate per-block `String`.
 fn write_block_body(s: &mut String, insns: &[Insn]) {
     use std::fmt::Write as _;
     let mut pc = 0u32;
@@ -400,10 +481,27 @@ fn write_block_body(s: &mut String, insns: &[Insn]) {
     }
 }
 
-/// Render the CFG in Graphviz DOT format.
+/// Renders the CFG in Graphviz DOT format.
 ///
-/// Each node shows its block number, slot range, and disassembly; edges are
-/// labeled on conditional branches.
+/// Each node is labeled with its block number, its slot range, and the
+/// block's disassembly; conditional edges carry a `true`/`false` label and
+/// unconditional jumps are labeled `jump`.
+///
+/// # Examples
+///
+/// ```
+/// # use ebpf_cfg::{build_cfg, to_dot};
+/// # use ebpf_isa::decode::decode_program;
+/// // mov r0, 1; exit
+/// let bytes = [0xb7u8, 0, 0, 0, 1, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0];
+/// let insns = decode_program(&bytes).unwrap();
+/// let cfg = build_cfg(&insns).unwrap();
+/// let dot = to_dot(&cfg, &insns);
+/// assert!(dot.starts_with("digraph cfg {"));
+/// // One block covering slots 0..2 (the range's upper bound is exclusive).
+/// assert!(dot.contains("block 0 [slots 0..2]"));
+/// assert!(dot.contains("mov r0, 1"));
+/// ```
 #[must_use]
 pub fn to_dot(cfg: &Cfg, insns: &[Insn]) -> String {
     use std::fmt::Write as _;
@@ -444,7 +542,7 @@ mod tests {
         decode_program(bytes).expect("fixture decodes")
     }
 
-    /// mov64 r0, 1; exit — single block, no edges.
+    /// A program with no jumps or exits past its end: one block, no edges.
     #[test]
     fn single_block() {
         let bytes = [
@@ -458,7 +556,8 @@ mod tests {
         assert!(!has_back_edge(&cfg));
     }
 
-    /// branch.bin shape: jeq splits into 3 blocks with true/false edges.
+    /// A conditional jump splits the program into three blocks and produces
+    /// one taken and one not-taken edge.
     #[test]
     fn conditional_splits_three_blocks() {
         // mov r1,10; mov r0,1; jeq r1,10,+1; mov r0,2; exit
@@ -483,8 +582,7 @@ mod tests {
         assert!(kinds.contains(&EdgeKind::BranchFalse));
     }
 
-    /// Back-edge is detected (loop); since v0.6 the verifier accepts
-    /// these via widening instead of rejecting them.
+    /// A backward jump makes the graph cyclic.
     #[test]
     fn detects_cycle() {
         // mov r0,0; add r0,1; jeq r0,10,+1; ja -3; exit
@@ -499,7 +597,7 @@ mod tests {
         assert!(has_back_edge(&cfg));
     }
 
-    /// Jump past the end is an error, not a panic.
+    /// A jump past the end is reported as an error, not a panic.
     #[test]
     fn rejects_oob_jump() {
         let bytes = [
@@ -510,7 +608,8 @@ mod tests {
         assert!(matches!(err, CfgError::JumpOutOfBounds { .. }));
     }
 
-    /// Wide load shifts slot numbering: jump over it lands correctly.
+    /// A wide load advances the slot numbering by two while consuming one
+    /// decoded index, so a jump over it lands on the right instruction.
     #[test]
     fn wide_load_slot_accounting() {
         let lo = 0x1122_3344u32.cast_signed().to_le_bytes();

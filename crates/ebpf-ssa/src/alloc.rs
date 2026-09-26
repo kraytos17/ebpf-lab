@@ -19,7 +19,8 @@
 //! counts as capacity (assignable only through the arg preference when
 //! `EntryCtx` is dead), so ten simultaneously-live versions refuse even
 //! though eleven slots exist in principle — conservative, never wrong.
-//! Exhaustion is [`SsaError::OutOfRegisters`] — spilling arrives in v1.x.
+//! Exhaustion is [`SsaError::OutOfRegisters`] (spilling is not
+//! implemented).
 //!
 //! Loop soundness: flat `[def, last-use]` ranges alone would understate
 //! loop-carried liveness — a loop-invariant value used in the body could
@@ -69,6 +70,9 @@ pub(crate) const POOL: [Reg; 9] =
 /// body definition that clobbers it on iteration two. The rule is
 /// layout-independent (any re-execution implies a cycle), so it also
 /// covers irreducible flow; straight-line code is unaffected.
+///
+/// Regression: the pinned inputs in `fuzz_crashers_agree` cover the
+/// cycle-pinning and start-inflow exemptions.
 pub(crate) fn live_ranges(prog: &SsaProgram) -> Vec<(usize, usize)> {
     let count = prog.def_sites.len();
     let mut ranges = vec![(usize::MAX, 0usize); count];
@@ -90,17 +94,17 @@ pub(crate) fn live_ranges(prog: &SsaProgram) -> Vec<(usize, usize)> {
         let pinned = block_of_pos.get(pos).is_some_and(|&b| b != usize::MAX && cyclic[b]);
         // A use at `pos` needs the value live THROUGH `pos`: with the
         // exclusive-end convention an interfering def at `pos` is only
-        // evicted by `end > pos`, so the end must be `pos + 1`. Using
-        // `pos` let a def at the same position share the reader's home
-        // (fuzzer-caught: `add r2, r2` clobbered its own rhs).
+        // evicted by `end > pos`, so the end must be `pos + 1`. Ending at
+        // `pos` would let a def at the same position share the reader's
+        // home and clobber it before the read.
         let new_end = if pinned || pos < *start { prog.len() } else { pos + 1 };
         *end = (*end).max(new_end);
     }
     // Start inflows are read once at program start, never around the
     // loop — except their DEFINITIONS re-execute: an entry-loop header
     // re-runs every iteration, re-materializing its constants over
-    // their homes. A shared home would clobber loop-carried values
-    // (fuzzer-caught: a rematerialized zero reset the counter each
+    // their homes. A shared home would clobber loop-carried values (a
+    // constant rematerialized at the header would reset a counter every
     // iteration), so materialized start values pin like cycle uses.
     // Vanishing pseudos (`FramePtr`/`EntryCtx`) never emit, so they
     // stay exempt — sharing their home is what elides the start move.
@@ -296,13 +300,14 @@ fn pinned_homes(prog: &SsaProgram, count: usize) -> Vec<(usize, Reg)> {
 /// when that home is reusable.
 ///
 /// A `BinOp` reads its own left operand at the definition's position, so
-/// sharing the operand's home is a read-before-write — no copy needed.
-/// The operand is live through that position (`end == start + 1` by the
-/// live-range rule) and no longer, so the general interference check
-/// would evict it; allow the home when the operand is the ONLY blocker
-/// (fuzzer-caught: the general rule spilled nine-const straight-line
-/// programs past the pool). `r10` results never reuse (writes there are
-/// ignored); call liveness is the caller's check, which owns `calls`.
+/// sharing the operand's home is a read-before-write — no copy needed. The
+/// operand is live through that position (`end == start + 1` by the
+/// live-range rule) and no longer, so the general interference check would
+/// evict it; this allows the home when the operand is the only blocker.
+/// Without it, straight-line programs at the pressure limit (for example
+/// nine live constants plus an accumulator) spill past the pool. `r10`
+/// results never reuse (writes there are ignored); call liveness is the
+/// caller's check, which owns `calls`.
 fn coalesce_binop_lhs(
     prog: &SsaProgram,
     homes: &[Option<Reg>],

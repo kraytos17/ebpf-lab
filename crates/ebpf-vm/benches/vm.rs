@@ -1,5 +1,8 @@
-//! Baseline: interpreter steps/sec on straight-line, looping, and XDP
-//! dispatch programs.
+//! Scaling check: interpreter throughput on straight-line, looping, and XDP
+//! dispatch programs, plus the memory model in isolation.
+//!
+//! Groups: `vm` (`straight_line`, `counter_loop`), `xdp`, and `memory`. Setup
+//! runs outside `iter_batched` so only the measured stage is timed.
 //!
 //! Run with `cargo bench -p ebpf-vm`.
 

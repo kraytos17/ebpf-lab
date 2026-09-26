@@ -1,4 +1,8 @@
 //! JSON trace serialization for the verifier output.
+//!
+//! The serialized shape is a pinned contract: `tests/trace_snapshot.rs`
+//! snapshots each trace field, so schema changes require regenerating and
+//! reviewing the snapshots.
 
 use serde::Serialize;
 
@@ -86,8 +90,7 @@ pub const fn format_reg(index: usize, reg: &RegType) -> RegSummary {
 pub fn format_stack(init: &[u64; 8]) -> Vec<StackSummary> {
     let mut out = Vec::new();
     // r10-relative start offset of slot 0. `STACK_BYTES_I32` is the
-    // compile-time signed twin, so this is a plain negation — no
-    // `try_from`/`unwrap_or` around a value known since v0.4.
+    // compile-time signed twin, so this is a plain negation.
     let base = -STACK_BYTES_I32;
     for (word_idx, &word) in init.iter().enumerate() {
         if word == u64::MAX {

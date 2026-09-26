@@ -71,9 +71,9 @@ fn constant_fold(prog: &mut SsaProgram) -> bool {
                 SsaInsn::BinOp { dst, width, op, lhs, rhs } => {
                     let value = match op {
                         // `Mov` ignores its lhs like the VM does, but the
-                        // width still applies (`mov32` zero-extends —
-                        // fuzzer-caught: folding kept the sign-extended
-                        // immediate and changed the exit code).
+                        // width still applies (`mov32` zero-extends, so
+                        // folding must not keep a sign-extended immediate
+                        // and change the exit code).
                         AluOp::Mov => {
                             crate::const_value(prog, *rhs).map(|r| op.apply(0, r, *width))
                         }
@@ -138,9 +138,8 @@ fn copy_propagate(prog: &mut SsaProgram) -> bool {
                 SsaInsn::Copy { dst, src } => rewrites.push((*dst, *src)),
                 // 64-bit `BinOp` moves with register sources are copies
                 // too (construction emits `Copy` for them, but hand-built
-                // or future SSA may carry the `BinOp` shape). 32-bit
-                // moves truncate and must never rewrite (fuzzer-caught:
-                // `mov32` forwarded the untruncated source).
+                // SSA may carry the `BinOp` shape). 32-bit moves truncate,
+                // so forwarding one would propagate the untruncated source.
                 SsaInsn::BinOp {
                     op: AluOp::Mov,
                     width: Width::B64,
@@ -515,8 +514,8 @@ mod tests {
     #[test]
     fn fold_mov32_zero_extends() {
         // `mov32 r0, -1` folds to `0xFFFF_FFFF`, not `-1`: the width
-        // applies even though `mov` ignores its lhs (fuzzer-caught
-        // exit-code divergence from a lost zero-extension).
+        // applies even though `mov` ignores its lhs, so a lost
+        // zero-extension would change the exit code.
         let mut prog = build(&[w(0xb4, 0, 0, 0, -1), w(0x95, 0, 0, 0, 0)]);
         optimize(&mut prog);
         let exit_r0 = prog.insns.iter().find_map(|i| match i {

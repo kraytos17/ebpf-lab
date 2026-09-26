@@ -1,20 +1,31 @@
 //! Concrete eBPF interpreter.
 //!
-//! [`Vm`] executes a decoded [`Insn`] stream with real
-//! register, program-counter, and stack state. Memory goes through
+//! [`Vm`] executes a decoded [`Insn`] stream with real register,
+//! program-counter, and stack state. Memory goes through
 //! [`memory::MemoryView`]; helper calls dispatch through
-//! [`HelperRegistry`] (map helpers plus time/prandom built in,
-//! everything else faults with [`VmError::UnknownHelper`)).
+//! [`HelperRegistry`] (map helpers plus time/prandom built in, everything
+//! else faults with [`VmError::UnknownHelper`]).
 //!
-//! Semantic notes (kernel-faithful where it matters):
+//! # Semantics
+//!
+//! Kernel-faithful where it matters:
 //!
 //! - 32-bit ALU results are zero-extended; shift amounts are masked.
 //! - Division or modulo by zero yields zero (no trap), like the kernel.
-//! - `r10` is the read-only frame pointer (`STACK_BASE`); the VM never
-//!   writes it.
 //! - Jumps were pre-resolved to absolute indices by [`exec::load`]; the
 //!   per-step fetch bounds-check subsumes target safety (the CFG crate owns
 //!   the slot-space translation for static analysis).
+//!
+//! # Documented divergences from the kernel
+//!
+//! Two behaviours are deliberately simplified; both are load-bearing for the
+//! equivalence oracles, so do not "fix" them without a matching verifier and
+//! SSA counterpart:
+//!
+//! - `r10` is the read-only frame pointer; a write to it is silently ignored
+//!   (the value stays [`STACK_BASE`]) rather than trapping.
+//! - Deleting from an array map zeroes the slot instead of returning the
+//!   kernel's `EINVAL` (see [`MapStore::delete`]).
 
 pub mod exec;
 pub mod maps;
@@ -38,8 +49,8 @@ pub const NUM_REGS: usize = 11;
 
 /// Execution failure.
 ///
-/// `#[non_exhaustive]` so future stages (packet/map faults, helper errors)
-/// can extend this without breaking downstream matches.
+/// `#[non_exhaustive]` so later stages can add variants without breaking
+/// downstream matches.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum VmError {
@@ -126,11 +137,10 @@ pub type HelperFn = fn(&mut Vm) -> StepResult;
 
 /// Registry of helper implementations, keyed by helper id.
 ///
-/// Ids `0..=3` (the kernel's built-in range) live in dense slots — a
-/// direct index, no hashing on the dispatch path — while higher ids use
-/// a small sorted slice with binary search. [`insert`](Self::insert)
-/// routes by id, so overriding a built-in id behaves exactly like the
-/// previous single-map registry.
+/// Ids `0..=3` (the kernel's built-in range) live in dense slots — a direct
+/// index, no hashing on the dispatch path — while higher ids use a small
+/// sorted slice with binary search. [`insert`](Self::insert) routes by id,
+/// so inserting an id in `0..=3` overrides that built-in.
 #[derive(Debug, Default)]
 pub struct HelperRegistry {
     /// Dense slots for ids `0..=3` (`None` = unknown helper).

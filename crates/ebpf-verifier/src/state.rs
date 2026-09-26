@@ -1,5 +1,6 @@
-//! Abstract state for the verifier: interval lattice, register types,
-//! stack slots, and the per-PC machine state propagated by the worklist.
+//! Abstract state for the verifier: the [`Range`] interval lattice,
+//! [`RegType`] register kinds, stack-slot initialization, and the
+//! [`VerifierState`] propagated by the worklist.
 
 use std::rc::Rc;
 use std::{array, fmt};
@@ -364,8 +365,8 @@ impl fmt::Display for RegType {
 
 /// A single 8-byte stack slot's abstract value.
 ///
-/// Initialization is tracked per byte in the [`VerifierState::stack_init`]
-/// bitset
+/// Initialization is tracked per byte in [`VerifierState::stack_init`],
+/// not per slot.
 pub type StackSlot = RegType;
 
 /// Number of 8-byte stack slots (512 / 8 = 64).

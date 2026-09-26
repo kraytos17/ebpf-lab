@@ -1,31 +1,33 @@
 //! Register-SSA for eBPF: construction, optimization, lowering.
 //!
 //! [`build_ssa`] converts a decoded [`ebpf_isa::Insn`] stream plus its
-//! [`ebpf_cfg::Cfg`] into [`SsaProgram`] (Braun et al. "Simple and
-//! Efficient Construction of SSA Form": RPO + sealing, no dominance
-//! frontiers). [`optimize`] runs the fixed-point passes (fold, copy-prop,
-//! DCE, unreachable elim). [`mod@lower`] allocates the 10 GP registers
-//! and emits plain [`ebpf_isa::Insn`] again.
+//! [`ebpf_cfg::Cfg`] into [`SsaProgram`] (Braun et al., "Simple and
+//! Efficient Construction of SSA Form": RPO ordering plus sealing, no
+//! dominance frontiers). [`optimize`] runs the fixed-point passes (constant
+//! folding, copy propagation, dead-code and unreachable-block elimination).
+//! [`lower()`] allocates the general-purpose registers and emits
+//! [`ebpf_isa::Insn`] again.
 //!
-//! Design notes:
+//! # Design
 //!
 //! - Registers only: memory (stack, packet, maps) is unversioned. Loads,
-//!   stores, and calls are never removed, so fault behavior is preserved
-//!   by construction — the equivalence oracle (`run` identical up to PC
-//!   renumbering) holds for every successfully lowered program, verified
-//!   or not.
-//! - Total entry environment: `r10` is a [`SsaInsn::FramePtr`] pseudo
-//!   (pinned to physical r10), `r1` an [`SsaInsn::EntryCtx`] pseudo
-//!   (pinned to physical r1, opaque under both run conventions), and
-//!   `r0,r2–r9` share one [`SsaInsn::Const`] `0` (exact: the VM zeroes
-//!   registers at entry; `run_xdp` sets only `r1`). Every use resolves,
-//!   so construction is total over all decodable programs.
-//! - Allocation pressure beyond the 9 free registers, unresolvable
-//!   parallel-copy cycles, and out-of-range lowered jumps are graceful
-//!   [`SsaError`]s — the optimizer never miscompiles, it sometimes
-//!   declines (full spilling/shuffling is v1.x work).
+//!   stores, and calls are never removed, so fault behavior is preserved by
+//!   construction — the equivalence oracle (the lowered program runs
+//!   identically, up to PC renumbering) holds for every successfully
+//!   lowered program, whether or not the verifier accepts it.
+//! - Total entry environment: `r10` is a [`SsaInsn::FramePtr`] pseudo (pinned
+//!   to physical `r10`), `r1` an [`SsaInsn::EntryCtx`] pseudo (pinned to
+//!   physical `r1`, opaque under both run conventions), and `r0,r2–r9` share
+//!   one [`SsaInsn::Const`] `0` (exact: the VM zeroes registers at entry and
+//!   `run_xdp` sets only `r1`). Every use resolves, so construction is total
+//!   over all decodable programs.
+//! - The optimizer never miscompiles; it sometimes declines. Allocation
+//!   pressure beyond the nine free registers, unresolvable parallel-copy
+//!   cycles, and out-of-range lowered jumps are graceful [`SsaError`]s
+//!   rather than wrong code (full spilling and shuffling are not
+//!   implemented).
 //!
-//! # Example
+//! # Examples
 //!
 //! ```
 //! # use ebpf_isa::decode::decode_program;
@@ -60,13 +62,16 @@ pub use opt::optimize;
 /// Sentinel predecessor for entry-loop start inflows.
 ///
 /// An entry block with a self-edge (a loop whose header is the program
-/// entry) has no forward CFG predecessor: the first iteration arrives
-/// from program start, which is not an edge. Phis minted for
-/// loop-carried registers in such a block carry their start value under
-/// this sentinel instead of a real block. It is never indexed into the
-/// graph — every phi-input consumer checks [`is_start_pred`] first
-/// (`NodeIndex::end()` cannot name a real block: graphs hold far fewer
-/// than `u32::MAX` nodes).
+/// entry) has no forward CFG predecessor: the first iteration arrives from
+/// program start, which is not an edge. Phis minted for loop-carried
+/// registers in such a block carry their start value under this sentinel
+/// instead of a real block. It is never indexed into the graph — every
+/// phi-input consumer checks [`is_start_pred`] first, and
+/// `NodeIndex::end()` cannot name a real block (graphs hold far fewer than
+/// `u32::MAX` nodes).
+///
+/// Regression: the pinned inputs in `fuzz_crashers_agree` exercise
+/// entry-loop start inflows.
 #[must_use]
 pub(crate) fn start_pred() -> NodeIndex {
     NodeIndex::end()
@@ -78,11 +83,11 @@ pub(crate) fn is_start_pred(node: NodeIndex) -> bool {
     node == NodeIndex::end()
 }
 
-/// Resolve an operand to a constant through `Const`/`LoadImm64` defs
+/// Resolves an operand to a constant through `Const`/`LoadImm64` defs
 /// (`Mov`-immediates resolve through their `Imm` directly).
 ///
-/// Shared by folding, bad-`End` rooting (`opt`), and faulting-`End`
-/// homing (`alloc`) so all three agree on which widths are proven.
+/// Shared by folding, bad-`End` rooting (`opt`), and faulting-`End` homing
+/// (`alloc`) so all three agree on which widths are proven.
 #[must_use]
 pub(crate) fn const_value(prog: &SsaProgram, operand: SsaOperand) -> Option<i64> {
     match operand {
@@ -454,8 +459,9 @@ impl SsaProgram {
 
 /// SSA construction/lowering failure.
 ///
-/// `#[non_exhaustive]` so later stages (spilling, loop opts) can extend
-/// this without breaking matches.
+/// `#[non_exhaustive]` so later stages can add variants without breaking
+/// matches. Every variant is a graceful decline: the pipeline reports the
+/// limit it hit instead of emitting wrong code.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum SsaError {
@@ -468,9 +474,9 @@ pub enum SsaError {
     /// Empty input (defensive: callers hit `CfgError::EmptyProgram` first).
     #[error("cannot build SSA over an empty program")]
     EmptyProgram,
-    /// Live pressure exceeds the allocatable registers (r0, r2–r9;
-    /// r1/r10 are pinned). Spilling arrives in v1.x.
-    #[error("register pressure exceeds the allocatable set (spilling is v1.x work)")]
+    /// Live pressure exceeds the allocatable registers (`r0`, `r2`–`r9`;
+    /// `r1`/`r10` are pinned or reserved).
+    #[error("register pressure exceeds the allocatable set (spilling is not implemented)")]
     OutOfRegisters,
     /// A block-entry parallel copy contains a permutation cycle the
     /// sequentializer cannot break without a temporary.
@@ -485,11 +491,11 @@ pub enum SsaError {
         /// Lowered index of the offending jump.
         pc: usize,
     },
-    /// A faulting load with a discarded (`r10`) destination: the load
-    /// must still execute (its fault is observable), but no register may
-    /// receive the result — writing `r10` is ignored and any other home
-    /// would clobber live state. Such programs run fine unoptimized;
-    /// they just cannot be lowered yet.
+    /// A faulting load with a discarded (`r10`) destination: the load must
+    /// still execute (its fault is observable), but no register may receive
+    /// the result — writing `r10` is ignored and any other home would
+    /// clobber live state. Such programs run fine unoptimized; they just
+    /// cannot be lowered.
     #[error("lowering cannot preserve a faulting load into r10")]
     R10FaultingLoad,
     /// Encoding failure.

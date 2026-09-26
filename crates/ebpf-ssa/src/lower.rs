@@ -41,15 +41,16 @@ use crate::{SsaError, SsaInsn, SsaOperand, SsaProgram, SsaValue};
 
 /// Lower an SSA program to decoded instructions.
 ///
-/// Runs allocation, layout, edge-splitting, emission, and slot
-/// resolution; the output decodes, verifies, and runs like the input
-/// (see the equivalence oracle).
+/// Runs allocation, layout, edge-splitting, emission, and slot resolution;
+/// the output decodes, verifies, and runs like the input (see the
+/// equivalence oracle).
 ///
 /// # Errors
 ///
 /// Returns [`SsaError::OutOfRegisters`], [`SsaError::PhiCycle`],
-/// [`SsaError::CallArgCycle`], or [`SsaError::JumpTooFar`] when the
-/// program exceeds the v0.10 lowering limits (never a miscompile).
+/// [`SsaError::CallArgCycle`], [`SsaError::JumpTooFar`], or
+/// [`SsaError::R10FaultingLoad`] when the program exceeds the current
+/// lowering limits (never a miscompile).
 pub fn lower(prog: &SsaProgram) -> Result<Vec<Insn>, SsaError> {
     let alloc = allocate(prog)?;
     let live = liveness(prog);
@@ -679,30 +680,25 @@ impl<'p> Lower<'p> {
     /// elided); a never-taken `Br{Call|Exit}` routes unconditionally
     /// along the false path.
     fn emit_control(&mut self, block: NodeIndex, pos: usize) -> Result<(), SsaError> {
-        // Output-aware fallthrough: the next layout block may emit no
-        // bytes (DCE'd tail), in which case control would run past it
-        // into trampolines or off the end instead of the intended
-        // target. Only a later block that really emits can be fallen
-        // into; anything else needs an explicit jump (fuzzer-caught:
-        // a loop-exit edge fell into backedge moves, looping forever).
-        // `None` means no emitting block follows — explicit jumps then,
-        // even for fall-off-end (trampolines may sit after all blocks).
+        // Output-aware fallthrough: the next layout block may emit no bytes
+        // (a DCE'd tail), in which case control would run past it into
+        // trampolines or off the end instead of the intended target. Only a
+        // later block that really emits can be fallen into; anything else
+        // needs an explicit jump. `None` means no emitting block follows —
+        // explicit jumps then, even for fall-off-end (trampolines may sit
+        // after all blocks).
         //
         // Layout adjacency is necessary but not sufficient: the next
-        // emitting block must also be a REAL live successor. A `Br`
-        // whose taken/untaken side is absent (`None` → `FallOff`) or a
-        // non-successor that merely happens to be the layout neighbour
-        // must never be elided into it (fuzzer-caught: a loop's
-        // fall-off exit fell through into the layout-neighbouring exit
-        // test, looping forever / jumping out of bounds). A `Br` side
-        // absent (`None` → `FallOff`) or a non-successor that merely
-        // happens to be the layout neighbour must never be elided into
-        // it: the next emitter must ALSO be a live successor. The
-        // fallthrough is the RAW layout block (its bytes are adjacent);
-        // a trampoline on the edge is emitted after every block, so it
-        // can never be fallen into — `resolve_edge` yields `Tramp`, which
-        // mismatches `Target::Block` and forces the explicit jump that
-        // routes phi moves correctly.
+        // emitting block must also be a REAL live successor. A `Br` whose
+        // taken/untaken side is absent (`None` → `FallOff`), or a
+        // non-successor that merely happens to be the layout neighbour,
+        // must never be elided into — otherwise a loop's fall-off exit
+        // falls through into the layout-neighbouring exit test and either
+        // loops forever or jumps out of bounds. The fallthrough is the RAW
+        // layout block (its bytes are adjacent); a trampoline on the edge
+        // is emitted after every block, so it can never be fallen into —
+        // `resolve_edge` yields `Tramp`, which mismatches `Target::Block`
+        // and forces the explicit jump that routes phi moves correctly.
         let fallthrough: Option<Target> = self
             .fallthrough_target(pos)
             .filter(|&next| live_successors(self.prog, block).contains(&next))
@@ -758,13 +754,11 @@ impl<'p> Lower<'p> {
                     self.emit_cond(*width, *op, *lhs, *rhs, taken)?;
                     return Ok(());
                 }
-                // Inverting is only valid when BOTH sides are real
-                // targets: with an absent side (`None` → `FallOff`) the
-                // inverted condition would route to "run past the end"
-                // (an out-of-bounds jump), not to the layout neighbour —
-                // fall-off is a distinct behavior from any real
-                // successor (fuzzer-caught: a loop's fall-off exit side
-                // was inverted into an OOB jump).
+                // Inverting is only valid when BOTH sides are real targets:
+                // with an absent side (`None` → `FallOff`) the inverted
+                // condition would route to "run past the end" (an
+                // out-of-bounds jump), not to the layout neighbour —
+                // fall-off is a distinct behavior from any real successor.
                 if Some(taken) == fallthrough
                     && !matches!(untaken, Target::FallOff)
                     && let Some(inv) = invert(*op)
@@ -806,16 +800,15 @@ impl<'p> Lower<'p> {
     /// Whether emitting `block` produces at least one instruction.
     ///
     /// Every live block emits its control op (a `Br`/`Ja`/`Exit`, or a
-    /// synthesized jump — possibly a fall-off jump) — so this is
-    /// `true` for any queried block, and the body below only documents
-    /// the data-op cases. Over-reporting never costs correctness: the
-    /// jump fixups already map an empty block's slot to the following
-    /// emitted byte, so a fallthrough into an empty block lands where
-    /// control really goes. Under-reporting (treating a block that does
-    /// emit as empty) is what made a neighbour elide into a slot it did
-    /// not control (fuzzer-caught twice: a DCE-emptied tail read as
-    /// non-emitting, and a successor-less tail that synthesized a
-    /// fall-off jump while reading as empty).
+    /// synthesized jump — possibly a fall-off jump) — so this is `true` for
+    /// any queried block, and the body below only documents the data-op
+    /// cases. Over-reporting never costs correctness: the jump fixups
+    /// already map an empty block's slot to the following emitted byte, so
+    /// a fallthrough into an empty block lands where control really goes.
+    /// Under-reporting is the danger: treating a block that does emit as
+    /// empty lets a neighbour elide into a slot it does not control — both
+    /// a DCE-emptied tail and a successor-less tail that synthesizes a
+    /// fall-off jump have caused this.
     fn block_emits(&self, block: NodeIndex) -> bool {
         // End-moves emit unless every one elides (same-home copy).
         if self.end_moves[block.index()]
@@ -962,16 +955,15 @@ impl<'p> Lower<'p> {
 
 /// Order a parallel-copy list: immediates/wides first (order-free),
 /// then register moves whose source is not a remaining destination
-/// (same-home copies elided); leftovers form a permutation cycle.
-/// Order parallel-copy moves for sequential emission.
+/// Orders parallel-copy moves for sequential emission.
 ///
 /// A move may go first exactly when no remaining move reads its
 /// destination: writing then cannot corrupt a later read, and writers
 /// of its own source all come later, so its already-done read stays
-/// intact. (The converse — source-stable first — miscompiles chains:
-/// fuzzer-caught, `[r3←r2, r2←r0]` emitted backwards read back the
-/// clobbered source.) Same-home copies drop (emission elides them
-/// anyway); a cycle with no such move refuses gracefully.
+/// intact. The converse (source-stable first) miscompiles chains — a
+/// pair like `[r3←r2, r2←r0]` emitted backwards reads back the clobbered
+/// source. Same-home copies drop (emission elides them anyway); a cycle
+/// with no such move refuses gracefully.
 fn order_moves(moves: Vec<PlacedMove>, cycle: SsaError) -> Result<Vec<PlacedMove>, SsaError> {
     let mut pending: Vec<PlacedMove> =
         moves.into_iter().filter(|m| !matches!(m.src, MoveSrc::Reg(src) if src == m.dst)).collect();

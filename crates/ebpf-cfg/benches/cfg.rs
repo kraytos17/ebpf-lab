@@ -1,4 +1,9 @@
-//! Baseline: `build_cfg` time vs program size (linearity check).
+//! Scaling check: `build_cfg` time against program size.
+//!
+//! Each group runs a repeating five-instruction branched motif followed by a
+//! run of moves and a final `exit`, so the CFG has a realistic mix of
+//! fallthrough, conditional, and exit blocks. Throughput is reported in
+//! instructions.
 //!
 //! Run with `cargo bench -p ebpf-cfg`.
 

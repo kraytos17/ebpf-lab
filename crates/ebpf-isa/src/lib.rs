@@ -1,10 +1,15 @@
-//! eBPF instruction set: decoding of the 8-byte wire format.
+//! eBPF instruction set: decoding and encoding of the 8-byte wire format.
 //!
 //! The main entry point is [`decode::decode_program`], which turns raw
 //! little-endian bytes into the [`insn::Insn`] stream shared by every later
-//! stage (disassembler, CFG, VM, verifier, SSA).
+//! stage (disassembler, CFG, VM, verifier, SSA). [`encode::encode_program`]
+//! is the inverse.
 //!
-//! # Example
+//! A wide immediate load (`ld_imm_dw`) occupies two 8-byte slots on the wire
+//! but decodes to a single [`insn::Insn::LoadImm64`], which is why jump
+//! offsets and instruction indices can diverge; see [`opcode::LD_IMM_DW`].
+//!
+//! # Examples
 //!
 //! ```
 //! # use ebpf_isa::decode::decode_program;

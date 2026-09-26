@@ -1,17 +1,17 @@
 # AGENTS.md — ebpf-lab
 
-An eBPF laboratory in Rust: decode → disassemble → CFG → VM → verify.
+An eBPF laboratory in Rust: decode → disassemble → CFG → VM → verify → optimize.
 Eight workspace crates, zero `unsafe`, interval-lattice verifier with
 threshold widening + typed/map/packet helpers, SSA optimizer with
-run-equivalence oracle, 285 tests, ~90% line coverage.
+run-equivalence oracle, 294 tests, ~90% line coverage.
 
 ## 1. Gates (run these, in this order)
 
 ```bash
 just verify          # fmt --check + clippy + nextest + doctests + doc; THE gate
 just verify-all      # verify + cargo deny check
-just bench-quick     # 4 smoke benches (decode, cfg, vm, verify), ~10s
-just fuzz-smoke      # 2×60s libFuzzer runs (needs nightly + cargo-fuzz)
+just bench-quick     # 5 smoke benches (decode, cfg, vm, verify, ssa), ~10s
+just fuzz-smoke      # 3×60s libFuzzer runs (needs nightly + cargo-fuzz)
 ```
 
 - `just verify` is `fmt + lint + test + doc`. `test` = `cargo nextest run
@@ -103,9 +103,16 @@ ebpf-ssa ← ebpf-lab-cli
 8. **Bench baselines live in `README.md`.** If a change moves a baseline by
    more than noise, update the table in the same commit and say why.
 9. **Version bumps touch workspace root only.** All crates inherit
-   `version.workspace`; bump `Cargo.toml` line ~21 plus the six path-dep
-   entries, refresh `Cargo.lock` (`cargo check --locked` must pass), date the
-   CHANGELOG section, add the release link. Never hand-edit per-crate versions.
+   `version.workspace`; bump the `[workspace.package] version` line plus the
+   seven `[workspace.dependencies]` path-dep entries (`ebpf-isa`, `-elf`,
+   `-disasm`, `-cfg`, `-vm`, `-verifier`, `-ssa`), refresh `Cargo.lock`
+   (`cargo check --locked` must pass), date the CHANGELOG section, add the
+   release link. Never hand-edit per-crate versions.
+10. **Comments are stdlib quality** (§4b): one-sentence first line, no
+    version tags or bug history, `# Errors`/`# Panics`/`# Examples`, and
+    intra-doc links that resolve inside the crate's dependency set. A
+    comment-only change still runs `just verify` (rustdoc denies broken
+    links and missing docs).
 
 ## 4. Code idioms (house style — follow these without being asked)
 
@@ -162,6 +169,55 @@ ebpf-ssa ← ebpf-lab-cli
   raw `BTreeMap<Vec<u8>, Vec<u8>>` and the hex↔bytes codec lives only in
   the `hex_map` serde module (via `from_hex`/`to_hex` — validates even
   length, rejects bad digits). Never hand-roll hex parsing elsewhere.
+
+## 4b. Comment and doc style (stdlib quality)
+
+Docs and comments are the deliverable, not an afterthought. Aim for the
+standard of the Rust standard library: a reader should be able to predict
+behaviour without reading the body.
+
+- **One-sentence first line, present tense, declarative.** It states the
+  contract, not the implementation. `/// Decodes a whole program from raw
+  bytes.` — not `/// Decode a whole program` and not `/// This function is
+  used to decode...`.
+- **No version tags in docs.** No `v0.7`, `v1.x`, "arrives in", "since
+  v0.6", "the previous implementation". Behavioural facts stay (`spilling
+  is not implemented`); roadmap and history live in `CHANGELOG.md` and the
+  commit log. An `#[error(...)]` string is user-visible output: never
+  embed a version tag in it, and treat a change to one as a UX change
+  (update the CLI tests in the same commit).
+- **State invariants, not bug history.** A guard that exists because of a
+  past bug documents the *invariant it protects* and the *failure mode it
+  prevents* in the present tense — never `(fuzzer-caught: <story>)`. Keep
+  one standing pointer at the end of the doc only where the guard is
+  genuinely easy to delete: `/// Regression: pinned by `fuzz_crashers_agree`.`
+- **`# Errors` on every fallible public item**, naming the exact variants
+  it can return. `# Panics` where a documented precondition can panic
+  (indexing by a caller-supplied `Pc`, `expect`, …). `# Safety` if
+  `unsafe` ever appears (it must not).
+- **`# Examples` (plural), runnable, asserting real behaviour.** Examples
+  are doctests and run under `just verify`; write the one a user would
+  copy, and assert on it so it cannot rot.
+- **Semantics before rationale.** Describe what an operation does / what an
+  invariant is, then why it holds. A casting or lint-justification note is
+  a `//` comment on the line it explains, not part of the public `///`.
+- **One canonical statement per rule.** If `apply` is the single source of
+  ALU semantics, the width halves link to it rather than re-stating the
+  casting argument three times.
+- **Private items earn one line too.** A one-line `///` naming the contract
+  and pre/post-condition, so the reader need not open the body.
+- **Mention the pinned contract where it lives:**
+  `tests/golden.rs` (CLI/disasm text), `trace_snapshot.rs` (JSON schema),
+  `tests/cli.rs` (subcommand output and exit codes), `fuzz_crashers_agree`
+  (optimizer regressions), and the size/ranged pins
+  (`insn_stays_compact`, `exec_stays_compact`, `stack_bytes_matches_slots`).
+- **Intra-doc links must resolve inside the crate's dependency set.**
+  `RUSTDOCFLAGS="-D warnings"` makes a broken link an error. Link a sibling
+  crate only if it is a real dependency (`ebpf-disasm` cannot link
+  `ebpf_cfg::Slot`; say the name in prose instead).
+- **`# Examples` and reference sections are checked by `just verify`:**
+  `cargo fmt --check` reflows to 100 columns, `cargo test --doc` runs the
+  examples, and `cargo doc` denies broken links and missing docs.
 
 ## 5. Memory and verifier models (do not redesign casually)
 
@@ -231,7 +287,7 @@ ebpf-ssa ← ebpf-lab-cli
 | Fixture accept/reject | `ebpf-verifier/tests/fixtures.rs`, `ebpf-vm/src/exec.rs` | exact `VerifyError`/`VmError` variants, pinned exit codes |
 | Differential oracle | `ebpf-verifier/tests/differential.rs` | fixtures + 256 random programs |
 | CLI e2e | `ebpf-lab-cli/tests/cli.rs` (38) | every subcommand/flag via `CARGO_BIN_EXE`, incl. `--maps` errors |
-| Fuzz | `fuzz/fuzz_targets/` (decode + verify_pipeline) | totality: errors, never panic/hang/OOM |
+| Fuzz | `fuzz/fuzz_targets/` (decode_program + verify_pipeline + ssa_pipeline) | totality: errors, never panic/hang/OOM; `ssa_pipeline` asserts run-equivalence |
 
 - Shared verifier-test helpers live in `crates/ebpf-verifier/tests/common/`
   (`fixtures.rs` for loaders, `maps.rs` for descriptors) — never copy-paste
@@ -272,10 +328,11 @@ in the same commit.
 → eyeball the `.snap.new` diff field-by-field → promote → commit the
 `.snap`. Never bulk-accept.
 
-**Release**: bump workspace `version` + six path-deps → `cargo check
---locked` (refreshes `Cargo.lock`) → CHANGELOG `[Unreleased]` →
-`## [X.Y.0] - YYYY-MM-DD` + release link → README milestones/badges/counts
-→ commit → tag `vX.Y.0`.
+**Release**: bump the workspace `version` and the seven path-dep entries →
+`cargo check --locked` (refreshes `Cargo.lock`) → CHANGELOG: move
+`[Unreleased]` content under `## [X.Y.0] - YYYY-MM-DD`, add the `[X.Y.0]:`
+link (see §9 for the full CHANGELOG contract) → README milestones/badges/
+counts → commit → tag `vX.Y.0`.
 
 ## 8. Gotcha catalog (learned the hard way)
 
@@ -316,9 +373,33 @@ in the same commit.
 - `README.md`: badges (tests/fixtures counts), subcommand table, crate map,
   memory-model table (incl. scratch rows), fixture highlights, bench
   baselines, milestones, contributing count.
-- `CHANGELOG.md`: Keep-a-Changelog, one `### Added` per release section
-  (the `[0.4.0]` split-section incident: never two `### Added` blocks).
+- `CHANGELOG.md`: Keep-a-Changelog. Per release section:
+  - A `## [X.Y.0] - YYYY-MM-DD` heading (date is the release day) **and**
+    a matching `[X.Y.0]:` link at the bottom, ascending, before the oldest.
+    A section without a link (or a link without a section) is a broken
+    anchor — the `[0.8.0]` omission.
+  - Headings, in this order, **omitting the empty ones**: `### Added`,
+    `### Changed`, `### Deprecated`, `### Removed`, `### Fixed`,
+    `### Performance` (a house heading for measured wins — not in the base
+    Keep-a-Changelog spec), `### Security`. `### Performance` always comes
+    after `### Fixed`.
+  - **At most one block per heading in a section** — never two `### Added`
+    (the `[0.4.0]` split-section incident) and never a heading out of
+    canonical order (a `### Fixed` before a `### Changed`). A blank line
+    does not start a new category; every bullet belongs under exactly one
+    heading.
+  - Bullets are complete sentences in the present tense, naming the item
+    (`crate:` prefix, then the type/function). `**BREAKING**` prefixes any
+    signature or behaviour break. No mid-sentence truncation, no version-of-
+    version references ("unused since v0.1" belongs in a `### Removed`
+    rationale, not in prose about another release).
+  - Put each fact under the heading for what it *is*: new API under
+    `Added`, an existing API that changed shape under `Changed`, a fix to
+    shipped behaviour under `Fixed`, a measured speedup under `Performance`,
+    a deletion under `Removed`.
 - `tests/fixtures/README.md`: table row per fixture (slots, program, exit,
   exercises), golden/snapshot coverage lists, `maps_example.json` note.
 - Crate `description` fields (e.g. ebpf-verifier no longer "DAG-only").
+- Doc comments follow §4b (stdlib quality): one-sentence first line, no
+  version tags, `# Errors`/`# Panics`/`# Examples` where applicable.
 - This file, when a new invariant or gotcha is learned.

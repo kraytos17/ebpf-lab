@@ -1,6 +1,6 @@
 [package]
 name = "ebpf-isa"
-description = "eBPF instruction encoding and decoding (RawInsn -> Insn)"
+description = "eBPF instruction set: wire decoding, encoding, and the decoded Insn model"
 keywords = ["ebpf", "bpf", "decoder"]
 version.workspace = true
 edition.workspace = true

@@ -1,7 +1,11 @@
-//! Golden-file tests: fixture `.bin` → disassembly snapshots.
+//! Golden-file tests: fixture `.bin` programs rendered to disassembly
+//! snapshots.
 //!
-//! Run `cargo insta review` to accept updated snapshots after intentional
-//! disassembler changes.
+//! Each test decodes a fixture and compares [`disassemble`] output against a
+//! committed snapshot. Run `cargo insta review` to accept updated snapshots
+//! after intentional disassembler changes.
+//!
+//! [`disassemble`]: ebpf_disasm::disassemble
 
 #![allow(clippy::unwrap_used)]
 

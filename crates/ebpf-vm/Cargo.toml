@@ -1,6 +1,6 @@
 [package]
 name = "ebpf-vm"
-description = "Concrete eBPF interpreter (registers, memory stub, helpers, tracing)"
+description = "eBPF interpreter: registers, stack/packet/map memory, helpers, and XDP"
 keywords = ["ebpf", "bpf", "vm", "interpreter"]
 version.workspace = true
 edition.workspace = true

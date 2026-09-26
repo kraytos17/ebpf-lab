@@ -1,6 +1,6 @@
 [package]
 name = "ebpf-disasm"
-description = "eBPF bytecode disassembler (Insn -> human-readable text)"
+description = "eBPF disassembler: decoded instructions to text with a slot-numbered gutter"
 keywords = ["ebpf", "bpf", "disassembler"]
 version.workspace = true
 edition.workspace = true

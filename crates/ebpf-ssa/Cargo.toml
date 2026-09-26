@@ -1,6 +1,6 @@
 [package]
 name = "ebpf-ssa"
-description = "eBPF SSA construction (Braun et al.) and optimization passes over registers"
+description = "eBPF SSA: Braun construction, optimization passes, and register allocation/lowering"
 keywords = ["ebpf", "bpf", "ssa", "optimizer"]
 version.workspace = true
 edition.workspace = true

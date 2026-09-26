@@ -1,10 +1,10 @@
-//! Academic-clean eBPF verifier: interval lattice, threshold widening,
-//! typed helpers.
+//! eBPF verifier: interval abstract interpretation with threshold widening.
 //!
 //! Walks every reachable instruction without executing it and proves (or
-//! refutes) memory safety. Bounded loops converge via threshold widening
-//! (see [`VerifyConfig`]); known helpers are typed via
-//! [`HelperSignature`], unknown helpers still reject.
+//! refutes) memory safety. Register values are tracked in the [`Range`]
+//! interval lattice; bounded loops converge via threshold widening (see
+//! [`VerifyConfig`]); known helpers are typed through [`HelperSignature`],
+//! and unknown helpers are rejected.
 //!
 //! # Quick start
 //!
@@ -39,7 +39,8 @@ pub use verify::{
 /// through [`verify_traced`], the per-PC trace entries (empty otherwise).
 #[derive(Debug)]
 pub struct VerifiedProgram {
-    /// Per-PC trace entries (in instruction order).
+    /// Per-PC trace entries (in instruction order). Empty for the
+    /// verdict-only entry points.
     pub trace: Vec<trace::TraceEntry>,
     /// Number of unique PCs visited.
     pub total_pc: usize,
@@ -47,8 +48,9 @@ pub struct VerifiedProgram {
 
 /// Verification failure.
 ///
-/// `#[non_exhaustive]` so future verifier stages (pointer bounds,
-/// resource tracking) can add variants without breaking matches.
+/// `#[non_exhaustive]` so later verifier stages can add variants without
+/// breaking matches. Each variant is a distinct, pinned diagnostic — the
+/// display strings are part of the CLI contract.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum VerifyError {

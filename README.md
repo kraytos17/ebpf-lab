@@ -4,16 +4,17 @@
 [![fuzz](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml/badge.svg)](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml)
 [![msrv](https://img.shields.io/badge/MSRV-1.98-blue)](https://github.com/kraytos17/ebpf-lab)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-285-blue)](https://github.com/kraytos17/ebpf-lab)
+[![tests](https://img.shields.io/badge/tests-294-blue)](https://github.com/kraytos17/ebpf-lab)
 [![fixtures](https://img.shields.io/badge/fixtures-34-orange)](tests/fixtures/)
 
 An eBPF laboratory in Rust: inspect, verify, execute, and optimize eBPF programs.
 
-Currently implements the **decode → disassemble → CFG → VM → verify** pipeline with basic memory model
-(uninitialized-stack detection, alignment enforcement, packet region), XDP packet simulator
-(`xdp` subcommand, `xdp_md` staging, `PacketPtr` bound checks), SSA optimizer
-(`optimize` subcommand, verified run-equivalence oracle), 34 hand-assembled fixtures,
-libFuzzer harnesses, and property-based tests.
+Implements the **decode → disassemble → CFG → VM → verify → optimize** pipeline:
+a memory model (uninitialized-stack detection, alignment enforcement, packet and
+map regions), an XDP packet simulator (`xdp` subcommand, `xdp_md` staging,
+`PacketPtr` bound checks), and an SSA optimizer (`optimize` subcommand, verified
+run-equivalence oracle). Backed by 34 hand-assembled fixtures, three libFuzzer
+harnesses, property-based tests, and golden/snapshot coverage.
 
 ## Quickstart
 
@@ -55,14 +56,14 @@ Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
                       │
                 Vec<Insn>           ← decoded once, reused everywhere
                       │
-          ┌───────────┼─────────────┬─────────────┐
-          ▼           ▼             ▼             ▼
-     ┌─────────┐ ┌─────────┐ ┌─────────────┐ ┌──────────────┐
-     │ebpf-cfg │ │ebpf-vm  │ │ebpf-verifier│ │future:       │
-     │build_cfg│ │step/run │ │Range lattice│ │XDP, SSA,     │
-     │to_dot   │ │memory   │ │worklist+join│ │opt           │
-     │Pc / Slot│ │maps     │ │JSON trace   │ │              │
-     └─────────┘ └─────────┘ └─────────────┘ └──────────────┘
+          ┌───────────┼─────────────┬──────────────┬──────────────┐
+          ▼           ▼             ▼              ▼              ▼
+     ┌─────────┐ ┌─────────┐ ┌─────────────┐ ┌────────────┐ ┌──────────────┐
+     │ebpf-cfg │ │ebpf-vm  │ │ebpf-verifier│ │ebpf-ssa    │ │ebpf-lab-cli  │
+     │build_cfg│ │step/run │ │Range lattice│ │build_ssa   │ │inspect disasm│
+     │to_dot   │ │memory   │ │worklist+join│ │optimize    │ │cfg verify run│
+     │Pc / Slot│ │maps,xdp │ │JSON trace   │ │lower       │ │xdp optimize  │
+     └─────────┘ └─────────┘ └─────────────┘ └────────────┘ └──────────────┘
 ```
 
 ### Crate map
@@ -78,7 +79,7 @@ Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
 | [`ebpf-ssa`](crates/ebpf-ssa) | Register SSA + optimizer (Braun construction, fold/copy/DCE, lowering) | `build_ssa`, `optimize`, `lower`, `SsaProgram`, `SsaError` |
 | [`ebpf-lab-cli`](crates/ebpf-lab-cli) | `ebpf-lab` binary | clap derive, tracing |
 
-## Memory model (v0.4)
+## Memory model
 
 The interpreter's `MemoryView` routes every load/store through a single chokepoint:
 
@@ -111,7 +112,7 @@ Highlights:
 | `mov_exit.bin` | Minimal decode → run |
 | `arith.bin` | ALU64 reg ops, sum = 30 |
 | `branch.bin` | Conditional jump taken edge, CFG 3 blocks |
-| `diamond.bin` | If/else merge (v0.6 join tests) |
+| `diamond.bin` | If/else merge (join-point tests) |
 | `loop.bin` | Bounded loop, converges via widening |
 | `loop_1000_iters.bin` | Long loop, widening fires after threshold |
 | `helper_prandom.bin` | Typed helper `bpf_get_prandom_u32` + stack roundtrip |
@@ -132,7 +133,7 @@ Highlights:
 | `opt_dead_code.bin` | Dead-def elimination (3 → 2 insns, exit 1) |
 | `opt_branch_preserved.bin` | Passes respect control flow (exit 25, shape preserved) |
 | `join_uninit.bin` | Merge-point rejection (fixed-point regression test) |
-| `misaligned.bin` | `Misaligned` rejection (v0.4 path) |
+| `misaligned.bin` | `Misaligned` rejection (unaligned access path) |
 | `illegal.bin` | Unknown opcode → `IllegalInstruction` |
 
 Fuzz seeds are staged from these via `fuzz/build.rs` (protobuf-style: refreshed only when
@@ -143,10 +144,10 @@ fixtures change, never committed in the corpus dir).
 ### Local
 
 ```bash
-just verify          # fmt + clippy + test + doc
+just verify          # fmt + clippy + nextest + doctests + doc
 just verify-all      # + cargo-deny
-just bench-quick     # smoke each bench (decode, cfg, vm)
-just fuzz-smoke      # 2×60s fuzzer runs (needs nightly + cargo-fuzz)
+just bench-quick     # smoke each bench (decode, cfg, vm, verify, ssa)
+just fuzz-smoke      # 3×60s fuzzer runs (needs nightly + cargo-fuzz)
 ```
 
 ### CI
@@ -156,13 +157,13 @@ just fuzz-smoke      # 2×60s fuzzer runs (needs nightly + cargo-fuzz)
 | `fmt` | `cargo fmt --check` |
 | `clippy` | `-D warnings`, pedantic + nursery |
 | `test` | nextest + explicit doctests |
-| `coverage` | llvm-cov lcov artifact (72% baseline) |
+| `coverage` | llvm-cov lcov artifact (~90% lines baseline) |
 | `bench` | compile-check + smoke per bench target |
 | `doc` | `RUSTDOCFLAGS="-D warnings"` |
 | `deny` | advisories, licenses, bans, sources |
 | `msrv-minimal` | `minimal-versions` resolve + check on 1.98 |
-| `fuzz build` | nightly ASan build on isa/cfg/disasm/verifier changes |
-| `fuzz run` | 300s timed runs, both targets (weekly / manual) |
+| `fuzz build` | nightly ASan build on isa/cfg/disasm/verifier/ssa changes |
+| `fuzz run` | 300s timed runs, all three targets (weekly / manual) |
 
 ```bash
 just verify   # equivalent of fmt + clippy + test + doc
@@ -170,13 +171,16 @@ just verify   # equivalent of fmt + clippy + test + doc
 
 ### Fuzzing
 
-- **Harnesses**: `fuzz/fuzz_targets/decode_program.rs` (arbitrary bytes in,
-  `DecodeError` out) and `fuzz/fuzz_targets/verify_pipeline.rs`
-  (decode → CFG → verify must never panic or hang; verdict only,
-  256-insn cap)
+- **Harnesses** (all under `fuzz/fuzz_targets/`):
+  - `decode_program.rs` — arbitrary bytes in, `DecodeError` out; never panics.
+  - `verify_pipeline.rs` — decode → CFG → verify must never panic or hang;
+    verdict only, 256-insn cap, packet context alternated by input parity.
+  - `ssa_pipeline.rs` — decode → CFG → build/optimize/lower → re-encode, then
+    asserts **run-equivalence** against the interpreter (exit codes exact,
+    faults equal modulo PC renumbering); stage refusals skip the input.
 - **Corpus**: staged from `tests/fixtures/` by `fuzz/build.rs` on fixture changes
-- **CI**: build on every PR touching isa/cfg/disasm/verifier; timed runs weekly
-- **60s smoke**: decode 22M execs + pipeline 3M runs, 0 crashes
+- **CI**: build on every PR touching isa/cfg/disasm/verifier/ssa; timed runs weekly
+- **60s smoke**: decode ~20M execs + verify ~2.5M runs + ssa ~580k runs, 0 crashes
 
 ## Benchmarks
 
@@ -241,7 +245,7 @@ No repr/layout changes without a profile attributing ≥ 20% to the candidate.
 
 1. `git clone` → `cargo build --workspace`
 2. Add fixtures to `tests/fixtures/` (see [the guide](tests/fixtures/README.md))
-3. Run `just verify` — all 285 tests + clippy + doc must be green
+3. Run `just verify` — all 294 tests + clippy + doc must be green
 4. Run `cargo insta review` after disassembler/CFG changes to accept new snapshots
 5. Run `just fuzz-smoke` before touching the decoder or verifier
 
