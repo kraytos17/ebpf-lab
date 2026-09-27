@@ -133,6 +133,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   loads −22.0 % (on top of the liveness change, −34.2 % instructions
   cumulatively from the prior release). Lowered bytecode stays
   byte-identical across every fixture.
+- `ebpf-ssa`: `optimize` builds a dense `ConstTable` (value id → known
+  constant) once and threads it through `constant_fold`, replacing the
+  per-query `const_value` double-indirection (`def_of` plus match) with
+  one indexed read. Only folding creates `Const` ops and ids are never
+  reassigned, so entries only go from `None` to `Some` and no per-round
+  rebuild is needed. Measured: instructions −2.4 %, branches −2.4 %
+  (L1-dcache loads +2.0 % from the table itself — L1-resident touches,
+  negligible in stall terms against 1.57 B saved instruction-cycles).
+  Folding results are identical across every fixture.
 
 ## [0.9.0] - 2026-09-25
 

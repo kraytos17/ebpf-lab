@@ -39,14 +39,75 @@ use crate::{SsaInsn, SsaOperand, SsaProgram, SsaValue};
 
 /// Run all passes to a fixed point.
 pub fn optimize(prog: &mut SsaProgram) {
+    // Dense constant table for folding (see `ConstTable`): built once,
+    // updated as folding fires. Other passes never create constants and
+    // never reuse value ids, so entries only go from `None` to `Some`
+    // and no per-round rebuild is needed.
+    let mut consts = ConstTable::build(prog);
     loop {
         let mut changed = false;
-        changed |= constant_fold(prog);
+        changed |= constant_fold(prog, &mut consts);
         changed |= copy_propagate(prog);
         changed |= dead_code_eliminate(prog);
         changed |= unreachable_block_eliminate(prog);
         if !changed {
             break;
+        }
+    }
+}
+
+/// Value id → known constant, for folding without re-walking defs.
+///
+/// `const_value` resolves an operand through `def_of` (two dependent
+/// loads plus a match per query); folding queries up to twice per
+/// `BinOp` per round. This table answers from one indexed read. Entries
+/// are keyed by value id, which no pass reassigns, and only
+/// `constant_fold` creates `Const` ops (always under an existing id),
+/// so the table is built once per `optimize` and updated at each fold.
+/// `LoadImm64` defs never change. Stale entries for DCE-removed defs are
+/// unreachable: a removed def's uses were rewritten or removed with it.
+struct ConstTable {
+    consts: Vec<Option<i64>>,
+}
+
+impl ConstTable {
+    fn build(prog: &SsaProgram) -> Self {
+        let mut consts: Vec<Option<i64>> = vec![None; prog.def_sites.len()];
+        for insn in &prog.insns {
+            match insn {
+                SsaInsn::Const { dst, value } => {
+                    if let Some(id) = dst.checked_index(consts.len()) {
+                        consts[id] = Some(*value);
+                    }
+                }
+                SsaInsn::LoadImm64 { dst, imm } => {
+                    if let Some(id) = dst.checked_index(consts.len()) {
+                        consts[id] = Some(*imm);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Self { consts }
+    }
+
+    /// Resolve an operand: immediates directly, versions through the table.
+    fn resolve(&self, operand: SsaOperand) -> Option<i64> {
+        match operand {
+            SsaOperand::Imm(k) => Some(i64::from(k)),
+            SsaOperand::Value(v) => {
+                let id = usize::try_from(v.0).ok()?;
+                self.consts.get(id).copied().flatten()
+            }
+        }
+    }
+
+    /// Record a freshly folded constant under its (existing) id.
+    fn record(&mut self, dst: SsaValue, value: i64) {
+        if let Some(id) = dst.checked_index(self.consts.len())
+            && let Some(slot) = self.consts.get_mut(id)
+        {
+            *slot = Some(value);
         }
     }
 }
@@ -59,7 +120,10 @@ pub fn optimize(prog: &mut SsaProgram) {
 /// an opaque `EntryCtx` lhs never blocks folding a constant move);
 /// `Neg` needs only its lhs; `End` needs both plus a valid width;
 /// everything else needs both sides.
-fn constant_fold(prog: &mut SsaProgram) -> bool {
+fn constant_fold(prog: &mut SsaProgram, consts: &mut ConstTable) -> bool {
+    // Resolved through the table (not `const_value`, which re-walks
+    // defs per query): each call borrows `consts` only for the lookup,
+    // so the `record` update below can borrow it mutably.
     let mut changed = false;
     for node in prog.graph.node_indices() {
         let bb = &prog.graph[node];
@@ -74,15 +138,10 @@ fn constant_fold(prog: &mut SsaProgram) -> bool {
                         // width still applies (`mov32` zero-extends, so
                         // folding must not keep a sign-extended immediate
                         // and change the exit code).
-                        AluOp::Mov => {
-                            crate::const_value(prog, *rhs).map(|r| op.apply(0, r, *width))
-                        }
-                        AluOp::Neg => {
-                            crate::const_value(prog, *lhs).map(|l| op.apply(l, 0, *width))
-                        }
+                        AluOp::Mov => consts.resolve(*rhs).map(|r| op.apply(0, r, *width)),
+                        AluOp::Neg => consts.resolve(*lhs).map(|l| op.apply(l, 0, *width)),
                         AluOp::End(_) => {
-                            let (Some(l), Some(r)) =
-                                (crate::const_value(prog, *lhs), crate::const_value(prog, *rhs))
+                            let (Some(l), Some(r)) = (consts.resolve(*lhs), consts.resolve(*rhs))
                             else {
                                 continue;
                             };
@@ -96,8 +155,7 @@ fn constant_fold(prog: &mut SsaProgram) -> bool {
                             Some(op.apply(l, r, *width))
                         }
                         _ => {
-                            let (Some(l), Some(r)) =
-                                (crate::const_value(prog, *lhs), crate::const_value(prog, *rhs))
+                            let (Some(l), Some(r)) = (consts.resolve(*lhs), consts.resolve(*rhs))
                             else {
                                 continue;
                             };
@@ -110,6 +168,9 @@ fn constant_fold(prog: &mut SsaProgram) -> bool {
             };
             if let Some((dst, value)) = folded {
                 prog.insns[idx] = SsaInsn::Const { dst, value };
+                // Keep the table in sync: the id already existed, so this
+                // only flips `None` to `Some` (see `ConstTable`).
+                consts.record(dst, value);
                 changed = true;
             }
         }
@@ -489,6 +550,13 @@ mod tests {
     use super::*;
     use ebpf_isa::decode::decode_program;
 
+    /// Run one folding round with a fresh table (tests only;
+    /// `optimize` threads a single table across rounds instead).
+    fn fold_once(prog: &mut SsaProgram) -> bool {
+        let mut consts = ConstTable::build(prog);
+        constant_fold(prog, &mut consts)
+    }
+
     const fn w(opcode: u8, dst: u8, src: u8, off: i16, imm: i32) -> [u8; 8] {
         ebpf_isa::RawInsn { opcode, regs: (src << 4) | dst, offset: off, imm }.to_bytes()
     }
@@ -521,11 +589,11 @@ mod tests {
             w(0xbf, 0, 3, 0, 0),
             w(0x95, 0, 0, 0, 0),
         ]);
-        assert!(constant_fold(&mut prog));
+        assert!(fold_once(&mut prog));
         assert!(has_const(&prog, 10));
         assert!(has_const(&prog, 20));
         assert!(copy_propagate(&mut prog));
-        assert!(constant_fold(&mut prog));
+        assert!(fold_once(&mut prog));
         assert!(has_const(&prog, 30));
     }
 
