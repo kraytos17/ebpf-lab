@@ -16,7 +16,9 @@
 //! - Phi moves execute at predecessor ends with nothing observable
 //!   between the move point and the phi point, so a move destination
 //!   cannot hold a value that is still needed — no temporaries, only
-//!   cycle detection ([`SsaError::PhiCycle`]).
+//!   cycle detection ([`SsaError::PhiCycle`]). Self-edges are the
+//!   exception: the move point precedes the block's own terminator, so
+//!   their moves ride edge trampolines instead (see `collect_phi_moves`).
 //! - Call-argument shuffles execute mid-block, so a shuffle destination
 //!   may hold a value that is still needed. Endangered destinations are
 //!   saved to a free home first and restored after the call: the shuffle
@@ -419,7 +421,17 @@ impl<'p> Lower<'p> {
 
                     let src = self.move_src(value)?;
                     let placed = PlacedMove { dst: dst_home, src };
-                    if self.is_critical(pred, block) {
+                    // A self-edge carrying moves is critical: its moves
+                    // must execute after the block's own terminator commits
+                    // to the edge, but predecessor-end moves run BEFORE the
+                    // branch reads its sources — clobbering any home the
+                    // terminator shares with the phi (copy-prop merges
+                    // branch inputs into phi homes, so this is not rare).
+                    // Route them through a trampoline; elided same-home
+                    // moves need no code and keep the old path.
+                    let self_edge =
+                        pred == block && !matches!(placed.src, MoveSrc::Reg(s) if s == placed.dst);
+                    if self_edge || self.is_critical(pred, block) {
                         let key = (pred.index(), block.index());
                         let idx =
                             if let Some(&(_, i)) = self.tramp_of.iter().find(|(k, _)| *k == key) {

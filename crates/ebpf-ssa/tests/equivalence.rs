@@ -335,6 +335,16 @@ fn crasher_cases() -> Vec<(&'static str, Vec<u8>)> {
         255, 10, 0, 0, 0, 157, 0, 252, 255, 255, 0, 0, 0, 165, 0, 252, 255, 255, 255, 255, 255, 23,
         0, 0, 35, 0, 64, 0, 4,
     ];
+    // A self-loop back-edge phi move at block end runs BEFORE the block's
+    // own branch reads its sources: with the branch input coalesced into
+    // the phi's home, the back-edge move reset the guard before `jlt`
+    // tested it — a fall-off-out-of-bounds exit became an infinite loop.
+    // Self-edges carrying moves now ride trampolines, so their moves run
+    // after the branch commits to the edge.
+    let self_edge_phi_clobber: Vec<u8> = vec![
+        183, 0, 0, 0, 0, 128, 0, 0, 191, 1, 0, 0, 0, 0, 0, 0, 175, 0, 0, 0, 1, 0, 0, 16, 165, 1,
+        253, 255, 232, 3, 0, 0,
+    ];
     vec![
         ("entry_loop", entry_loop),
         ("bad_end", bad_end),
@@ -352,6 +362,7 @@ fn crasher_cases() -> Vec<(&'static str, Vec<u8>)> {
         ("falloff_invert", falloff_invert),
         ("same_pos_clobber", same_pos_clobber),
         ("empty_tail_invert", empty_tail_invert),
+        ("self_edge_phi_clobber", self_edge_phi_clobber),
     ]
 }
 
