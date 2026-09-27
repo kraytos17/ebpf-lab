@@ -331,7 +331,7 @@ pick it up automatically → add accept/reject + exit-code pins.
 `with_map_helpers`) + verifier signature (`HelperSignature` impl +
 `static` + match arm in `verify.rs`) + fixture + accept test + differential
 entry + CLI smoke (`verify`/`run`). Pure helpers return tight ranges;
-effect-ful ones set `may_write_memory`.
+effectful ones set `may_write_memory`.
 
 **Add an error variant**: extend the `#[non_exhaustive]` enum + construct it
 at exactly one site + pin the exact variant in a fixture/inline test.

@@ -1,3 +1,11 @@
 [alias]
-lint = ["clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"]
+lint = [
+  "clippy",
+  "--workspace",
+  "--all-targets",
+  "--locked",
+  "--",
+  "-D",
+  "warnings",
+]
 bcheck = ["bench", "--workspace", "--no-run", "--locked"]

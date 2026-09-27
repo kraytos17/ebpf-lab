@@ -1,14 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/ebpf-isa",
-    "crates/ebpf-elf",
-    "crates/ebpf-disasm",
-    "crates/ebpf-cfg",
-    "crates/ebpf-vm",
-    "crates/ebpf-lab-cli",
-    "crates/ebpf-verifier",
-    "crates/ebpf-ssa",
+  "crates/ebpf-isa",
+  "crates/ebpf-elf",
+  "crates/ebpf-disasm",
+  "crates/ebpf-cfg",
+  "crates/ebpf-vm",
+  "crates/ebpf-lab-cli",
+  "crates/ebpf-verifier",
+  "crates/ebpf-ssa",
 ]
 exclude = ["fuzz"]
 
@@ -33,7 +33,10 @@ ebpf-vm = { version = "0.10.0", path = "crates/ebpf-vm" }
 ebpf-verifier = { version = "0.10.0", path = "crates/ebpf-verifier" }
 ebpf-ssa = { version = "0.10.0", path = "crates/ebpf-ssa" }
 
-object = { version = "0.40.0", default-features = false, features = ["read", "std"] }
+object = { version = "0.40.0", default-features = false, features = [
+  "read",
+  "std",
+] }
 petgraph = "0.8.3"
 criterion = "0.8.2"
 thiserror = "2.0.20"

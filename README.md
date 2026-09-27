@@ -87,13 +87,13 @@ The interpreter's `MemoryView` routes every load/store through a single chokepoi
 |---------|---------------|----------|
 | Stack OOB | `StackOverflow` | `[STACK_BASE - 512, STACK_BASE)` range |
 | Unwritten stack byte | `UninitializedRead` | `[u64; 8]` bitset, one bit per byte |
-| Misaligned access | `Misaligned` | Natural alignment enforced, togglable |
+| Misaligned access | `Misaligned` | Natural alignment enforced, toggleable |
 | Packet with no buffer | `NoPacket` | Read-only region at `PACKET_BASE` |
 | Packet OOB | `OutOfBounds` | Same variant for unknown regions |
 | XDP context (`xdp_md`) | `OutOfBounds` past 8 B | Read-only struct at `XDP_MD_BASE`: `data` (u32) @+0, `data_end` (u32) @+4, staged by `set_packet`; `r1` points here on XDP entry |
 | XDP context stores | `OutOfBounds` | Read-only, like packet |
 | Map scratch OOB | `OutOfBounds` | Readable scratch at `MAP_SCRATCH_BASE` (latest lookup value) |
-| Map scratch misaligned | `Misaligned` | Natural alignment enforced, togglable |
+| Map scratch misaligned | `Misaligned` | Natural alignment enforced, toggleable |
 
 Bounds are checked **before** alignment, so a straddling access reports the
 range fault — matching the kernel verifier's diagnostic priority.

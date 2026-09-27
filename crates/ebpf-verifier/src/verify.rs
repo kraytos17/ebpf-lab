@@ -757,7 +757,7 @@ fn alu_transfer(
     // via the generic path below): `mov` copies pointer-ness and
     // `add`/`sub` by a constant shift the offset. Without this,
     // `r2 = r10; r2 -= 8` degrades to `Scalar(Top)` and every later
-    // stack access through `r2` mis-reports `TypeMismatch`. Packet
+    // stack access through `r2` misreports `TypeMismatch`. Packet
     // pointers shift their range; context pointers copy on `mov` only
     // (no offset arithmetic is meaningful on `xdp_md` itself).
     if matches!(width, Width::B64) && ptr_alu_transfer(state, op, dst, src) {

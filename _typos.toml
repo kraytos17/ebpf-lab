@@ -1,0 +1,6 @@
+# Frozen release history keeps crate names (`flate2`) and hyphenated
+# compounds (`mis-decodes`) as written; live prose was fixed directly
+# instead (`toggleable`, `effectful`, `misreports`, `misreported`).
+[type.changelog]
+extend-glob = ["CHANGELOG.md"]
+extend-words = { flate = "flate", mis = "mis" }

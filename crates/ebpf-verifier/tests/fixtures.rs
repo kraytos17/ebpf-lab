@@ -349,7 +349,7 @@ fn rejects_map_value_negative_offset() {
 fn accepts_computed_stack_pointer() {
     // Pointer arithmetic preserves stack-pointer-ness: r2 = r10 - 8 is a
     // valid base for the store/load below. Before ptr tracking, r2
-    // degraded to Scalar(Top) and the store mis-reported TypeMismatch.
+    // degraded to Scalar(Top) and the store misreported TypeMismatch.
     let bytes = [
         0xb7u8, 0x00, 0, 0, 0, 0, 0, 0, // mov r0, 0 (exit code seed)
         0xbf, 0xa2, 0, 0, 0, 0, 0, 0, // mov r2, r10
