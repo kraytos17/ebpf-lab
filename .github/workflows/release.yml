@@ -1,0 +1,36 @@
+name: release
+# Tag-driven releases: `git tag vX.Y.0 && git push origin vX.Y.0` builds
+# the GitHub Release from the matching `## [X.Y.0]` CHANGELOG section.
+# The tag/version/section/link checks below fail the run instead of
+# publishing a malformed release (they mirror the AGENTS.md §9 contract).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: build release notes from CHANGELOG
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME:?}"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag '$tag' is not vX.Y.Z"; exit 1; }
+          version="${tag#v}"
+          grep -q "^version = \"$version\"$" Cargo.toml || { echo "Cargo.toml version skew vs tag"; exit 1; }
+          notes="$(sed -n "/^## \[$version\]/,/^## \[/p" CHANGELOG.md | sed '${/^## \[/d}')"
+          [ -n "$notes" ] || { echo "no '## [$version]' section in CHANGELOG.md"; exit 1; }
+          grep -q "^\[$version\]:" CHANGELOG.md || { echo "missing '[$version]:' link (AGENTS.md §9)"; exit 1; }
+          printf '%s\n' "$notes" > release-notes.md
+      # gh is preinstalled on runners: no third-party action needed.
+      - name: create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md
