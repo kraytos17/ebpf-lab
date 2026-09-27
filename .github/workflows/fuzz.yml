@@ -50,21 +50,21 @@ jobs:
       # this job only runs on schedule/dispatch, so PR inputs can never
       # poison the trusted cache.
       - name: restore decode_program corpus
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: fuzz/corpus/decode_program
           key: fuzz-corpus-decode_program-${{ github.run_id }}
           restore-keys: |
             fuzz-corpus-decode_program-
       - name: restore verify_pipeline corpus
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: fuzz/corpus/verify_pipeline
           key: fuzz-corpus-verify_pipeline-${{ github.run_id }}
           restore-keys: |
             fuzz-corpus-verify_pipeline-
       - name: restore ssa_pipeline corpus
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: fuzz/corpus/ssa_pipeline
           key: fuzz-corpus-ssa_pipeline-${{ github.run_id }}
@@ -75,19 +75,19 @@ jobs:
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ssa_pipeline -- -max_total_time=300
       - name: save decode_program corpus
         if: success()
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: fuzz/corpus/decode_program
           key: fuzz-corpus-decode_program-${{ github.run_id }}
       - name: save verify_pipeline corpus
         if: success()
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: fuzz/corpus/verify_pipeline
           key: fuzz-corpus-verify_pipeline-${{ github.run_id }}
       - name: save ssa_pipeline corpus
         if: success()
-        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: fuzz/corpus/ssa_pipeline
           key: fuzz-corpus-ssa_pipeline-${{ github.run_id }}
