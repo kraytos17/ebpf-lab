@@ -4,7 +4,7 @@
 [![fuzz](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml/badge.svg)](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml)
 [![msrv](https://img.shields.io/badge/MSRV-1.98-blue)](https://github.com/kraytos17/ebpf-lab)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-294-blue)](https://github.com/kraytos17/ebpf-lab)
+[![tests](https://img.shields.io/badge/tests-302-blue)](https://github.com/kraytos17/ebpf-lab)
 [![fixtures](https://img.shields.io/badge/fixtures-34-orange)](tests/fixtures/)
 
 An eBPF laboratory in Rust: inspect, verify, execute, and optimize eBPF programs.
@@ -246,17 +246,17 @@ for the SSA pipeline end to end.
 - [x] **v0.7** — Map simulator (HASH, ARRAY, LRU_ARRAY, `--maps` JSON, `MapPtr`)
 - [x] **v0.8** — Nullable, bounded map values (`MaybeMapPtr`, `value_size` bounds, `NullMapPtrAccess`/`MapValueOutOfBounds`)
 - [x] **v0.9** — Performance audit (RPO worklist, state shrink, CFG optimization, Display impls, idiomatic Rust)
-- **v0.10** — Packet/XDP simulator (Part A: `xdp` subcommand, `xdp_md` staging, `PacketPtr` verifier, 5 fixtures + 3 packets), SSA construction + optimization passes (Part B: `ebpf-ssa` crate, `optimize` subcommand, run-equivalence oracle, 4 fixtures)
+- [x] **v0.10** — Packet/XDP simulator (Part A: `xdp` subcommand, `xdp_md` staging, `PacketPtr` verifier, 5 fixtures + 3 packets), SSA construction + optimization passes (Part B: `ebpf-ssa` crate, `optimize` subcommand, run-equivalence oracle, 4 fixtures), SSA pipeline −34% instructions (liveness bundle, DCE early-out, `ConstTable`, `BlockMeta`)
 - **v1.0** — Real-world compatibility (BTF, relocs, bounded loops)
 
 ## Contributing
 
 1. `git clone` → `cargo build --workspace`
 2. Add fixtures to `tests/fixtures/` (see [the guide](tests/fixtures/README.md))
-3. Run `just verify` — all 294 tests + clippy + doc must be green
+3. Run `just verify` — all 302 tests + clippy + doc must be green
 4. Run `cargo insta review` after disassembler/CFG changes to accept new snapshots
 5. Run `just fuzz-smoke` before touching the decoder or verifier
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE-MIT).

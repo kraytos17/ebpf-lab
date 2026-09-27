@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [0.10.0] - 2026-09-27
 
 ### Added
 
@@ -68,6 +68,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `MapError::FdTooLarge { fd, max }`: file descriptors above `MAX_MAP_FD`
   (1024) are rejected before any table allocation, with unit,
   verifier-integration, and CLI error-path pins.
+- Profiling harness: `[profile.profiling]` (`debug` + `strip = false`, so
+  samply sees symbols), `examples/profile_{vm,verify,ssa}.rs` drivers
+  mirroring the bench shapes, and `just profile` / `profile-counters` /
+  `cache-profile` recipes. Layout changes now need a profile attributing
+  ≥ 20 % to the candidate (see the README bench note).
 
 ### Changed
 
@@ -142,6 +147,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   (L1-dcache loads +2.0 % from the table itself — L1-resident touches,
   negligible in stall terms against 1.57 B saved instruction-cycles).
   Folding results are identical across every fixture.
+- `ebpf-ssa`: `lower` caches per-block successors and terminator
+  positions in a shared `BlockMeta` instead of re-scanning each block
+  for its terminator and allocating a fresh successor `Vec` on every
+  query (four queries per program before). Measured on the
+  `profile_ssa` driver: instructions −1.3 %, branches −0.6 %,
+  L1-dcache loads −3.3 %. Lowered bytecode is byte-identical across
+  every fixture.
 
 ## [0.9.0] - 2026-09-25
 
@@ -590,3 +602,4 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 [0.7.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.7.0
 [0.8.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.8.0
 [0.9.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.9.0
+[0.10.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.10.0
