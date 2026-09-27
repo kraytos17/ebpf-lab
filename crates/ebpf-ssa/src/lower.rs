@@ -54,10 +54,87 @@ use crate::{SsaError, SsaInsn, SsaOperand, SsaProgram, SsaValue};
 pub fn lower(prog: &SsaProgram) -> Result<Vec<Insn>, SsaError> {
     let live = Liveness::compute(prog);
     let alloc = allocate(prog, &live)?;
-    let reachable = reachable(prog);
+    // Per-block successors and terminators are read from reachability,
+    // layout, and emission; compute them once so no caller re-scans a
+    // block for its terminator.
+    let meta = BlockMeta::compute(prog);
+    let reachable = meta.reachable(prog);
     let layout = layout(prog, &reachable);
-    let lower = Lower::new(prog, alloc, live, reachable, layout);
+    let lower = Lower::new(prog, alloc, live, reachable, layout, meta);
     lower.emit_all()
+}
+
+/// Per-block successors and terminator positions, computed once per
+/// `lower`.
+///
+/// A block's live successors and its terminator never change during
+/// lowering, but both were recomputed at each use: `live_successors`
+/// re-scanned the block for its terminator and allocated a fresh `Vec`,
+/// and emission called it twice per block. Caching makes each a lookup.
+struct BlockMeta {
+    /// Live successors per block index ([`live_successors`]'s result).
+    succs: Vec<Vec<NodeIndex>>,
+    /// Flat index of the block's terminator, if any.
+    term: Vec<Option<usize>>,
+}
+
+impl BlockMeta {
+    fn compute(prog: &SsaProgram) -> Self {
+        let blocks = prog.graph.node_count();
+        let mut succs = vec![Vec::new(); blocks];
+        let mut term = vec![None; blocks];
+        for node in prog.graph.node_indices() {
+            let bb = &prog.graph[node];
+            let terminator = prog.insns[bb.start..bb.end]
+                .iter()
+                .position(|insn| {
+                    matches!(insn, SsaInsn::Br { .. } | SsaInsn::Ja { .. } | SsaInsn::Exit { .. })
+                })
+                .map(|pos| bb.start + pos);
+            // The dead-taken rule needs the terminator's op: an untaken
+            // `Br` on `Call`/`Exit` makes its `BranchTrue` edge dead.
+            let dead_taken = terminator.is_some_and(|idx| {
+                matches!(prog.insns[idx], SsaInsn::Br { op, .. } if matches!(op, JumpOp::Call | JumpOp::Exit))
+            });
+
+            succs[node.index()] = prog
+                .graph
+                .edges(node)
+                .filter_map(|edge| {
+                    if dead_taken && *edge.weight() == EdgeKind::BranchTrue {
+                        None
+                    } else {
+                        Some(edge.target())
+                    }
+                })
+                .collect();
+            term[node.index()] = terminator;
+        }
+        Self { succs, term }
+    }
+
+    /// Live successors of `block`.
+    fn succs_of(&self, block: NodeIndex) -> &[NodeIndex] {
+        &self.succs[block.index()]
+    }
+
+    /// BFS reachability from the entry over the cached successors.
+    fn reachable(&self, prog: &SsaProgram) -> Vec<bool> {
+        let blocks = prog.graph.node_count();
+        let mut reachable = vec![false; blocks];
+        let mut stack = vec![prog.entry];
+
+        reachable[prog.entry.index()] = true;
+        while let Some(block) = stack.pop() {
+            for &succ in self.succs_of(block) {
+                if !reachable[succ.index()] {
+                    reachable[succ.index()] = true;
+                    stack.push(succ);
+                }
+            }
+        }
+        reachable
+    }
 }
 
 /// Block terminator (if any): the first control op in range (later ops
@@ -69,29 +146,11 @@ pub(crate) fn terminator(prog: &SsaProgram, block: NodeIndex) -> Option<&SsaInsn
         .find(|insn| matches!(insn, SsaInsn::Br { .. } | SsaInsn::Ja { .. } | SsaInsn::Exit { .. }))
 }
 
-/// BFS reachability from the entry over live successors.
-fn reachable(prog: &SsaProgram) -> Vec<bool> {
-    // Edges need kinds to apply the dead-taken rule precisely: rebuild
-    // the successor lists with edge weights here.
-    let blocks = prog.graph.node_count();
-    let mut reachable = vec![false; blocks];
-    let mut stack = vec![prog.entry];
-
-    reachable[prog.entry.index()] = true;
-    while let Some(block) = stack.pop() {
-        for succ in live_successors(prog, block) {
-            if !reachable[succ.index()] {
-                reachable[succ.index()] = true;
-                stack.push(succ);
-            }
-        }
-    }
-    reachable
-}
-
 /// Successors with the dead-taken rule applied: graph edges, except the
-/// taken edge of a never-taken `Br{Call|Exit}` (the VM evaluates those
-/// conditions to false, so the edge is dead).
+/// `BranchTrue` edge of an untaken `Br` on `Call`/`Exit`.
+///
+/// Prefer [`BlockMeta::succs_of`] on a lowering path: this re-scans the
+/// block for its terminator and allocates a fresh `Vec` per call.
 pub(crate) fn live_successors(prog: &SsaProgram, block: NodeIndex) -> Vec<NodeIndex> {
     let dead_taken = matches!(terminator(prog, block), Some(SsaInsn::Br { op, .. }) if matches!(op, JumpOp::Call | JumpOp::Exit));
     prog.graph
@@ -211,6 +270,9 @@ struct Lower<'p> {
     ranges: Vec<(usize, usize)>,
     live: Vec<bool>,
     layout: Vec<NodeIndex>,
+    /// Per-block successors and terminator positions, computed once in
+    /// [`lower`] and shared with reachability and layout.
+    meta: BlockMeta,
     /// Live successor/predecessor counts (critical-edge detection).
     succ_count: Vec<usize>,
     pred_count: Vec<usize>,
@@ -236,6 +298,7 @@ impl<'p> Lower<'p> {
         live: Liveness,
         reachable: Vec<bool>,
         layout: Vec<NodeIndex>,
+        meta: BlockMeta,
     ) -> Self {
         let blocks = prog.graph.node_count();
         let mut succ_count = vec![0usize; blocks];
@@ -244,7 +307,7 @@ impl<'p> Lower<'p> {
             if !reachable[node.index()] {
                 continue;
             }
-            for succ in live_successors(prog, node) {
+            for &succ in meta.succs_of(node) {
                 succ_count[node.index()] += 1;
                 pred_count[succ.index()] += 1;
             }
@@ -256,6 +319,7 @@ impl<'p> Lower<'p> {
             ranges: live.ranges,
             live: reachable,
             layout,
+            meta,
             succ_count,
             pred_count,
             end_moves: vec![Vec::new(); blocks],
@@ -701,20 +765,16 @@ impl<'p> Lower<'p> {
         // is emitted after every block, so it can never be fallen into —
         // `resolve_edge` yields `Tramp`, which mismatches `Target::Block`
         // and forces the explicit jump that routes phi moves correctly.
-        let fallthrough: Option<Target> = self
-            .fallthrough_target(pos)
-            .filter(|&next| live_successors(self.prog, block).contains(&next))
-            .map(Target::Block);
-        let bb = &self.prog.graph[block];
-        let term = self.prog.insns[bb.start..bb.end].iter().find(|insn| {
-            matches!(insn, SsaInsn::Br { .. } | SsaInsn::Ja { .. } | SsaInsn::Exit { .. })
-        });
+        let succs = self.meta.succs_of(block);
+        let fallthrough: Option<Target> =
+            self.fallthrough_target(pos).filter(|&next| succs.contains(&next)).map(Target::Block);
 
+        let term = self.meta.term[block.index()].map(|idx| &self.prog.insns[idx]);
         match term {
             None => {
                 // Fallthrough block: at most one live successor; route
                 // through its trampoline when one sits on the edge.
-                let mut succs = live_successors(self.prog, block).into_iter();
+                let mut succs = succs.iter().copied();
                 let target = self.resolve_edge(block, succs.next());
                 if Some(target) != fallthrough {
                     self.emit_jump(target);
