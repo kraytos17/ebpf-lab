@@ -21,14 +21,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: nightly
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
           tool: cargo-fuzz
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu
 
   run:
@@ -36,20 +36,64 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: nightly
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
         with:
           tool: cargo-fuzz
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # Compounding corpus: each green week seeds the next from its
+      # mutations (fixture seeds are staged over this by fuzz/build.rs).
+      # Unique save keys plus prefix fallback keep the cache evergreen;
+      # this job only runs on schedule/dispatch, so PR inputs can never
+      # poison the trusted cache.
+      - name: restore decode_program corpus
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: fuzz/corpus/decode_program
+          key: fuzz-corpus-decode_program-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-decode_program-
+      - name: restore verify_pipeline corpus
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: fuzz/corpus/verify_pipeline
+          key: fuzz-corpus-verify_pipeline-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-verify_pipeline-
+      - name: restore ssa_pipeline corpus
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: fuzz/corpus/ssa_pipeline
+          key: fuzz-corpus-ssa_pipeline-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-ssa_pipeline-
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu decode_program -- -max_total_time=300
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu verify_pipeline -- -max_total_time=300
       - run: cargo +nightly fuzz run --target x86_64-unknown-linux-gnu ssa_pipeline -- -max_total_time=300
+      - name: save decode_program corpus
+        if: success()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: fuzz/corpus/decode_program
+          key: fuzz-corpus-decode_program-${{ github.run_id }}
+      - name: save verify_pipeline corpus
+        if: success()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: fuzz/corpus/verify_pipeline
+          key: fuzz-corpus-verify_pipeline-${{ github.run_id }}
+      - name: save ssa_pipeline corpus
+        if: success()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: fuzz/corpus/ssa_pipeline
+          key: fuzz-corpus-ssa_pipeline-${{ github.run_id }}
       - name: upload crashers
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts/
