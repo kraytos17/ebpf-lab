@@ -302,6 +302,16 @@ behaviour without reading the body.
 - Coverage baseline ~90% lines (`cargo llvm-cov --workspace --all-targets`).
   Gaps are unreachable-by-construction arms (corrupt-pc, Always-in-JumpReg,
   mov-to-r10) — documented, not tested. Do not chase 100%.
+- **Profiling** uses the `examples/profile_*.rs` drivers, not the bench
+  binaries (criterion's harness dominates a sampling capture). Each driver
+  mirrors a bench shape: `profile_vm` ≈ `vm/straight_1000_adds` +
+  `loop_1000_iters`, `profile_verify` ≈ `verify/wide_500/verdict`,
+  `profile_ssa` ≈ `ssa/wide_250/{build,opt,lower}`. Run via `just
+  cache-profile <vm|verify|ssa>`; builds land in `target/profiling/`
+  (`[profile.profiling]` sets `strip = false` — mandatory, since `release`
+  strips and samply then sees no symbols). Evidence for the README
+  "no repr/layout changes without a profile attributing ≥ 20 %" gate is
+  samply attribution plus a quiet-machine `bench-release` delta.
 
 ## 7. Workflows
 
@@ -324,6 +334,11 @@ Never reuse a variant for a different failure mode.
 **Add a bench case**: synthetic constructor + `iter_batched` (setup outside
 `iter`) + `black_box` on inputs AND outputs + baseline row in `README.md`
 in the same commit.
+
+**Change a data layout**: profile first (`just cache-profile <target>`), and
+land only when the profile attributes ≥ 20 % to the candidate — then update
+the bench baseline in the same commit and add a `size_of` pin beside the
+type. The `examples/profile_*.rs` drivers are the attribution harness.
 
 **Change JSON trace output**: update code → `INSTA_UPDATE=new cargo test`
 → eyeball the `.snap.new` diff field-by-field → promote → commit the

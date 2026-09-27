@@ -62,6 +62,67 @@ bench-release:
     cargo bench -p ebpf-verifier --locked --bench verify -- --measurement-time 10 --warm-up-time 1 --sample-size 200
     cargo bench -p ebpf-ssa --locked --bench ssa -- --measurement-time 10 --warm-up-time 1 --sample-size 200
 
+# profile <vm|verify|ssa>
+#
+# Attribution capture with samply (sampling profiler → Firefox Profiler).
+# Layout changes need a profile before landing (README "Benchmarks"):
+# "No repr/layout changes without a profile attributing >= 20% to the
+# candidate". Requires `samply` and `kernel.perf_event_paranoid <= 1`:
+#   sudo pacman -S samply
+#   sudo sysctl kernel.perf_event_paranoid=1
+profile target="ssa":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{target}}" in
+        vm|ssa)      crate="ebpf-{{target}}" ;;
+        verify)      crate="ebpf-verifier" ;;
+        *) echo "unknown target '{{target}}' (vm|verify|ssa)" >&2; exit 1 ;;
+    esac
+    cargo build --profile profiling --example "profile_{{target}}" -p "$crate"
+    samply record "./target/profiling/examples/profile_{{target}}"
+
+# profile-counters <vm|verify|ssa>
+#
+# PMU counters (L1/LLC misses) for a literal cache claim; the tie-breaker
+# next to `profile`'s sampled attribution. Needs `perf`:
+#   sudo pacman -S perf   # linux-tools
+profile-counters target="ssa":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v perf >/dev/null 2>&1; then
+        echo "perf not found — install linux-tools (sudo pacman -S perf)" >&2
+        exit 1
+    fi
+    case "{{target}}" in
+        vm|ssa)      crate="ebpf-{{target}}" ;;
+        verify)      crate="ebpf-verifier" ;;
+        *) echo "unknown target '{{target}}' (vm|verify|ssa)" >&2; exit 1 ;;
+    esac
+    cargo build --profile profiling --example "profile_{{target}}" -p "$crate"
+    perf stat -e cache-references,cache-misses,L1-dcache-loads,L1-dcache-load-misses,instructions,branches \
+        "./target/profiling/examples/profile_{{target}}"
+
+# cache-profile <vm|verify|ssa>
+#
+# Always useful: PMU counters when `perf` is present, else samply, else the
+# install instructions. Never silently no-ops.
+cache-profile target="ssa":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v perf >/dev/null 2>&1; then
+        echo "== cache-profile: using perf counters =="
+        just profile-counters {{target}}
+    elif command -v samply >/dev/null 2>&1; then
+        echo "== cache-profile: perf absent, using samply =="
+        just profile {{target}}
+    else
+        echo "No profiler installed. Install one of:" >&2
+        echo "  sudo pacman -S perf     # PMU cache counters" >&2
+        echo "  sudo pacman -S samply   # sampling profiler" >&2
+        echo "Then: sudo sysctl kernel.perf_event_paranoid=1" >&2
+        exit 1
+    fi
+
 size:
     cargo build --release --locked
     @ls -la target/release/ebpf-lab
@@ -78,4 +139,5 @@ help:
     @echo "Quality: cov, cov-lcov, insta"
     @echo "Fuzz:    fuzz-smoke, fuzz-soak [target] [secs]"
     @echo "Bench:   bench-quick, bench-release"
+    @echo "Profile: profile <vm|verify|ssa>, profile-counters, cache-profile"
     @echo "Misc:    size, fixtures"
