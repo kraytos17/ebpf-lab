@@ -183,12 +183,12 @@ fn arb_stack_off() -> impl Strategy<Value = i16> {
 
 fn arb_raw() -> impl Strategy<Value = Raw> {
     prop_oneof![
-        4 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0xb7, dst, src: 0, off: 0, imm }),
+        6 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0xb7, dst, src: 0, off: 0, imm }),
         2 => (arb_reg(), arb_reg())
             .prop_map(|(dst, src)| Raw { op: 0xbf, dst, src, off: 0, imm: 0 }),
         2 => (arb_reg(), arb_reg())
             .prop_map(|(dst, src)| Raw { op: 0x0f, dst, src, off: 0, imm: 0 }),
-        2 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0x07, dst, src: 0, off: 0, imm }),
+        4 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0x07, dst, src: 0, off: 0, imm }),
         // Bitwise ALU (reg + imm): exercises the verifier's BitAnd/BitOr/
         // BitXor transfer paths, previously reachable only by hand-written
         // fixtures. Opcodes: ALU64 class, Or=0x4 / And=0x5 / Xor=0xa nibble.
@@ -199,12 +199,103 @@ fn arb_raw() -> impl Strategy<Value = Raw> {
         1 => (arb_reg(), arb_reg())
             .prop_map(|(dst, src)| Raw { op: 0xaf, dst, src, off: 0, imm: 0 }),
         1 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0x47, dst, src: 0, off: 0, imm }),
+        // Widened ALU (reg + imm): `Sub`/`Mul` go to `Top` on overflow,
+        // `Div`/`Mod` accept any divisor (the VM yields zero instead of
+        // trapping) — the verifier/VM divisor contract, previously
+        // fixture-only. Opcodes: ALU64 class, Sub=0x1 / Mul=0x2 /
+        // Div=0x3 / Mod=0x9 nibble.
+        1 => (arb_reg(), arb_reg())
+            .prop_map(|(dst, src)| Raw { op: 0x1f, dst, src, off: 0, imm: 0 }),
+        1 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0x17, dst, src: 0, off: 0, imm }),
+        1 => (arb_reg(), arb_reg())
+            .prop_map(|(dst, src)| Raw { op: 0x2f, dst, src, off: 0, imm: 0 }),
+        1 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0x27, dst, src: 0, off: 0, imm }),
+        1 => (arb_reg(), arb_reg())
+            .prop_map(|(dst, src)| Raw { op: 0x3f, dst, src, off: 0, imm: 0 }),
+        1 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0x37, dst, src: 0, off: 0, imm }),
+        1 => (arb_reg(), arb_reg())
+            .prop_map(|(dst, src)| Raw { op: 0x9f, dst, src, off: 0, imm: 0 }),
+        1 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0x97, dst, src: 0, off: 0, imm }),
+        // Unary and shifts: `Neg` ignores its rhs (reg shape is the
+        // meaningful one); `Lsh` is sound, `Rsh`/`sar` go conservatively
+        // `Top`. Opcodes: Neg=0x8 / Lsh=0x6 / Rsh=0x7 / Arsh=0xc nibble.
+        1 => (arb_reg(), arb_reg())
+            .prop_map(|(dst, src)| Raw { op: 0x8f, dst, src, off: 0, imm: 0 }),
+        1 => (arb_reg(), arb_reg())
+            .prop_map(|(dst, src)| Raw { op: 0x6f, dst, src, off: 0, imm: 0 }),
+        1 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0x67, dst, src: 0, off: 0, imm }),
+        1 => (arb_reg(), arb_reg())
+            .prop_map(|(dst, src)| Raw { op: 0x7f, dst, src, off: 0, imm: 0 }),
+        1 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0x77, dst, src: 0, off: 0, imm }),
+        1 => (arb_reg(), arb_reg())
+            .prop_map(|(dst, src)| Raw { op: 0xcf, dst, src, off: 0, imm: 0 }),
+        1 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0xc7, dst, src: 0, off: 0, imm }),
+        // ALU32 class + `BPF_END`: the `trunc32` path and the `End`
+        // width-validation path (valid widths only, so the arm verifies).
+        1 => (arb_reg(), arb_reg())
+            .prop_map(|(dst, src)| Raw { op: 0x0c, dst, src, off: 0, imm: 0 }),
+        1 => (arb_reg(), -16i32..16).prop_map(|(dst, imm)| Raw { op: 0x04, dst, src: 0, off: 0, imm }),
+        1 => (arb_reg(), Just(16i32)).prop_map(|(dst, imm)| Raw { op: 0xd4, dst, src: 0, off: 0, imm }),
+        1 => (arb_reg(), Just(64i32)).prop_map(|(dst, imm)| Raw { op: 0xd4, dst, src: 0, off: 0, imm }),
+        // Frame-pointer copy: plants live `StackPtr`s in the small reg
+        // universe, so later random ops flow through `ptr_alu_transfer`'s
+        // offset-shift and `Top`-degradation paths.
+        1 => (arb_reg(), Just(10u8))
+            .prop_map(|(dst, src)| Raw { op: 0xbf, dst, src, off: 0, imm: 0 }),
         1 => (arb_reg(), arb_mem_base(), arb_stack_off())
             .prop_map(|(dst, base, off)| Raw { op: 0x79, dst, src: base, off, imm: 0 }),
+        // Narrow loads/stores + immediate stores: width and alignment
+        // paths (`B`/`H` zero-extend; `ST` carries its value inline).
+        // DW forms already covered above; opcodes derived from the
+        // class/size bits in `opcode.rs` + `MemSize::from_opcode`.
+        1 => (arb_reg(), arb_mem_base(), arb_stack_off())
+            .prop_map(|(dst, base, off)| Raw { op: 0x71, dst, src: base, off, imm: 0 }),
+        1 => (arb_reg(), arb_mem_base(), arb_stack_off())
+            .prop_map(|(dst, base, off)| Raw { op: 0x69, dst, src: base, off, imm: 0 }),
+        1 => (arb_mem_base(), arb_reg(), arb_stack_off())
+            .prop_map(|(base, src, off)| Raw { op: 0x73, dst: base, src, off, imm: 0 }),
+        1 => (arb_mem_base(), arb_reg(), arb_stack_off())
+            .prop_map(|(base, src, off)| Raw { op: 0x6b, dst: base, src, off, imm: 0 }),
+        1 => (arb_mem_base(), arb_reg(), arb_stack_off())
+            .prop_map(|(base, src, off)| Raw { op: 0x63, dst: base, src, off, imm: 0 }),
+        1 => (arb_mem_base(), arb_stack_off())
+            .prop_map(|(base, off)| Raw { op: 0x62, dst: base, src: 0, off, imm: 42 }),
+        // Wide immediates: overflow-to-`Top` in `Range` arithmetic
+        // against wrapping VM arithmetic. The small-imm arms above never
+        // overflow, so this path is otherwise random-test-dark.
+        1 => (arb_reg(), Just(1i32 << 20)).prop_map(|(dst, imm)| Raw { op: 0x07, dst, src: 0, off: 0, imm }),
         1 => (arb_mem_base(), arb_reg(), arb_stack_off())
             .prop_map(|(base, src, off)| Raw { op: 0x7b, dst: base, src, off, imm: 0 }),
         1 => (arb_reg(), -4i32..5, -4i16..5)
             .prop_map(|(dst, imm, off)| Raw { op: 0x15, dst, src: 0, off, imm }),
+        // Jump conditions (imm + reg): each exercises a different
+        // `refine` arm (true/false narrowing, signed vs unsigned).
+        // `jset` is the taken-iff-nonzero path, uncovered until now.
+        1 => (arb_reg(), -4i32..5, -4i16..5)
+            .prop_map(|(dst, imm, off)| Raw { op: 0x55, dst, src: 0, off, imm }),
+        1 => (arb_reg(), arb_reg(), -4i16..5)
+            .prop_map(|(dst, src, off)| Raw { op: 0x5d, dst, src, off, imm: 0 }),
+        1 => (arb_reg(), -4i32..5, -4i16..5)
+            .prop_map(|(dst, imm, off)| Raw { op: 0xa5, dst, src: 0, off, imm }),
+        1 => (arb_reg(), arb_reg(), -4i16..5)
+            .prop_map(|(dst, src, off)| Raw { op: 0xad, dst, src, off, imm: 0 }),
+        1 => (arb_reg(), -4i32..5, -4i16..5)
+            .prop_map(|(dst, imm, off)| Raw { op: 0xb5, dst, src: 0, off, imm }),
+        1 => (arb_reg(), -4i32..5, -4i16..5)
+            .prop_map(|(dst, imm, off)| Raw { op: 0x25, dst, src: 0, off, imm }),
+        1 => (arb_reg(), -4i32..5, -4i16..5)
+            .prop_map(|(dst, imm, off)| Raw { op: 0x35, dst, src: 0, off, imm }),
+        1 => (arb_reg(), -4i32..5, -4i16..5)
+            .prop_map(|(dst, imm, off)| Raw { op: 0x45, dst, src: 0, off, imm }),
+        1 => (arb_reg(), arb_reg(), -4i16..5)
+            .prop_map(|(dst, src, off)| Raw { op: 0x4d, dst, src, off, imm: 0 }),
+        1 => (arb_reg(), -4i32..5, -4i16..5)
+            .prop_map(|(dst, imm, off)| Raw { op: 0x65, dst, src: 0, off, imm }),
+        1 => (arb_reg(), -4i32..5, -4i16..5)
+            .prop_map(|(dst, imm, off)| Raw { op: 0xc5, dst, src: 0, off, imm }),
+        // JMP32 class spot-check: the 32-bit comparison halves.
+        1 => (arb_reg(), -4i32..5, -4i16..5)
+            .prop_map(|(dst, imm, off)| Raw { op: 0x16, dst, src: 0, off, imm }),
         1 => (-4i16..5).prop_map(|off| Raw { op: 0x05, dst: 0, src: 0, off, imm: 0 }),
     ]
 }

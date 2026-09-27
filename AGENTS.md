@@ -273,9 +273,15 @@ behaviour without reading the body.
 - **Differential oracle** (`accept_implies_vm_safe`): anything the verifier
   accepts must run `MemError`-free. The random-program generator is weighted
   (ALU-heavy, small reg universe, aligned stack offsets, exit-terminated);
-  acceptance is intentionally thin (~16/256 reach the oracle) — fixtures
-  carry the core paths. Extending the generator? Keep the weights; add ops
-  at weight 1 with a comment naming the transfer path they cover.
+  acceptance is intentionally thin (~12/256 reach the oracle after the
+  2026-09 widening added div/mod/shifts/`BPF_END`/ALU32/`mov r10`, nine
+  jump conditions, narrow widths, and wide immediates — fixtures carry the
+  core paths, the generator covers the transfer-function surface).
+  Extending the generator? Keep the weights; add ops at weight 1 with a
+  comment naming the transfer path they cover. New arms must be derived
+  from `decode.rs`/`classify` and verified through a `disasm` round-trip
+  (never copy hex from memory); acceptance must not drop below ~10/256
+  (rebalance `mov`/`add` weights first, cut arms last).
 
 ## 6. Testing strategy (what lives where)
 
