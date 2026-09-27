@@ -70,20 +70,44 @@ jobs:
           path: lcov.info
 
   bench:
+    # Smoke-plus-detection: benches must build and run, and no suite may
+    # regress beyond +30% vs the cached baseline.
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.98"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo install critcmp --locked --version 0.1.8
+      - name: restore bench baseline
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: bench-base.json
+          key: bench-base-${{ github.run_id }}
+          restore-keys: |
+            bench-base-
       - run: cargo bench --workspace --locked --no-run
-      - run: cargo bench -p ebpf-isa --locked --bench decode -- --measurement-time 1 --warm-up-time 0.1 --sample-size 10
-      - run: cargo bench -p ebpf-cfg --locked --bench cfg -- --measurement-time 1 --warm-up-time 0.1 --sample-size 10
-      - run: cargo bench -p ebpf-vm --locked --bench vm -- --measurement-time 1 --warm-up-time 0.1 --sample-size 10
-      - run: cargo bench -p ebpf-verifier --locked --bench verify -- --measurement-time 1 --warm-up-time 0.1 --sample-size 10
-      - run: cargo bench -p ebpf-ssa --locked --bench ssa -- --measurement-time 1 --warm-up-time 0.1 --sample-size 10
+      - run: cargo bench -p ebpf-isa --locked --bench decode -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
+      - run: cargo bench -p ebpf-cfg --locked --bench cfg -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
+      - run: cargo bench -p ebpf-vm --locked --bench vm -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
+      - run: cargo bench -p ebpf-verifier --locked --bench verify -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
+      - run: cargo bench -p ebpf-ssa --locked --bench ssa -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
+      - name: compare against baseline
+        run: |
+          critcmp --export ci > bench-new.json
+          if [ -f bench-base.json ]; then critcmp bench-base.json bench-new.json; fi
+          python3 .github/scripts/bench_gate.py bench-base.json bench-new.json --threshold 1.30
+      - name: promote baseline
+        if: success()
+        run: cp bench-new.json bench-base.json
+      - name: save bench baseline
+        if: success()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: bench-base.json
+          key: bench-base-${{ github.run_id }}
 
   doc:
     runs-on: ubuntu-latest
@@ -167,6 +191,6 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5
         with:
           fail-on-severity: high
