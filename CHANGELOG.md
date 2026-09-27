@@ -107,6 +107,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   bounds check, single copy) with a byte-wise fallback so diagnostics name
   the exact faulting byte; `read_guest_bytes` delegates to it.
 
+### Performance
+
+- `ebpf-ssa`: liveness facts are computed once per `lower` in a shared
+  `Liveness` bundle (`uses`, `starts`, `ranges`, `calls`) instead of being
+  rebuilt inside `allocate`, `live_ranges`, and `Lower::new`.
+  `SsaProgram::reg_uses` and `start_uses` ran three times per `lower` and
+  `live_ranges` twice, each over every live block; the pipeline now runs
+  each exactly once. Measured on the `profile_ssa` driver: instructions
+  −12.8 %, branches −11.5 %, L1-dcache loads −11.2 %. Lowered bytecode is
+  byte-identical across every fixture, and the equivalence oracle and
+  `fuzz_crashers_agree` are unchanged.
+- `ebpf-ssa`: `alloc::allocate` fuses four whole-array walks over
+  `prog.insns` (faulting-`Load` destinations, bad-width `End` results,
+  call-argument preferences, pinned pseudos) into a single streaming pass,
+  and the standalone `pinned_homes` helper is removed.
+
 ## [0.9.0] - 2026-09-25
 
 ### Added

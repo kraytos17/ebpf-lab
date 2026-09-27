@@ -383,6 +383,11 @@ counts → commit → tag `vX.Y.0`.
 - `build_stores([])` returns an empty table (not an error); fd 0 is always
   `None`/invalid; duplicate fds are `DuplicateFd`; fds above `MAX_MAP_FD`
   (1024) are `FdTooLarge` (fail fast, never allocate).
+- Attribution finds wins that layout arithmetic misses: `perf record` on the
+  SSA driver showed `reg_uses`/`live_ranges` were recomputed 3×/2× per
+  `lower` over an immutable program (now one `Liveness` bundle, −12.8 %
+  instructions). Struct-size reasoning alone would never have surfaced it.
+  Profile first (`just cache-profile <target>`), then reason.
 
 ## 9. Docs that must stay in sync (checklist for every change)
 

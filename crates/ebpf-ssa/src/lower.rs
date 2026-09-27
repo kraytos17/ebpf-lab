@@ -36,7 +36,7 @@ use ebpf_isa::insn::{AluOp, Insn, JumpOp, Operand, Reg, Width};
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 
-use crate::alloc::{Allocation, POOL, allocate, live_ranges};
+use crate::alloc::{Allocation, Liveness, POOL, allocate};
 use crate::{SsaError, SsaInsn, SsaOperand, SsaProgram, SsaValue};
 
 /// Lower an SSA program to decoded instructions.
@@ -52,10 +52,11 @@ use crate::{SsaError, SsaInsn, SsaOperand, SsaProgram, SsaValue};
 /// [`SsaError::R10FaultingLoad`] when the program exceeds the current
 /// lowering limits (never a miscompile).
 pub fn lower(prog: &SsaProgram) -> Result<Vec<Insn>, SsaError> {
-    let alloc = allocate(prog)?;
-    let live = liveness(prog);
-    let layout = layout(prog, &live);
-    let lower = Lower::new(prog, alloc, live, layout);
+    let live = Liveness::compute(prog);
+    let alloc = allocate(prog, &live)?;
+    let reachable = reachable(prog);
+    let layout = layout(prog, &reachable);
+    let lower = Lower::new(prog, alloc, live, reachable, layout);
     lower.emit_all()
 }
 
@@ -69,23 +70,23 @@ pub(crate) fn terminator(prog: &SsaProgram, block: NodeIndex) -> Option<&SsaInsn
 }
 
 /// BFS reachability from the entry over live successors.
-fn liveness(prog: &SsaProgram) -> Vec<bool> {
+fn reachable(prog: &SsaProgram) -> Vec<bool> {
     // Edges need kinds to apply the dead-taken rule precisely: rebuild
     // the successor lists with edge weights here.
     let blocks = prog.graph.node_count();
-    let mut live = vec![false; blocks];
+    let mut reachable = vec![false; blocks];
     let mut stack = vec![prog.entry];
 
-    live[prog.entry.index()] = true;
+    reachable[prog.entry.index()] = true;
     while let Some(block) = stack.pop() {
         for succ in live_successors(prog, block) {
-            if !live[succ.index()] {
-                live[succ.index()] = true;
+            if !reachable[succ.index()] {
+                reachable[succ.index()] = true;
                 stack.push(succ);
             }
         }
     }
-    live
+    reachable
 }
 
 /// Successors with the dead-taken rule applied: graph edges, except the
@@ -232,14 +233,15 @@ impl<'p> Lower<'p> {
     fn new(
         prog: &'p SsaProgram,
         alloc: Allocation,
-        live: Vec<bool>,
+        live: Liveness,
+        reachable: Vec<bool>,
         layout: Vec<NodeIndex>,
     ) -> Self {
         let blocks = prog.graph.node_count();
         let mut succ_count = vec![0usize; blocks];
         let mut pred_count = vec![0usize; blocks];
         for node in prog.graph.node_indices() {
-            if !live[node.index()] {
+            if !reachable[node.index()] {
                 continue;
             }
             for succ in live_successors(prog, node) {
@@ -251,8 +253,8 @@ impl<'p> Lower<'p> {
         Self {
             prog,
             alloc,
-            ranges: live_ranges(prog),
-            live,
+            ranges: live.ranges,
+            live: reachable,
             layout,
             succ_count,
             pred_count,

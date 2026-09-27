@@ -57,6 +57,50 @@ impl Allocation {
 pub(crate) const POOL: [Reg; 9] =
     [Reg(0), Reg(2), Reg(3), Reg(4), Reg(5), Reg(6), Reg(7), Reg(8), Reg(9)];
 
+/// Use lists and live ranges shared by allocation and lowering.
+///
+/// All of it derives from the same immutable [`SsaProgram`], and `lower`
+/// needs every part, so it is computed once and borrowed rather than
+/// recomputed per consumer. (Each field was previously rebuilt inside
+/// `allocate`, `live_ranges`, and `Lower::new` — three separate walks of
+/// every live block for the same facts.)
+pub(crate) struct Liveness {
+    /// Register-position uses as `(flat position, version)` — [`SsaProgram::reg_uses`].
+    pub(crate) uses: Vec<(usize, SsaValue)>,
+    /// Entry-loop start-inflow uses — [`SsaProgram::start_uses`].
+    pub(crate) starts: Vec<(usize, SsaValue)>,
+    /// `(def, last-use)` per value id — see [`live_ranges`].
+    pub(crate) ranges: Vec<(usize, usize)>,
+    /// Flat positions of call instructions in live blocks.
+    pub(crate) calls: Vec<usize>,
+}
+
+impl Liveness {
+    /// Compute every liveness fact for `prog` in one pass set.
+    pub(crate) fn compute(prog: &SsaProgram) -> Self {
+        let uses = prog.reg_uses();
+        let starts = prog.start_uses();
+        let ranges = live_ranges_from(prog, &uses, &starts);
+
+        // Call sites (flat positions, live blocks only) gate `r0` homing:
+        // anything live across a call can never sit in `r0`. Block-ordered,
+        // so it stays a separate walk over live block ranges.
+        let mut calls = Vec::new();
+        for node in prog.graph.node_indices() {
+            let bb = &prog.graph[node];
+            if !bb.live {
+                continue;
+            }
+            for (i, insn) in prog.insns[bb.start..bb.end].iter().enumerate() {
+                if matches!(insn, SsaInsn::Call { .. }) {
+                    calls.push(bb.start + i);
+                }
+            }
+        }
+        Self { uses, starts, ranges, calls }
+    }
+}
+
 /// Live ranges per value id as `(def, last-use)` flat positions.
 ///
 /// A use preceding its def rides a backedge (loop-carried): the value
@@ -73,7 +117,19 @@ pub(crate) const POOL: [Reg; 9] =
 ///
 /// Regression: the pinned inputs in `fuzz_crashers_agree` cover the
 /// cycle-pinning and start-inflow exemptions.
+#[cfg(test)]
 pub(crate) fn live_ranges(prog: &SsaProgram) -> Vec<(usize, usize)> {
+    let uses = prog.reg_uses();
+    let starts = prog.start_uses();
+    live_ranges_from(prog, &uses, &starts)
+}
+
+/// [`live_ranges`] over precomputed use lists (the [`Liveness`] path).
+fn live_ranges_from(
+    prog: &SsaProgram,
+    uses: &[(usize, SsaValue)],
+    starts: &[(usize, SsaValue)],
+) -> Vec<(usize, usize)> {
     let count = prog.def_sites.len();
     let mut ranges = vec![(usize::MAX, 0usize); count];
     for (id, &site) in prog.def_sites.iter().enumerate() {
@@ -88,7 +144,7 @@ pub(crate) fn live_ranges(prog: &SsaProgram) -> Vec<(usize, usize)> {
             block_of_pos[bb.start..bb.end].fill(node.index());
         }
     }
-    for (pos, value) in prog.reg_uses() {
+    for &(pos, value) in uses {
         let Some(id) = value.checked_index(count) else { continue };
         let (start, end) = &mut ranges[id];
         let pinned = block_of_pos.get(pos).is_some_and(|&b| b != usize::MAX && cyclic[b]);
@@ -108,7 +164,7 @@ pub(crate) fn live_ranges(prog: &SsaProgram) -> Vec<(usize, usize)> {
     // iteration), so materialized start values pin like cycle uses.
     // Vanishing pseudos (`FramePtr`/`EntryCtx`) never emit, so they
     // stay exempt — sharing their home is what elides the start move.
-    for (pos, value) in prog.start_uses() {
+    for &(pos, value) in starts {
         let Some(id) = value.checked_index(count) else { continue };
         let (start, end) = &mut ranges[id];
         let pinned = block_of_pos.get(pos).is_some_and(|&b| b != usize::MAX && cyclic[b])
@@ -163,101 +219,104 @@ fn r0_available(calls: &[usize], start: usize, end: usize) -> bool {
 ///
 /// Returns [`SsaError::OutOfRegisters`] when live pressure exceeds the
 /// nine allocatable registers.
-pub(crate) fn allocate(prog: &SsaProgram) -> Result<Allocation, SsaError> {
+pub(crate) fn allocate(prog: &SsaProgram, live: &Liveness) -> Result<Allocation, SsaError> {
     let count = prog.def_sites.len();
     let mut homes: Vec<Option<Reg>> = vec![None; count];
-    let ranges = live_ranges(prog);
+    let ranges = &live.ranges;
     let mut used = vec![false; count];
-    for (_, value) in prog.reg_uses().into_iter().chain(prog.start_uses()) {
+    for &(_, value) in live.uses.iter().chain(live.starts.iter()) {
         if let Some(id) = value.checked_index(count) {
             used[id] = true;
         }
     }
-    // Faulting loads need a destination register even when their result
-    // is discarded: the VM still writes somewhere. Mark every `Load`
-    // result used (ranges stay point-sized without later reads, so this
-    // costs pressure only in pathological cases). `r10` destinations
-    // (`dst: None`) stay unmapped — lowering refuses those gracefully.
-    for insn in &prog.insns {
-        if let SsaInsn::Load { dst: Some(v), .. } = insn
-            && let Some(id) = v.checked_index(count)
-        {
-            used[id] = true;
-        }
-    }
-    // Bad-width `End`s trap at load time: their result needs a home
-    // even when unread, or lowering would skip the dead op and drop
-    // the fault.
-    for insn in &prog.insns {
-        if let SsaInsn::BinOp { dst, op: ebpf_isa::insn::AluOp::End(_), rhs, .. } = insn
-            && !matches!(crate::const_value(prog, *rhs), Some(16 | 32 | 64))
-            && let Some(id) = dst.checked_index(count)
-        {
-            used[id] = true;
-        }
-    }
 
-    // Pinned pseudos take their conventional homes while live; their
-    // ranges seed the active set so nothing else overlaps them.
+    // One streaming pass over `prog.insns` for the four whole-array facts
+    // allocation needs. Each was a separate walk; they share no ordering
+    // dependence, so fusing them reads the (`SsaInsn`-sized) array once
+    // instead of four times:
+    //   - `used`      — faulting `Load` destinations and bad-width `End`
+    //                   results need a home even when unread.
+    //   - `arg_prefs` — version id → conventional call-argument registers.
+    //   - `active`    — pinned pseudos (`FramePtr` → r10, `EntryCtx` → r1)
+    //                   seed the active set so nothing else overlaps them.
     let mut active: Vec<(Reg, usize, Option<usize>)> = Vec::new();
-    for (id, home) in pinned_homes(prog, count) {
-        if used[id] {
-            homes[id] = Some(home);
-            active.push((home, ranges[id].1, Some(id)));
-        }
-    }
-
-    // Call-argument preferences: version id → conventional arg registers
-    // it flows into (built once; calls are rare).
     let mut arg_prefs: Vec<Vec<Reg>> = vec![Vec::new(); count];
     for insn in &prog.insns {
-        if let SsaInsn::Call { args, .. } = insn {
-            for (i, arg) in args.iter().enumerate() {
-                if let Some(id) = arg.checked_index(count)
-                    && let Ok(n) = u8::try_from(i + 1)
-                    && let Ok(reg) = Reg::new(n)
-                {
-                    arg_prefs[id].push(reg);
+        match insn {
+            // A faulting load needs a destination register even when its
+            // result is discarded: the VM still writes somewhere. Ranges
+            // stay point-sized without later reads, so this costs pressure
+            // only in pathological cases. `r10` destinations (`dst: None`)
+            // stay unmapped — lowering refuses those gracefully.
+            SsaInsn::Load { dst: Some(v), .. } => {
+                if let Some(id) = v.checked_index(count) {
+                    used[id] = true;
                 }
             }
+            // Bad-width `End`s trap at load time: their result needs a home
+            // even when unread, or lowering would skip the dead op and drop
+            // the fault.
+            SsaInsn::BinOp { dst, op: ebpf_isa::insn::AluOp::End(_), rhs, .. } => {
+                if !matches!(crate::const_value(prog, *rhs), Some(16 | 32 | 64))
+                    && let Some(id) = dst.checked_index(count)
+                {
+                    used[id] = true;
+                }
+            }
+            // Call-argument preferences (calls are rare, but the table is
+            // built once and read per version below).
+            SsaInsn::Call { args, .. } => {
+                for (i, arg) in args.iter().enumerate() {
+                    if let Some(id) = arg.checked_index(count)
+                        && let Ok(n) = u8::try_from(i + 1)
+                        && let Ok(reg) = Reg::new(n)
+                    {
+                        arg_prefs[id].push(reg);
+                    }
+                }
+            }
+            // Pinned pseudos take their conventional homes while live.
+            SsaInsn::FramePtr { dst } => {
+                if let Some(id) = dst.checked_index(count)
+                    && used[id]
+                {
+                    homes[id] = Some(Reg(10));
+                    active.push((Reg(10), ranges[id].1, Some(id)));
+                }
+            }
+            SsaInsn::EntryCtx { dst } => {
+                if let Some(id) = dst.checked_index(count)
+                    && used[id]
+                {
+                    homes[id] = Some(Reg(1));
+                    active.push((Reg(1), ranges[id].1, Some(id)));
+                }
+            }
+            _ => {}
         }
     }
 
     let mut order: Vec<usize> = (0..count).filter(|&id| used[id] && homes[id].is_none()).collect();
     order.sort_by_key(|&id| ranges[id].0);
-    // Call sites (flat positions, live blocks only) gate `r0` homing:
-    // anything live across a call can never sit in `r0`.
-    let mut calls = Vec::with_capacity(prog.len());
-    for node in prog.graph.node_indices() {
-        let bb = &prog.graph[node];
-        if !bb.live {
-            continue;
-        }
-        for (i, insn) in prog.insns[bb.start..bb.end].iter().enumerate() {
-            if matches!(insn, SsaInsn::Call { .. }) {
-                calls.push(bb.start + i);
-            }
-        }
-    }
+    let calls = &live.calls;
     for id in order {
         let (start, end) = ranges[id];
         active.retain(|&(_, active_end, _)| active_end > start);
 
         let free = |home: Reg| active.iter().all(|&(live, _, _)| live != home);
-        let allowed =
-            |home: Reg| free(home) && (home != Reg(0) || r0_available(&calls, start, end));
+        let allowed = |home: Reg| free(home) && (home != Reg(0) || r0_available(calls, start, end));
         let value_of = |id: usize| u32::try_from(id).ok().map(SsaValue);
         let mut chosen =
             value_of(id).and_then(|value| coalesce_phi_home(prog, &homes, &active, value));
-        if chosen.is_some_and(|home| home == Reg(0) && !r0_available(&calls, start, end)) {
+        if chosen.is_some_and(|home| home == Reg(0) && !r0_available(calls, start, end)) {
             chosen = None;
         }
         // BinOp results reuse their left operand's home (lowering emits
         // `mov dst, lhs` otherwise — same value, extra step).
         if chosen.is_none() {
             chosen = value_of(id)
-                .and_then(|value| coalesce_binop_lhs(prog, &homes, &active, &ranges, value, start))
-                .filter(|&home| home != Reg(0) || r0_available(&calls, start, end));
+                .and_then(|value| coalesce_binop_lhs(prog, &homes, &active, ranges, value, start))
+                .filter(|&home| home != Reg(0) || r0_available(calls, start, end));
         }
         if chosen.is_none() {
             chosen = arg_prefs[id].iter().find_map(|&pref| {
@@ -271,22 +330,6 @@ pub(crate) fn allocate(prog: &SsaProgram) -> Result<Allocation, SsaError> {
         active.push((home, end, Some(id)));
     }
     Ok(Allocation { homes })
-}
-
-/// Pinned homes: `FramePtr` → `r10`, `EntryCtx` → `r1`, per value id.
-fn pinned_homes(prog: &SsaProgram, count: usize) -> Vec<(usize, Reg)> {
-    let mut out = Vec::new();
-    for insn in &prog.insns {
-        let (value, home) = match insn {
-            SsaInsn::FramePtr { dst } => (*dst, Reg(10)),
-            SsaInsn::EntryCtx { dst } => (*dst, Reg(1)),
-            _ => continue,
-        };
-        if let Some(n) = value.checked_index(count) {
-            out.push((n, home));
-        }
-    }
-    out
 }
 
 /// Coalescing preference for a `BinOp` result: its left operand's home,
@@ -365,7 +408,7 @@ mod tests {
         // ldxw r2, [r1+0]; exit — r10 unused, r1 read: EntryCtx homed r1.
         let bytes = [w(0x61, 2, 1, 0, 0), w(0x95, 0, 0, 0, 0)].concat();
         let (prog, _) = build(&bytes);
-        let alloc = allocate(&prog).unwrap();
+        let alloc = allocate(&prog, &Liveness::compute(&prog)).unwrap();
         let ctx = prog.insns.iter().find_map(|i| match i {
             SsaInsn::EntryCtx { dst } => Some(*dst),
             _ => None,
@@ -392,7 +435,7 @@ mod tests {
         words.push(w(0x95, 0, 0, 0, 0));
         let bytes = words.concat();
         let (prog, _) = build(&bytes);
-        assert!(allocate(&prog).is_ok());
+        assert!(allocate(&prog, &Liveness::compute(&prog)).is_ok());
     }
 
     #[test]
@@ -415,6 +458,9 @@ mod tests {
         words.push(w(0x95, 0, 0, 0, 0));
         let bytes = words.concat();
         let (prog, _) = build(&bytes);
-        assert!(matches!(allocate(&prog), Err(SsaError::OutOfRegisters)));
+        assert!(matches!(
+            allocate(&prog, &Liveness::compute(&prog)),
+            Err(SsaError::OutOfRegisters)
+        ));
     }
 }
