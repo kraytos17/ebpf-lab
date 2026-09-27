@@ -300,15 +300,33 @@ fn dead_code_eliminate(prog: &mut SsaProgram) -> bool {
         }
     }
     while let Some(idx) = worklist.pop() {
-        for value in uses_of(&prog.insns[idx]) {
+        for_each_use(&prog.insns[idx], |value| {
             if let Some(def) = def_index(prog, value)
                 && !marked[def]
             {
                 marked[def] = true;
                 worklist.push(def);
             }
-        }
+        });
     }
+    // Early-out: if the mark phase left nothing to remove, return without
+    // rebuilding storage. The sweep below clones every surviving
+    // instruction and rewrites every block range, so running it for a
+    // round that removes nothing (the common terminating round) doubles
+    // the pass cost for no effect.
+    let dead_blocks: usize = prog
+        .graph
+        .node_indices()
+        .filter(|&node| !prog.graph[node].live)
+        .map(|node| {
+            let bb = &prog.graph[node];
+            bb.end - bb.start
+        })
+        .sum();
+    if dead_blocks == 0 && marked.iter().all(|&m| m) {
+        return false;
+    }
+
     // Sweep: rebuild flat storage compactly (live blocks keep marked
     // insns; dead blocks are dropped whole), then refresh ranges and
     // the def table.
@@ -343,6 +361,16 @@ fn dead_code_eliminate(prog: &mut SsaProgram) -> bool {
         bb.end = kept.len();
     }
 
+    // The early-out above must agree with the count the sweep computes.
+    // `marked` is sized to the whole program while only live-block ranges
+    // are swept, so a dead block both raises `dead_blocks` and leaves its
+    // indices unmarked; the two conditions can never disagree.
+    debug_assert_eq!(
+        removed == 0,
+        dead_blocks == 0 && marked.iter().all(|&m| m),
+        "DCE early-out disagreed with the computed removal count"
+    );
+
     prog.insns = kept;
     if removed == 0 {
         return false;
@@ -352,12 +380,16 @@ fn dead_code_eliminate(prog: &mut SsaProgram) -> bool {
     true
 }
 
-/// Value-position uses of one instruction (for the mark phase).
-fn uses_of(insn: &SsaInsn) -> Vec<SsaValue> {
-    let mut out = Vec::new();
+/// Call `f` for each value-position use of one instruction (the mark phase).
+///
+/// A callback rather than a returned `Vec` because the mark worklist visits
+/// every rooted instruction on every round, and building a vector per visit
+/// was measurable allocation churn. `Phi` has a variable operand count, so
+/// no fixed-size return would cover it.
+fn for_each_use(insn: &SsaInsn, mut f: impl FnMut(SsaValue)) {
     let mut operand = |op: SsaOperand| {
         if let SsaOperand::Value(v) = op {
-            out.push(v);
+            f(v);
         }
     };
 
@@ -390,7 +422,6 @@ fn uses_of(insn: &SsaInsn) -> Vec<SsaValue> {
         }
         SsaInsn::Exit { r0 } => value(r0),
     }
-    out
 }
 
 /// Flat index of a version's definition (`None` for the `usize::MAX`

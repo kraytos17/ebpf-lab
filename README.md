@@ -209,12 +209,20 @@ Baselines (current main, `profile.release`, criterion, 10s/200 samples):
 | `verify/map_guarded_value_access/verdict` | ~508 ns (null-guarded lookup + descriptor-bounded access) |
 | `verify/xdp_ethertype/verdict` | ~436 ns (context loads + `data_end` refinement, 54 B packet) |
 | `verify/xdp_ethertype/trace` | ~3.6 µs |
-| `ssa/wide_250/build` | ~5.1 µs (~20 ns/insn, linear construction) |
+| `ssa/wide_250/build` | ~4.4 µs (~18 ns/insn, linear construction) |
 | `ssa/xdp_ethertype/build` | ~856 ns |
-| `ssa/xdp_ethertype/opt` | ~962 ns (fold + copy + DCE to fixpoint) |
-| `ssa/wide_250/lower` | ~11.3 µs (~45 ns/insn: allocation + edge-split + emit) |
+| `ssa/xdp_ethertype/opt` | ~680 ns (fold + copy + DCE to fixpoint) |
+| `ssa/wide_250/lower` | ~7.9 µs (~32 ns/insn: allocation + edge-split + emit) |
 
 No repr/layout changes without a profile attributing ≥ 20% to the candidate.
+
+The `ssa/*` baselines were revised after the liveness-inference and DCE
+early-out work: A/B on one box showed `wide_250/lower` −29.9 %,
+`xdp_ethertype/opt` −29.3 %, and `wide_250/build` −14.1 % (the untouched
+`xdp_ethertype/build` was flat), and the committed figures scale those
+ratios onto the previous baseline. Counter-based verification (perf stat,
+stable to < 0.1 %) measured −34.2 % instructions / −30.7 % L1-dcache loads
+for the SSA pipeline end to end.
 
 ## Design principles
 

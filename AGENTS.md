@@ -388,6 +388,11 @@ counts → commit → tag `vX.Y.0`.
   `lower` over an immutable program (now one `Liveness` bundle, −12.8 %
   instructions). Struct-size reasoning alone would never have surfaced it.
   Profile first (`just cache-profile <target>`), then reason.
+- Check the *terminating* round of a fixed-point pass: `dead_code_eliminate`
+  ran its clone-every-instruction sweep even when the mark phase removed
+  nothing, so half its work at the fixpoint was no-op (now an early return,
+  −24.5 % instructions). The last iteration of any `while changed` loop is
+  usually the one that does nothing — make its path cheap.
 
 ## 9. Docs that must stay in sync (checklist for every change)
 

@@ -122,6 +122,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `prog.insns` (faulting-`Load` destinations, bad-width `End` results,
   call-argument preferences, pinned pseudos) into a single streaming pass,
   and the standalone `pinned_homes` helper is removed.
+- `ebpf-ssa`: `opt::dead_code_eliminate` returns early when the mark phase
+  leaves nothing to remove, instead of cloning every surviving instruction
+  and rewriting every block range for a round that changes nothing. The
+  terminating round was doing that full rebuild for no effect, so the pass
+  now costs half its former work at the fixpoint. `uses_of`, which the mark
+  worklist called once per rooted instruction per round, becomes
+  `for_each_use` with a callback and no per-visit `Vec`. Measured on the
+  `profile_ssa` driver: instructions −24.5 %, branches −21.6 %, L1-dcache
+  loads −22.0 % (on top of the liveness change, −34.2 % instructions
+  cumulatively from the prior release). Lowered bytecode stays
+  byte-identical across every fixture.
 
 ## [0.9.0] - 2026-09-25
 
