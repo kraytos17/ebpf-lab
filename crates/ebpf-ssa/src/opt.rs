@@ -350,7 +350,8 @@ fn dead_code_eliminate(prog: &mut SsaProgram) -> bool {
     // effectful/faulting ops — plus bad-width `End`s, which trap at load
     // time. An`End` is pure only with a proven-valid width.
     let mut marked = vec![false; prog.len()];
-    let mut worklist = Vec::new();
+    // Roots are at most every instruction; each pop visits one.
+    let mut worklist = Vec::with_capacity(prog.len());
     for node in prog.graph.node_indices() {
         let bb = &prog.graph[node];
         if !bb.live {

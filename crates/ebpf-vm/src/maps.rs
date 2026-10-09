@@ -417,13 +417,14 @@ impl MapStore {
                 let idx = array_index(key, desc.max_entries)?;
                 Ok(Some(data[idx].as_slice()))
             }
-            Self::LruArray { data, stamps, stamp_of, seq, .. } => {
-                data.get(key).map_or(Ok(None), |v| {
+            Self::LruArray { data, stamps, stamp_of, seq, .. } => data.get(key).map_or_else(
+                || Ok(None),
+                |v| {
                     // Touch: stamp as of most recent
                     lru_touch(stamps, stamp_of, seq, key);
                     Ok(Some(v.as_slice()))
-                })
-            }
+                },
+            ),
         }
     }
 

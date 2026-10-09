@@ -691,11 +691,11 @@ fn ptr_alu_transfer(state: &mut VerifierState, op: AluOp, dst: Reg, src: Operand
                 if let Some(k) = delta {
                     // Overflow (`sub` of `i32::MIN`) degrades to Top.
                     let k = if matches!(op, AluOp::Sub) { k.checked_neg() } else { Some(k) };
-                    let next = k
-                        .and_then(|k| offset.checked_add(k))
-                        .map_or(RegType::Scalar(Range::Top), |off| RegType::StackPtr {
-                            offset: off,
-                        });
+                    let next = k.and_then(|k| offset.checked_add(k)).map_or_else(
+                        || RegType::Scalar(Range::Top),
+                        |off| RegType::StackPtr { offset: off },
+                    );
+
                     if !dst.is_frame_ptr() {
                         state.regs[dst.index()] = next;
                     }
