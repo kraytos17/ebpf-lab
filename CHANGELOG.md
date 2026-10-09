@@ -3,6 +3,21 @@
 All notable changes to this project will be documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- `ebpf-ssa`: self-edge phi moves ride edge trampolines so they execute
+  after the block's own terminator commits to the edge; previously they
+  ran first and clobbered branch sources sharing the phi's home, turning
+  a fall-off exit into an infinite loop (found by `ssa_pipeline`
+  fuzzing, pinned in `fuzz_crashers_agree` as `self_edge_phi_clobber`).
+- `ebpf-ssa`: copy-propagation ignores dead-predecessor phi inputs
+  instead of forwarding unreachable placeholders into live positions,
+  and lowering materializes anchorless phis as zero; previously orphaned
+  versions shared a live home and a store faulted at the wrong address
+  (found by `ssa_pipeline` fuzzing, pinned as `undefined_loop_addrs`).
+
 ## [0.10.0] - 2026-09-27
 
 ### Added
