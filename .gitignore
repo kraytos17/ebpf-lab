@@ -14,3 +14,4 @@
 fuzz/artifacts/
 fuzz/coverage/
 fuzz/corpus/
+__pycache__

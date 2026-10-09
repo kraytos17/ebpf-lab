@@ -522,6 +522,180 @@ fn arb_map_program() -> impl Strategy<Value = Vec<u8>> {
     arb_map_seq().prop_map(|words| words.into_iter().flat_map(Raw::bytes).collect())
 }
 
+// ---- Packet-configured generator --------
+//
+// The other properties run with no packet context, so packet loads and
+// the `PacketPtr` refinement surface are unreachable there. These shapes
+// install a concrete packet length (`VerifyConfig::with_packet_len`) so
+// the XDP entry, context loads, `PacketPtr` arithmetic, static
+// bounds/alignment, and the register-source `data_end` guard are
+// reached for real. Every shape is well-formed for its length —
+// acceptance is expected full, so a rejection is a builder bug.
+
+/// Packet lengths the generator draws from: the three fixture packets
+/// (10, 42, 54), the ethertype minimum (14), and the fuzz-parity length
+/// (64).
+const PACKET_LENS: &[usize] = &[10, 14, 42, 54, 64];
+
+/// Packet lengths the ethertype mirror may use: its guard compares a
+/// 14-byte Ethernet header against the end, so shorter packets reject
+/// statically.
+const ETHERNET_LENS: &[usize] = &[14, 42, 54, 64];
+
+/// `(size opcode, offset)` pairs valid for `len`: aligned (`off % size
+/// == 0`) and in bounds (`off + size <= len`) — exactly the envelope
+/// `check_packet_bounds` accepts for a packet load.
+fn valid_accesses(len: usize) -> Vec<(u8, i16)> {
+    let mut out = Vec::new();
+    for (op, size) in [(0x71u8, 1usize), (0x69, 2), (0x61, 4)] {
+        for off in (0..=len.saturating_sub(size)).step_by(size) {
+            out.push((op, i16::try_from(off).expect("test offsets stay in i16")));
+        }
+    }
+    out
+}
+
+/// `(len, access)` pairs over every length in `lens`, drawn together so
+/// the offset is always valid for the length it is paired with.
+fn access_table(lens: &[usize]) -> Vec<(usize, u8, i16)> {
+    let mut out = Vec::new();
+    for &len in lens {
+        for (op, off) in valid_accesses(len) {
+            out.push((len, op, off));
+        }
+    }
+    out
+}
+
+/// Shape S1 — fixed-offset packet load (5 slots): context data/end
+/// loads, one bounds-checked load through `PacketPtr@0`, exit. Covers
+/// `check_ctx_load`'s `+0`/`+4` projections and `check_packet_bounds`'
+/// static bounds + alignment checks.
+fn fixed_seq(op: u8, off: i16, r0: i32) -> Vec<Raw> {
+    vec![
+        Raw { op: 0x61, dst: 2, src: 1, off: 0, imm: 0 },
+        Raw { op: 0x61, dst: 3, src: 1, off: 4, imm: 0 },
+        Raw { op, dst: 5, src: 2, off, imm: 0 },
+        Raw { op: 0xb7, dst: 0, src: 0, off: 0, imm: r0 },
+        Raw { op: 0x95, dst: 0, src: 0, off: 0, imm: 0 },
+    ]
+}
+
+/// Shape S1b — computed point pointer (7 slots): `mov r4, r2;
+/// add r4, k1; sub r4, k2` lands on `PacketPtr@off` (a point range, so
+/// multi-byte loads pass) and the load reads through it. Covers
+/// `ptr_alu_transfer`'s `Mov`/`Add`/`Sub` offset shifts.
+fn computed_seq(op: u8, off: i16, k2: i16, r0: i32) -> Vec<Raw> {
+    let k1 = off + k2;
+    vec![
+        Raw { op: 0x61, dst: 2, src: 1, off: 0, imm: 0 },
+        Raw { op: 0xbf, dst: 4, src: 2, off: 0, imm: 0 },
+        Raw { op: 0x07, dst: 4, src: 0, off: 0, imm: i32::from(k1) },
+        Raw { op: 0x17, dst: 4, src: 0, off: 0, imm: i32::from(k2) },
+        Raw { op, dst: 5, src: 4, off: 0, imm: 0 },
+        Raw { op: 0xb7, dst: 0, src: 0, off: 0, imm: r0 },
+        Raw { op: 0x95, dst: 0, src: 0, off: 0, imm: 0 },
+    ]
+}
+
+/// Shape S2 — joined range + register-source guard (11 slots): the
+/// condition steers one pointer path past `add r4, far`, joining the
+/// range to `PacketPtr[0, far]`; the byte load is accepted only through
+/// the guard's refinement. `load_taken == false` places the load on the
+/// guard's fallthrough (`jge` narrows it to `<= len - 1`); `true`
+/// places it on the taken edge (`jlt`). The pin test also builds the
+/// weaker `jgt` complement (`load_taken == false`) to show it rejects
+/// one byte past.
+fn joined_seq(
+    len: usize,
+    delta: i16,
+    cond_true: bool,
+    guard_op: u8,
+    load_taken: bool,
+    r0: i32,
+) -> Vec<Raw> {
+    let far = i16::try_from(len).expect("test lengths stay in i16") + delta;
+    // `jeq r2, r2` is always true, `jgt r2, r2` always false: the
+    // verifier explores both edges either way; the runtime takes one.
+    let cond = if cond_true { 0x1d } else { 0x2d };
+    let mut words = vec![
+        Raw { op: 0x61, dst: 2, src: 1, off: 0, imm: 0 },
+        Raw { op: 0x61, dst: 3, src: 1, off: 4, imm: 0 },
+        Raw { op: 0xbf, dst: 4, src: 2, off: 0, imm: 0 },
+        Raw { op: 0xb7, dst: 0, src: 0, off: 0, imm: r0 },
+        Raw { op: cond, dst: 2, src: 2, off: 1, imm: 0 },
+        Raw { op: 0x07, dst: 4, src: 0, off: 0, imm: i32::from(far) },
+    ];
+    // Guard at slot 6; its `+2` target is the early-exit block at 9.
+    let guard = Raw { op: guard_op, dst: 4, src: 3, off: 2, imm: 0 };
+    let load = Raw { op: 0x71, dst: 5, src: 4, off: 0, imm: 0 };
+    let early = Raw { op: 0xb7, dst: 0, src: 0, off: 0, imm: 1 };
+    let exit = Raw { op: 0x95, dst: 0, src: 0, off: 0, imm: 0 };
+    if load_taken {
+        words.extend([guard, early, exit, load, exit]);
+    } else {
+        words.extend([guard, load, exit, early, exit]);
+    }
+    words
+}
+
+/// Shape S3 — the `xdp_ethertype_pass` fixture mirror (11 slots):
+/// computed guard pointer, `jgt` comparison against `data_end`, a
+/// bounded load through `PacketPtr@0`, and a content branch with dual
+/// exits. `len >= 14` because the guard compares the added header size.
+fn ethertype_seq(op: u8, off: i16) -> Vec<Raw> {
+    vec![
+        Raw { op: 0x61, dst: 2, src: 1, off: 0, imm: 0 },
+        Raw { op: 0x61, dst: 3, src: 1, off: 4, imm: 0 },
+        Raw { op: 0xbf, dst: 4, src: 2, off: 0, imm: 0 },
+        Raw { op: 0x07, dst: 4, src: 0, off: 0, imm: 14 },
+        Raw { op: 0x2d, dst: 4, src: 3, off: 2, imm: 0 },
+        Raw { op, dst: 5, src: 2, off, imm: 0 },
+        Raw { op: 0x15, dst: 5, src: 0, off: 2, imm: 8 },
+        Raw { op: 0xb7, dst: 0, src: 0, off: 0, imm: 1 },
+        Raw { op: 0x95, dst: 0, src: 0, off: 0, imm: 0 },
+        Raw { op: 0xb7, dst: 0, src: 0, off: 0, imm: 2 },
+        Raw { op: 0x95, dst: 0, src: 0, off: 0, imm: 0 },
+    ]
+}
+
+/// One packet-configured shape and the length it was built for. All
+/// shapes are well-formed by construction, so acceptance is expected
+/// full — a rejected shape is a builder bug, not dilution.
+fn arb_packet_seq() -> impl Strategy<Value = (Vec<Raw>, usize)> {
+    prop_oneof![
+        4 => (
+            prop::sample::select(access_table(PACKET_LENS)),
+            prop_oneof![Just(1i32), Just(2i32)],
+        )
+            .prop_map(|((len, op, off), r0)| (fixed_seq(op, off, r0), len)),
+        3 => (
+            prop::sample::select(access_table(PACKET_LENS)),
+            prop::sample::select(vec![0i16, 8]),
+            prop_oneof![Just(1i32), Just(2i32)],
+        )
+            .prop_map(|((len, op, off), k2, r0)| (computed_seq(op, off, k2, r0), len)),
+        4 => (
+            prop::sample::select(PACKET_LENS),
+            prop::sample::select(vec![0i16, 1, 7, 15]),
+            prop::bool::ANY,
+            prop::bool::ANY,
+            prop_oneof![Just(1i32), Just(2i32)],
+        )
+            .prop_map(|(len, delta, cond_true, gte, r0)| {
+                let guard = if gte { 0x3d } else { 0xad };
+                (joined_seq(len, delta, cond_true, guard, !gte, r0), len)
+            }),
+        2 => prop::sample::select(access_table(ETHERNET_LENS))
+            .prop_map(|(len, op, off)| (ethertype_seq(op, off), len)),
+    ]
+}
+
+fn arb_packet_program() -> impl Strategy<Value = (Vec<u8>, usize)> {
+    arb_packet_seq()
+        .prop_map(|(words, len)| (words.into_iter().flat_map(Raw::bytes).collect(), len))
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
@@ -558,4 +732,56 @@ proptest! {
             "verifier accepted a map program that faults with MemError"
         );
     }
+
+    /// Packet-configured sibling: verify under a concrete packet length
+    /// and run the same program with a packet of that length through
+    /// `run_xdp` (the `xdp` subcommand pairs them exactly this way).
+    /// Every generated shape is well-formed for its length: fixed-offset
+    /// loads stay within `off + size <= len`, the joined-range byte load
+    /// is accepted only through the register-source `data_end` guard,
+    /// and the ethertype mirror needs `len >= 14`. Acceptance is
+    /// expected full — a rejected shape is a builder bug.
+    #[test]
+    fn accept_implies_vm_safe_packet(case in arb_packet_program()) {
+        let (bytes, packet_len) = case;
+        let Ok(insns) = ebpf_isa::decode_program(&bytes) else { return Ok(()); };
+        let Ok(cfg) = ebpf_cfg::build_cfg(&insns) else { return Ok(()); };
+        let config = ebpf_verifier::VerifyConfig::with_packet_len(packet_len);
+        let Ok(_) = ebpf_verifier::verify_with_config(&insns, &cfg, &config) else { return Ok(()); };
+        let packet = vec![0u8; packet_len];
+        let outcome = ebpf_vm::run_xdp(insns, &packet, Vec::new(), 10_000);
+        prop_assert!(
+            !matches!(outcome, Err(VmError::Memory(_))),
+            "verifier accepted an XDP program that faults with MemError"
+        );
+    }
+}
+
+/// Packet-guard complement boundary: `jge r, end` narrows a packet
+/// offset to `<= len - 1`, so the joined-range byte load at `[r+0]`
+/// verifies; the `jgt` complement narrows only to `<= len` and the same
+/// load rejects one byte past. Pinned because the packet property's
+/// guard cases would otherwise become silently vacuous if the
+/// refinement weakened; a future improvement that proves more (e.g.
+/// set-based joins) updates this pin.
+#[test]
+fn packet_guard_complement_pins() {
+    let config = ebpf_verifier::VerifyConfig::with_packet_len(54);
+    let verify = |guard_op: u8| {
+        let words = joined_seq(54, 46, true, guard_op, false, 2);
+        let bytes: Vec<u8> = words.into_iter().flat_map(Raw::bytes).collect();
+        let insns = ebpf_isa::decode_program(&bytes).expect("pin bytes decode");
+        let cfg = ebpf_cfg::build_cfg(&insns).expect("pin cfg builds");
+        ebpf_verifier::verify_with_config(&insns, &cfg, &config)
+    };
+    // `jge`: fallthrough `[0, 53]`; the byte load fits exactly.
+    if let Err(e) = verify(0x3d) {
+        panic!("the jge guard should verify: {e}");
+    }
+    // `jgt`: fallthrough `[0, 54]`; the load is one byte past.
+    let err = verify(0x2d).expect_err("the jgt complement must reject the load");
+    assert_eq!(
+        err,
+        ebpf_verifier::VerifyError::PacketOutOfBounds { pc: 7, offset: 0, size: 1, packet_len: 54 }
+    );
 }

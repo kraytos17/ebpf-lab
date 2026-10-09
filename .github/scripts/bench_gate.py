@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Fail when any benchmark regressed beyond threshold since the baseline.
 
 Compares mean point estimates by benchmark name between two
