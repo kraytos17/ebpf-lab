@@ -287,6 +287,63 @@ fn missing_file_errors() {
 }
 
 #[test]
+fn inspect_lists_relocations() {
+    let out = run_ok(&["inspect", &fixture("reloc_map_lookup.o").to_string_lossy()]);
+    assert!(out.contains("Relocations: 1"), "count: {out}");
+    assert!(out.contains("my_map"), "symbol: {out}");
+    assert!(out.contains("r_type 1"), "raw code: {out}");
+}
+
+#[test]
+fn verify_links_relocs_with_named_maps() {
+    let out = run_ok(&[
+        "verify",
+        &fixture("reloc_map_lookup.o").to_string_lossy(),
+        "--maps",
+        &fixture("maps_named.json").to_string_lossy(),
+    ]);
+    assert!(out.contains("verified:"), "out: {out}");
+}
+
+#[test]
+fn run_executes_linked_relocs() {
+    // Key 0 is absent from the empty map: lookup misses, exit is XDP_DROP.
+    let out = run_ok(&[
+        "run",
+        &fixture("reloc_map_lookup.o").to_string_lossy(),
+        "--maps",
+        &fixture("maps_named.json").to_string_lossy(),
+    ]);
+    assert!(out.contains("exit: 1"), "out: {out}");
+}
+
+#[test]
+fn verify_unresolved_reloc_fails() {
+    let out =
+        cli().args(["verify", &fixture("reloc_map_lookup.o").to_string_lossy()]).output().unwrap();
+    assert!(!out.status.success(), "unresolved reloc should fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unresolved map symbol"), "stderr names the symbol: {err}");
+    assert!(err.contains("my_map"), "stderr names the map: {err}");
+}
+
+#[test]
+fn optimize_reloc_without_maps_fails() {
+    let out = cli()
+        .args([
+            "optimize",
+            &fixture("reloc_map_lookup.o").to_string_lossy(),
+            "-o",
+            &temp_out("reloc-fail").to_string_lossy(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "unlinked reloc should fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("my_map"), "stderr names the map: {err}");
+}
+
+#[test]
 fn xdp_pass_and_drop_actions() {
     let pass = run_ok(&[
         "xdp",

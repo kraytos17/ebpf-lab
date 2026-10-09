@@ -22,6 +22,7 @@ pub fn test_maps() -> Vec<ebpf_verifier::MapDesc> {
             value_size: 8,
             max_entries: 256,
             initial,
+            name: None,
         },
         ebpf_verifier::MapDesc {
             fd: 2,
@@ -30,6 +31,7 @@ pub fn test_maps() -> Vec<ebpf_verifier::MapDesc> {
             value_size: 4,
             max_entries: 16,
             initial: BTreeMap::new(),
+            name: None,
         },
     ]
 }

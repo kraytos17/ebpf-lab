@@ -32,6 +32,7 @@
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand};
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -214,6 +215,47 @@ fn load_decoded(path: &Path) -> anyhow::Result<Vec<DecodedProgram>> {
     load_programs(path)?.into_iter().map(DecodedProgram::decode).collect()
 }
 
+/// Build a `.maps` symbol-name → fd table from `--maps` descriptors.
+///
+/// Anonymous descriptors (`name: None`) are skipped: they still serve
+/// `.bin` immediates. Duplicate names are a hard error — silently picking
+/// one would mis-link the program.
+fn map_name_table(descs: &[ebpf_vm::MapDesc]) -> anyhow::Result<HashMap<String, i32>> {
+    let mut table = HashMap::new();
+    for desc in descs {
+        let Some(name) = desc.name.as_ref() else { continue };
+        let fd = i32::try_from(desc.fd)
+            .with_context(|| format!("map `{name}` fd {} out of range", desc.fd))?;
+        if table.insert(name.clone(), fd).is_some() {
+            anyhow::bail!("duplicate map name `{name}` in --maps file");
+        }
+    }
+    Ok(table)
+}
+
+/// Load, link, then decode every program in `path`.
+///
+/// Map-fd relocations resolve against `descs` names before decode, so every
+/// downstream stage sees the linked bytes and decode-once still holds.
+/// Programs without relocations skip resolution; anything unresolvable is a
+/// fatal error (never a silent placeholder fd).
+fn load_decoded_with_maps(
+    path: &Path,
+    descs: &[ebpf_vm::MapDesc],
+) -> anyhow::Result<Vec<DecodedProgram>> {
+    let table = map_name_table(descs)?;
+    load_programs(path)?
+        .into_iter()
+        .map(|mut prog| {
+            if !prog.relocations.is_empty() {
+                prog.resolve_map_relocs(&table)
+                    .with_context(|| format!("linking program `{}`", prog.name))?;
+            }
+            DecodedProgram::decode(prog)
+        })
+        .collect()
+}
+
 /// Print a header (name, type, instruction count, relocations) followed by
 /// the program's disassembly.
 fn cmd_inspect(path: &Path) -> anyhow::Result<()> {
@@ -222,6 +264,15 @@ fn cmd_inspect(path: &Path) -> anyhow::Result<()> {
         println!("Type: {}", prog.meta.prog_type);
         println!("Instructions: {}", prog.insns.len());
         println!("Relocations: {}", prog.meta.relocations.len());
+        for reloc in &prog.meta.relocations {
+            let symbol = reloc.symbol.as_deref().unwrap_or("?");
+            let r_type = reloc.r_type.map_or_else(|| "?".to_string(), |t| t.to_string());
+            println!(
+                "  reloc {}: {symbol} (r_type {r_type}, addend {})",
+                reloc.offset, reloc.addend
+            );
+        }
+
         println!();
         print!("{}", ebpf_disasm::disassemble(&prog.insns));
     }
@@ -281,13 +332,15 @@ fn cmd_verify(
         ),
         None => packet_len,
     };
+
+    let descs = load_maps(maps)?;
     let config = ebpf_verifier::VerifyConfig {
         widening_threshold: max_iterations,
-        maps: load_maps(maps)?,
+        maps: descs.clone(),
         packet_len,
     };
 
-    for prog in &load_decoded(path)? {
+    for prog in &load_decoded_with_maps(path, &descs)? {
         let insns = &prog.insns;
         let cfg = ebpf_cfg::build_cfg(insns)
             .with_context(|| format!("building CFG for `{}`", prog.meta.name))?;
@@ -327,13 +380,14 @@ const DEFAULT_MAX_STEPS: usize = 1_000_000;
 fn cmd_run(path: &Path, trace: bool, maps: Option<&PathBuf>) -> anyhow::Result<()> {
     use ebpf_vm::StepResult;
     let descs = load_maps(maps)?;
+    let programs = load_decoded_with_maps(path, &descs)?;
     let stores = if descs.is_empty() {
         Vec::new()
     } else {
         ebpf_vm::maps::build_stores(descs).with_context(|| "installing maps")?
     };
 
-    for prog in load_decoded(path)? {
+    for prog in programs {
         let mut vm = if stores.is_empty() {
             ebpf_vm::Vm::new(prog.insns)
         } else {
@@ -407,7 +461,7 @@ fn cmd_xdp(
         ebpf_vm::maps::build_stores(descs).with_context(|| "installing maps")?
     };
 
-    for prog in load_decoded(path)? {
+    for prog in load_decoded_with_maps(path, &config.maps)? {
         let cfg = ebpf_cfg::build_cfg(&prog.insns)
             .with_context(|| format!("building CFG for `{}`", prog.meta.name))?;
         if let Err(e) = ebpf_verifier::verify_with_config(&prog.insns, &cfg, &config) {
@@ -497,7 +551,9 @@ fn packet_annotation(vm: &ebpf_vm::Vm, pc: usize, packet: &[u8]) -> String {
 /// analysis refusal prints `error: …` and returns `Ok` (exit 0); only I/O
 /// failures (unreadable input, unwritable output) are fatal.
 fn cmd_optimize(path: &Path, output: &Path) -> anyhow::Result<()> {
-    let programs = load_decoded(path)?;
+    // No `--maps` here: any relocation is unresolvable, so linking with an
+    // empty table turns it into a loud error instead of a silent fd-0 run.
+    let programs = load_decoded_with_maps(path, &[])?;
     let [prog] = programs.as_slice() else {
         anyhow::bail!("optimize expects a single program, found {}", programs.len());
     };

@@ -710,6 +710,7 @@ mod tests {
             value_size: 8,
             max_entries: 8,
             initial,
+            name: None,
         }]
     }
 

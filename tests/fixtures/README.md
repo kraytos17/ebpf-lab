@@ -1,14 +1,16 @@
 # Test fixtures
 
 Hand-assembled eBPF programs (flat `.bin`: raw little-endian 8-byte words,
-no ELF wrapper). Total ~1.1 KB.
+no ELF wrapper), plus one clang-built object (`.o`, see below). Total ~2 KB.
 
 They load at compile time via `include_bytes!`, so they must exist before
 `cargo test` runs — another reason they live in git rather than behind a
 generation step. The fuzz seed corpus (`fuzz/corpus/`, gitignored) is
-staged *from* these files by `fuzz/build.rs`; fixtures are its upstream.
+staged *from* these files by `fuzz/build.rs`; fixtures are its upstream
+(`*.bin` only — the `.o` is excluded, it needs the ELF loader rather than
+the raw decoder).
 
-## The thirty-four programs
+## The thirty-five programs
 
 | File | Slots | Program | Exit | Exercises |
 |---|---|---|---|---|
@@ -46,6 +48,7 @@ staged *from* these files by `fuzz/build.rs`; fixtures are its upstream.
 | `opt_copy_chain.bin` | 5 | `mov r1, 7; mov r2, r1; mov r3, r2; mov r0, r3; exit` | 7 (optimized: 2 insns) | Copy-propagation chain (v0.10 Part B) |
 | `opt_dead_code.bin` | 3 | `mov r0, 1; mov r1, 99 (dead); exit` | 1 (optimized: 2 insns) | Dead-def elimination (v0.10 Part B) |
 | `opt_branch_preserved.bin` | 7 | `mov r1, 5; jeq r1, 5, +2; mov r0, 1; ja +1; mov r0, 2; add r0, 5; exit` | 25 (taken path; shape preserved) | Passes respect control flow; per-arm constants fold (v0.10 Part B) |
+| `reloc_map_lookup.o` | 12 slots (11 insns) | clang-built XDP prog: stack key, `ld_imm_dw r1, my_map` + `R_BPF_64_64` reloc at slot 4, `call 1`, null-guard, `XDP_DROP`/`XDP_PASS` | 1 (empty-map miss → drop) | Map-fd relocation linking (v0.11): `inspect` lists the reloc, `verify`/`run` resolve it via `maps_named.json`, unresolved is a fatal link error. Generated with `clang -target bpf -O2 -c prog.c -o reloc_map_lookup.o` (see spike source below); fuzz corpus excludes it (`*.bin` only) |
 
 ## The three packets (raw bytes, `.pkt`)
 
@@ -78,6 +81,7 @@ stack:     mov r1, 42 / *(dw *)(r10 + -8) = r1 / r0 = *(dw *)(r10 + -8) / exit
 - `ebpf-lab-cli` e2e: `optimize` subcommand (size lines, run-both-compare, idempotence, error paths)
 - Fuzz seeds: all thirty-four programs, via `fuzz/build.rs`
 - `maps_example.json`: `--maps` demo (fd 1 hash + fd 2 array with initial values)
+- `maps_named.json`: `--maps` link demo (fd 1 hash named `my_map`, empty) for `reloc_map_lookup.o`
 
 ## Adding a fixture
 

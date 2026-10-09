@@ -36,6 +36,7 @@ fn test_maps() -> Vec<ebpf_verifier::MapDesc> {
             value_size: 8,
             max_entries: 16,
             initial: std::collections::BTreeMap::new(),
+            name: None,
         },
         ebpf_verifier::MapDesc {
             fd: 2,
@@ -44,6 +45,7 @@ fn test_maps() -> Vec<ebpf_verifier::MapDesc> {
             value_size: 4,
             max_entries: 16,
             initial: std::collections::BTreeMap::new(),
+            name: None,
         },
     ]
 }

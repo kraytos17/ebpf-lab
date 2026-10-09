@@ -47,6 +47,7 @@ fn test_maps() -> Vec<MapDesc> {
             value_size: 8,
             max_entries: 256,
             initial,
+            name: None,
         },
         MapDesc {
             fd: 2,
@@ -55,6 +56,7 @@ fn test_maps() -> Vec<MapDesc> {
             value_size: 4,
             max_entries: 16,
             initial: BTreeMap::new(),
+            name: None,
         },
     ]
 }

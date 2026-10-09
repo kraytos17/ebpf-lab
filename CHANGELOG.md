@@ -5,6 +5,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `ebpf-elf`: map-fd relocation resolution. `load_bytes` fills each
+  `Relocation`'s symbol name (via the relocation target), raw ELF `r_type`
+  (`Some(1)` = `R_BPF_64_64`, `Some(10)` = `R_BPF_64_32`), and addend; the
+  new `ElfProgram::resolve_map_relocs` patches `ld_imm_dw` immediates from
+  a symbol-name → fd table before decode (misaligned/out-of-range offsets,
+  non-`ld_imm_dw` targets, and unknown raw codes reject instead of
+  silently linking fd 0).
+- `ebpf-vm`: `MapDesc.name` (optional `.maps` symbol name, `#[serde(default)]`
+  so old `--maps` JSON keeps parsing) as the link-time key for relocation
+  resolution; never consulted at runtime.
+- CLI: `verify`/`run`/`xdp` link `.o` relocations against `--maps` names
+  before decode (unresolvable relocs are a fatal `linking program ...`
+  error); `inspect` lists each relocation
+  (`reloc <offset>: <symbol> (r_type <t>, addend <a>)`); `optimize`
+  rejects relocated programs without a map table instead of running on
+  placeholder immediates.
+- Fixtures: `reloc_map_lookup.o` (clang-built XDP prog, one `R_BPF_64_64`
+  reloc for `my_map`) plus `maps_named.json`, with `verify` accept, `run`
+  exit 1 (empty-map miss → `XDP_DROP`), and unresolved/optimize error pins.
+
 ### Fixed
 
 - `ebpf-ssa`: self-edge phi moves ride edge trampolines so they execute

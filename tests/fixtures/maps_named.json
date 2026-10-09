@@ -1,0 +1,11 @@
+[
+  {
+    "fd": 1,
+    "type": "hash",
+    "key_size": 4,
+    "value_size": 8,
+    "max_entries": 16,
+    "initial": {},
+    "name": "my_map"
+  }
+]

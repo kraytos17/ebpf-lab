@@ -16,7 +16,7 @@
 //! cargo run --profile profiling -p ebpf-verifier --example profile_verify -- pointers
 //! ```
 
-use std::hint::black_box;
+use std::{fs, hint::black_box};
 
 use ebpf_verifier::{MapDesc, MapType, VerifyConfig, verify_with_config};
 
@@ -48,6 +48,7 @@ fn test_maps() -> Vec<MapDesc> {
             value_size: 8,
             max_entries: 256,
             initial,
+            name: None,
         },
         MapDesc {
             fd: 2,
@@ -56,6 +57,7 @@ fn test_maps() -> Vec<MapDesc> {
             value_size: 4,
             max_entries: 16,
             initial: BTreeMap::new(),
+            name: None,
         },
     ]
 }
@@ -63,7 +65,7 @@ fn test_maps() -> Vec<MapDesc> {
 fn fixture(name: &str) -> Vec<u8> {
     let path: std::path::PathBuf =
         [env!("CARGO_MANIFEST_DIR"), "..", "..", "tests", "fixtures", name].iter().collect();
-    std::fs::read(path).expect("driver fixture exists")
+    fs::read(path).expect("driver fixture exists")
 }
 
 fn run_case(insns: &[ebpf_isa::Insn], config: &VerifyConfig, reps: usize) -> usize {

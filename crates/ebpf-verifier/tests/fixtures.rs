@@ -237,6 +237,7 @@ fn oversized_map_fd_capped_not_allocated() {
         value_size: 8,
         max_entries: 1,
         initial: BTreeMap::new(),
+        name: None,
     });
     verify_fixture_with_maps("mov_exit.bin", maps).expect("capped table should verify");
 }

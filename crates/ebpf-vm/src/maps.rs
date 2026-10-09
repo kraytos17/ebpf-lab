@@ -68,6 +68,13 @@ pub struct MapDesc {
     /// lives at the serde boundary (`hex_map`), never in the domain type.
     #[serde(default, with = "hex_map")]
     pub initial: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// ELF `.maps` symbol name for relocation resolution (`None` = anonymous).
+    ///
+    /// Purely a link-time key for ELF map-fd relocs (resolved by
+    /// `ebpf-elf` before decode); never consulted at runtime. Old `--maps`
+    /// JSON without this field keeps parsing via `#[serde(default)]`.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Serde codec for [`MapDesc::initial`]: JSON hex strings (listed byte
@@ -619,6 +626,7 @@ mod tests {
             value_size: 8,
             max_entries: max,
             initial: BTreeMap::new(),
+            name: None,
         }
     }
 
@@ -680,6 +688,7 @@ mod tests {
             value_size: 8,
             max_entries: 2,
             initial: BTreeMap::new(),
+            name: None,
         }
     }
 

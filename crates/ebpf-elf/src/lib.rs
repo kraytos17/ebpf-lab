@@ -10,8 +10,9 @@
 //! `.symtab`, debug info, anything with a leading `.`) are skipped.
 //!
 //! Instruction bytes are returned verbatim; no verification or disassembly is
-//! performed here. Relocations are collected but not consumed — resolving map
-//! fds and subprogram calls belongs to a later stage. BTF is not parsed.
+//! performed here. Relocations are collected with their symbol names and raw
+//! `r_type` codes; [`ElfProgram::resolve_map_relocs`] patches map-fd
+//! `ld_imm_dw` immediates before decode. BTF is not parsed.
 //!
 //! # Choosing a loader
 //!
@@ -23,7 +24,7 @@
 //! Only [`load_raw_bytes`] checks that the length is a multiple of 8, because
 //! an object section carries no such guarantee until it is linked.
 
-use object::{Object, ObjectSection};
+use object::{Object, ObjectSection, ObjectSymbol};
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
@@ -187,22 +188,37 @@ impl fmt::Display for ProgType {
 
 /// A relocation entry inside a program section.
 ///
-/// Relocations are collected but not consumed: map-fd and subprogram
-/// resolution is a later stage.
+/// Spike note (clang 23 `-target bpf`, 2026-10-09): a map reference emits
+/// one `R_BPF_64_64` (raw `r_type` 1) entry whose byte `offset` is the
+/// `ld_imm_dw` slot times 8 (`0x20` for slot 4) and whose symbol is the
+/// `.maps` object name (`my_map`); the placeholder immediate is zero.
+/// `R_BPF_64_32` (10) and call relocs are not map-fd shaped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relocation {
     /// Byte offset of the instruction slot to fix up.
     pub offset: u64,
-    /// Symbol index / name the relocation refers to, when known.
+    /// Symbol name the relocation refers to, when known.
+    ///
+    /// Resolved from the symbol table via the relocation target; `None`
+    /// when the target is not a symbol or the name is not valid UTF-8.
     pub symbol: Option<String>,
     /// The `object` crate's `RelocationKind` discriminant.
     ///
     /// This is the variant order of `object`'s enum, **not** the ELF `r_type`
-    /// code; raw type codes belong to a later resolution stage. The value
-    /// fits in `u8` because the enum has few variants, but the mapping is an
+    /// code; see [`Relocation::r_type`] for the raw code. The value fits in
+    /// `u8` because the enum has few variants, but the mapping is an
     /// implementation detail of the `object` crate and may shift between its
     /// releases.
     pub kind: u8,
+    /// Raw ELF `r_type` code when the file format exposes one.
+    ///
+    /// `Some(1)` is `R_BPF_64_64` (map-fd `ld_imm_dw`); `Some(10)` is
+    /// `R_BPF_64_32`. `None` means the backend did not report a raw code,
+    /// not that the relocation is absent — discriminate by target shape
+    /// in that case.
+    pub r_type: Option<u32>,
+    /// Relocation addend (usually zero for BPF map relocs).
+    pub addend: i64,
 }
 
 /// One eBPF program extracted from an object file.
@@ -219,6 +235,134 @@ pub struct ElfProgram {
     pub bytes: Vec<u8>,
     /// Relocations that must be resolved before execution.
     pub relocations: Vec<Relocation>,
+}
+
+/// Raw ELF `r_type` for a map-fd `ld_imm_dw` relocation (`R_BPF_64_64`).
+pub const R_BPF_64_64: u32 = 1;
+/// Raw ELF `r_type` for 32-bit BPF relocations (`R_BPF_64_32`, not map-fd shaped).
+pub const R_BPF_64_32: u32 = 10;
+
+impl ElfProgram {
+    /// Patches map-fd `ld_imm_dw` immediates in `self.bytes` in place.
+    ///
+    /// `map_fds` maps a `.maps` symbol name to the fd immediate to write.
+    /// Each relocation must name a symbol present in the table, carry either
+    /// no raw code or `R_BPF_64_64`, and point at the first slot of an
+    /// `ld_imm_dw` instruction; the fd is written little-endian into the
+    /// low 4 bytes of that slot's immediate field.
+    ///
+    /// # Errors
+    ///
+    /// - [`ElfError::RelocOutOfBounds`] when `offset` is misaligned, points
+    ///   at the trailing slot of a wide load, or lies outside the section.
+    /// - [`ElfError::UnsupportedReloc`] when the target is not an
+    ///   `ld_imm_dw`, the symbol is unknown, or the raw code is not
+    ///   `R_BPF_64_64`.
+    /// - [`ElfError::UnresolvedMapSymbol`] when the symbol matches no entry
+    ///   in `map_fds`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    /// use ebpf_elf::ElfProgram;
+    ///
+    /// // One `ld_imm_dw r1, 0` placeholder (two 8-byte slots).
+    /// let mut prog = ElfProgram {
+    ///     name: "xdp".into(),
+    ///     prog_type: ebpf_elf::ProgType::Xdp,
+    ///     bytes: vec![
+    ///         0x18, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ///         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ///     ],
+    ///     relocations: vec![ebpf_elf::Relocation {
+    ///         offset: 0,
+    ///         symbol: Some("my_map".into()),
+    ///         kind: 0,
+    ///         r_type: Some(ebpf_elf::R_BPF_64_64),
+    ///         addend: 0,
+    ///     }],
+    /// };
+    /// let fds = HashMap::from([("my_map".to_string(), 1)]);
+    /// prog.resolve_map_relocs(&fds).unwrap();
+    /// assert_eq!(&prog.bytes[4..8], &[1, 0, 0, 0]);
+    /// ```
+    pub fn resolve_map_relocs(
+        &mut self,
+        map_fds: &std::collections::HashMap<String, i32>,
+    ) -> Result<(), ElfError> {
+        for reloc in &self.relocations {
+            if reloc.offset % ebpf_isa::RawInsn::SIZE as u64 != 0 {
+                return Err(ElfError::RelocOutOfBounds {
+                    offset: reloc.offset,
+                    len: self.bytes.len(),
+                });
+            }
+            let Some(slot) = reloc.offset.checked_div(ebpf_isa::RawInsn::SIZE as u64) else {
+                return Err(ElfError::RelocOutOfBounds {
+                    offset: reloc.offset,
+                    len: self.bytes.len(),
+                });
+            };
+            let Ok(slot) = usize::try_from(slot) else {
+                return Err(ElfError::RelocOutOfBounds {
+                    offset: reloc.offset,
+                    len: self.bytes.len(),
+                });
+            };
+            // The wide load occupies two slots; the reloc must address the first.
+            let Some(first) = slot.checked_mul(ebpf_isa::RawInsn::SIZE) else {
+                return Err(ElfError::RelocOutOfBounds {
+                    offset: reloc.offset,
+                    len: self.bytes.len(),
+                });
+            };
+            let Some(slot_bytes) = self.bytes.get(first..first + ebpf_isa::RawInsn::SIZE) else {
+                return Err(ElfError::RelocOutOfBounds {
+                    offset: reloc.offset,
+                    len: self.bytes.len(),
+                });
+            };
+
+            let is_ldimm = slot_bytes.first().is_some_and(|op| *op == ebpf_isa::opcode::LD_IMM_DW);
+
+            let is_map_shape = matches!(reloc.r_type, None | Some(R_BPF_64_64));
+            let Some(symbol) = reloc.symbol.as_ref() else {
+                return Err(ElfError::UnsupportedReloc {
+                    offset: reloc.offset,
+                    r_type: reloc.r_type,
+                    symbol: None,
+                });
+            };
+            if !is_ldimm || !is_map_shape {
+                return Err(ElfError::UnsupportedReloc {
+                    offset: reloc.offset,
+                    r_type: reloc.r_type,
+                    symbol: Some(symbol.clone()),
+                });
+            }
+            // A trailing slot has no second half after it.
+            if first + 2 * ebpf_isa::RawInsn::SIZE > self.bytes.len() {
+                return Err(ElfError::RelocOutOfBounds {
+                    offset: reloc.offset,
+                    len: self.bytes.len(),
+                });
+            }
+            let Some(fd) = map_fds.get(symbol) else {
+                return Err(ElfError::UnresolvedMapSymbol {
+                    symbol: symbol.clone(),
+                    offset: reloc.offset,
+                });
+            };
+
+            let [a, b, c, d] = fd.to_le_bytes();
+            self.bytes[first + 4] = a;
+            self.bytes[first + 5] = b;
+            self.bytes[first + 6] = c;
+            self.bytes[first + 7] = d;
+        }
+        Ok(())
+    }
 }
 
 /// ELF loading errors.
@@ -246,6 +390,32 @@ pub enum ElfError {
     /// Flat `.bin` length is not a multiple of 8.
     #[error("raw program length {0} is not a multiple of 8")]
     BadRawLength(usize),
+    /// Relocation is not a map-fd `ld_imm_dw` (calls, data, unknown shapes).
+    #[error("unsupported relocation at offset {offset}: r_type {r_type:?}, symbol {symbol:?}")]
+    UnsupportedReloc {
+        /// Byte offset of the relocation in the section.
+        offset: u64,
+        /// Raw ELF `r_type`, when known.
+        r_type: Option<u32>,
+        /// Symbol name, when known.
+        symbol: Option<String>,
+    },
+    /// Map-fd relocation whose symbol matches no descriptor.
+    #[error("unresolved map symbol `{symbol}` at offset {offset}")]
+    UnresolvedMapSymbol {
+        /// Map symbol name from the relocation target.
+        symbol: String,
+        /// Byte offset of the relocation in the section.
+        offset: u64,
+    },
+    /// Relocation offset is misaligned or outside the section.
+    #[error("relocation offset {offset} out of bounds (section length {len})")]
+    RelocOutOfBounds {
+        /// Byte offset of the relocation in the section.
+        offset: u64,
+        /// Section byte length.
+        len: usize,
+    },
 }
 
 impl PartialEq for ElfError {
@@ -264,6 +434,18 @@ impl PartialEq for ElfError {
             (Self::Parse(a), Self::Parse(b)) => a.to_string() == b.to_string(),
             (Self::NoPrograms(a), Self::NoPrograms(b)) => a == b,
             (Self::BadRawLength(a), Self::BadRawLength(b)) => a == b,
+            (
+                Self::UnsupportedReloc { offset: a_off, r_type: a_ty, symbol: a_sym },
+                Self::UnsupportedReloc { offset: b_off, r_type: b_ty, symbol: b_sym },
+            ) => a_off == b_off && a_ty == b_ty && a_sym == b_sym,
+            (
+                Self::UnresolvedMapSymbol { symbol: a_sym, offset: a_off },
+                Self::UnresolvedMapSymbol { symbol: b_sym, offset: b_off },
+            ) => a_sym == b_sym && a_off == b_off,
+            (
+                Self::RelocOutOfBounds { offset: a_off, len: a_len },
+                Self::RelocOutOfBounds { offset: b_off, len: b_len },
+            ) => a_off == b_off && a_len == b_len,
             _ => false,
         }
     }
@@ -305,7 +487,27 @@ pub fn load_bytes(data: &[u8], label: &str) -> Result<Vec<ElfProgram>, ElfError>
         let Ok(bytes) = section.data() else { continue };
         let relocations = section
             .relocations()
-            .map(|(offset, reloc)| Relocation { offset, symbol: None, kind: reloc.kind() as u8 })
+            .map(|(offset, reloc)| {
+                let symbol = match reloc.target() {
+                    object::RelocationTarget::Symbol(idx) => obj
+                        .symbol_by_index(idx)
+                        .ok()
+                        .and_then(|s| s.name().ok().map(str::to_string)),
+                    _ => None,
+                };
+                let r_type = match reloc.flags() {
+                    object::RelocationFlags::Elf { r_type } => Some(r_type.0),
+                    _ => None,
+                };
+
+                Relocation {
+                    offset,
+                    symbol,
+                    kind: reloc.kind() as u8,
+                    r_type,
+                    addend: reloc.addend(),
+                }
+            })
             .collect();
         programs.push(ElfProgram {
             name: name.to_string(),
@@ -348,7 +550,7 @@ pub fn load_raw_bytes(path: &Path) -> Result<ElfProgram, ElfError> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::path::Path;
+    use std::{collections::HashMap, path::Path};
 
     use super::*;
 
@@ -425,5 +627,118 @@ mod tests {
         assert!(matches!(err, ElfError::Io { .. }));
         let err = load_object(Path::new("/nonexistent/ebpf-lab-test.o")).unwrap_err();
         assert!(matches!(err, ElfError::Io { .. }));
+    }
+
+    /// One `ld_imm_dw r1, 0` placeholder plus a map-fd reloc.
+    fn reloc_prog(offset: u64, symbol: Option<&str>, r_type: Option<u32>) -> ElfProgram {
+        ElfProgram {
+            name: "xdp".into(),
+            prog_type: ProgType::Xdp,
+            bytes: vec![
+                0x18, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+            relocations: vec![Relocation {
+                offset,
+                symbol: symbol.map(str::to_string),
+                kind: 0,
+                r_type,
+                addend: 0,
+            }],
+        }
+    }
+
+    fn fds() -> HashMap<String, i32> {
+        HashMap::from([("my_map".to_string(), 1)])
+    }
+
+    #[test]
+    fn resolve_empty_is_ok() {
+        let mut prog = ElfProgram {
+            name: "xdp".into(),
+            prog_type: ProgType::Xdp,
+            bytes: vec![0x95; 8],
+            relocations: Vec::new(),
+        };
+        prog.resolve_map_relocs(&fds()).unwrap();
+        assert_eq!(prog.bytes, vec![0x95; 8]);
+    }
+
+    /// Happy path with and without a recorded raw code.
+    #[test]
+    fn resolve_happy_path_patches_fd() {
+        for r_type in [Some(R_BPF_64_64), None] {
+            let mut prog = reloc_prog(0, Some("my_map"), r_type);
+            prog.resolve_map_relocs(&fds()).unwrap();
+            assert_eq!(&prog.bytes[4..8], &[1, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn resolve_error_matrix() {
+        // Unknown symbol.
+        let mut prog = reloc_prog(0, Some("nope"), Some(R_BPF_64_64));
+        assert_eq!(
+            prog.resolve_map_relocs(&fds()).unwrap_err(),
+            ElfError::UnresolvedMapSymbol { symbol: "nope".into(), offset: 0 }
+        );
+        // Missing symbol.
+        let mut prog = reloc_prog(0, None, Some(R_BPF_64_64));
+        assert_eq!(
+            prog.resolve_map_relocs(&fds()).unwrap_err(),
+            ElfError::UnsupportedReloc { offset: 0, r_type: Some(R_BPF_64_64), symbol: None }
+        );
+        // Wrong raw code (`R_BPF_64_32` is not map-fd shaped).
+        let mut prog = reloc_prog(0, Some("my_map"), Some(R_BPF_64_32));
+        assert_eq!(
+            prog.resolve_map_relocs(&fds()).unwrap_err(),
+            ElfError::UnsupportedReloc {
+                offset: 0,
+                r_type: Some(R_BPF_64_32),
+                symbol: Some("my_map".into()),
+            }
+        );
+        // Non-`ld_imm_dw` target (the trailing `exit`).
+        let mut prog = reloc_prog(16, Some("my_map"), Some(R_BPF_64_64));
+        assert_eq!(
+            prog.resolve_map_relocs(&fds()).unwrap_err(),
+            ElfError::UnsupportedReloc {
+                offset: 16,
+                r_type: Some(R_BPF_64_64),
+                symbol: Some("my_map".into()),
+            }
+        );
+        // Misaligned offset.
+        let mut prog = reloc_prog(3, Some("my_map"), Some(R_BPF_64_64));
+        assert_eq!(
+            prog.resolve_map_relocs(&fds()).unwrap_err(),
+            ElfError::RelocOutOfBounds { offset: 3, len: 24 }
+        );
+        // Offset past the section.
+        let mut prog = reloc_prog(64, Some("my_map"), Some(R_BPF_64_64));
+        assert_eq!(
+            prog.resolve_map_relocs(&fds()).unwrap_err(),
+            ElfError::RelocOutOfBounds { offset: 64, len: 24 }
+        );
+        // Trailing slot: `ld_imm_dw`-shaped but no second half after it.
+        let mut prog = ElfProgram {
+            name: "xdp".into(),
+            prog_type: ProgType::Xdp,
+            bytes: vec![
+                0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x01, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00,
+            ],
+            relocations: vec![Relocation {
+                offset: 8,
+                symbol: Some("my_map".into()),
+                kind: 0,
+                r_type: None,
+                addend: 0,
+            }],
+        };
+        assert_eq!(
+            prog.resolve_map_relocs(&fds()).unwrap_err(),
+            ElfError::RelocOutOfBounds { offset: 8, len: 16 }
+        );
     }
 }

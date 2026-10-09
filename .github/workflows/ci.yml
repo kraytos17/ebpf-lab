@@ -69,54 +69,6 @@ jobs:
           name: coverage-lcov
           path: lcov.info
 
-  bench:
-    # Smoke-plus-detection: benches must build and run, and no suite may
-    # regress beyond +30% after normalizing by the run's machine factor
-    # (the median ratio — GitHub runners vary by CPU and region, so a
-    # machine shift moves every raw ratio together). Quiet-machine
-    # `bench-release` runs stay the source of truth for absolute numbers.
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.99"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo install critcmp --locked --version 0.1.8
-      - name: restore bench baseline
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: bench-base.json
-          key: bench-base-${{ github.run_id }}
-          restore-keys: |
-            bench-base-
-      - name: clean criterion state
-        # Stale baseline dirs restored with the rust cache cause criterion
-        # to log "Failed to access file .../ci/sample.json"; the gate
-        # compares the fresh `critcmp --export`, never these directories.
-        run: rm -rf target/criterion
-      - run: cargo bench --workspace --locked --no-run
-      - run: cargo bench -p ebpf-isa --locked --bench decode -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
-      - run: cargo bench -p ebpf-cfg --locked --bench cfg -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
-      - run: cargo bench -p ebpf-vm --locked --bench vm -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
-      - run: cargo bench -p ebpf-verifier --locked --bench verify -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
-      - run: cargo bench -p ebpf-ssa --locked --bench ssa -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
-      - name: compare against baseline
-        run: |
-          critcmp --export ci > bench-new.json
-          if [ -f bench-base.json ]; then critcmp bench-base.json bench-new.json; fi
-          python3 .github/scripts/bench_gate.py bench-base.json bench-new.json --threshold 1.30
-      - name: promote baseline
-        if: success()
-        run: cp bench-new.json bench-base.json
-      - name: save bench baseline
-        if: success()
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: bench-base.json
-          key: bench-base-${{ github.run_id }}
-
   doc:
     runs-on: ubuntu-latest
     timeout-minutes: 15

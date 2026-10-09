@@ -1,0 +1,133 @@
+name: bench
+on:
+  push:
+    branches: [main]
+    paths:
+      # Bench code cannot depend on test code, so test-only, docs-only,
+      # and fixture-only changes skip this. If a future
+      # perf-relevant input appears outside these paths (e.g. rustc
+      # flags in .cargo/config.toml), add it here.
+      - 'crates/**/src/**'
+      - 'crates/**/benches/**'
+      - 'crates/**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/bench.yml'
+      - '.github/scripts/bench_gate.py'
+  pull_request:
+    paths:
+      - 'crates/**/src/**'
+      - 'crates/**/benches/**'
+      - 'crates/**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/bench.yml'
+      - '.github/scripts/bench_gate.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    # `pull-requests: write` is job-level (GitHub has no step-level
+    # permissions): only the comment step uses it, and only for
+    # same-repo PRs via the `full_name` guard below.
+    permissions:
+      contents: read
+      pull-requests: write
+    # Smoke-plus-detection: benches must build and run. The gate is
+    # advisory on PRs (comment, never red) and enforces on main only
+    # for a benchmark's *second consecutive* breach — one noisy run
+    # strikes, two fail. A run with any breach never promotes its
+    # numbers into the baseline. Quiet-machine `bench-release` runs
+    # stay the source of truth for absolute numbers.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo install critcmp --locked --version 0.1.8
+      - name: restore bench baseline
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            bench-base.json
+            bench-strikes.json
+          key: bench-base-${{ github.run_id }}
+          restore-keys: |
+            bench-base-
+      - name: clean criterion state
+        # Stale baseline dirs restored with the rust cache cause criterion
+        # to log "Failed to access file .../ci/sample.json"; the gate
+        # compares the fresh `critcmp --export`, never these directories.
+        run: rm -rf target/criterion
+      - run: cargo bench --workspace --locked --no-run
+      - run: cargo bench -p ebpf-isa --locked --bench decode -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
+      - run: cargo bench -p ebpf-cfg --locked --bench cfg -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
+      - run: cargo bench -p ebpf-vm --locked --bench vm -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
+      - run: cargo bench -p ebpf-verifier --locked --bench verify -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
+      - run: cargo bench -p ebpf-ssa --locked --bench ssa -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
+      - name: compare against baseline
+        id: gate
+        # Never red on PRs: breaches post a comment instead. On main the
+        # dedicated enforce step below fails the job for confirmations.
+        continue-on-error: true
+        run: |
+          critcmp --export ci > bench-new.json
+          if [ -f bench-base.json ]; then critcmp bench-base.json bench-new.json; fi
+          python3 .github/scripts/bench_gate.py bench-base.json bench-new.json \
+            --threshold 1.30 --strikes bench-strikes.json --report bench-gate-report.md \
+            --confirm-on ${{ github.event_name == 'push' && 'main' || 'never' }}
+      - name: comment bench result
+        if: github.event_name == 'pull_request' && steps.gate.outcome == 'failure' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- bench-gate -->';
+            const body = marker + '\n' + fs.readFileSync('bench-gate-report.md', 'utf8');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const prev = comments.find(c => c.body.includes(marker));
+            if (prev) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: prev.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }
+      - name: enforce confirmed regressions
+        # `continue-on-error` above keeps the job alive; this is the only
+        # step that can red it: confirmed (2nd consecutive breach) on main.
+        # A crashed gate (no outputs) also fails: silence is not consent.
+        if: github.event_name == 'push' && steps.gate.outcome == 'failure' && steps.gate.outputs.confirmed != 'false'
+        run: |
+          echo "confirmed regressions: ${{ steps.gate.outputs.breaches }}"
+          exit 1
+      - name: promote baseline
+        # Explicit outcome check: under `continue-on-error`, `success()`
+        # stays true after a rescued failure and would promote regressed
+        # numbers. Only a fully clean gate (exit 0) promotes.
+        if: steps.gate.outcome == 'success'
+        run: cp bench-new.json bench-base.json
+      - name: save bench baseline
+        if: steps.gate.outcome == 'success'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            bench-base.json
+            bench-strikes.json
+          key: bench-base-${{ github.run_id }}
