@@ -584,7 +584,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Workspace scaffold (`ebpf-isa`, `ebpf-elf`, `ebpf-disasm`, `ebpf-lab-cli`)
   with shared `[workspace.lints]` (clippy pedantic/nursery, `unsafe_code
-  = "forbid"`), `rust-toolchain.toml` pinning 1.98, `rustfmt.toml`.
+  = "forbid"`), `rust-toolchain.toml` pinning 1.99, `rustfmt.toml`.
 - `ebpf-isa`: `RawInsn`, `Reg`, `Insn` enum, `decode_program` (incl. 16-byte
   `ld_imm_dw`, `call`/`exit`, ALU/JMP/LDX/ST/STX).
 - `ebpf-elf`: `ProgType::from_section_name`, `load_object` via `object`

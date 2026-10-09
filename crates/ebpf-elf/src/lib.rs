@@ -410,7 +410,7 @@ mod tests {
         let prog = load_raw_bytes(&valid).unwrap();
         assert_eq!(prog.bytes.len(), 8);
         assert_eq!(prog.prog_type, ProgType::Unknown);
-        assert!(prog.relocations.is_empty());
+        assert_eq!(prog.relocations.len(), 0);
 
         let bad = dir.join("bad.bin");
         std::fs::write(&bad, [0x95u8, 0, 0]).unwrap();

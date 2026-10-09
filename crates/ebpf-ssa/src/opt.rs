@@ -182,9 +182,13 @@ fn constant_fold(prog: &mut SsaProgram, consts: &mut ConstTable) -> bool {
 ///
 /// `v = Copy(u)`: all uses become `u` (dominance-safe: `u` predates `v`,
 /// so `u`'s definition dominates every rewritten site).
-/// `v = φ(..)` with exactly one distinct non-self operand `u`: same
-/// rewrite (collapses redundant merges, including loop-invariant
-/// passthroughs). Self-only phis are left for unreachable elimination.
+/// `v = φ(..)` with exactly one distinct non-self operand `u` over
+/// live predecessors: same rewrite (collapses redundant merges,
+/// including loop-invariant passthroughs). Inputs from dead blocks are
+/// invisible here as everywhere else (`reg_uses`, lowering): forwarding
+/// one would promote an unreachable placeholder into live positions.
+/// Self-only phis are left for unreachable elimination (lowering
+/// materializes their zero explicitly).
 /// Never creates immediate `lhs` operands and never alters control flow.
 fn copy_propagate(prog: &mut SsaProgram) -> bool {
     // Collect rewrites first (immutable scan), apply after. At most one
@@ -212,8 +216,17 @@ fn copy_propagate(prog: &mut SsaProgram) -> bool {
                     rewrites.push((*dst, *u));
                 }
                 SsaInsn::Phi { dst, inputs } => {
-                    let mut distinct =
-                        inputs.iter().map(|&(_, v)| v).filter(|&v| v != *dst).collect::<Vec<_>>();
+                    // Only live inflows vote: a dead predecessor's input
+                    // is a placeholder for an unreachable shape (see
+                    // `repair`), and forwarding it would rewrite live
+                    // uses of the phi into a version defined nowhere.
+                    // Start inflows are real entry values and count.
+                    let mut distinct = inputs
+                        .iter()
+                        .filter(|(pred, _)| crate::is_start_pred(*pred) || prog.graph[*pred].live)
+                        .map(|&(_, v)| v)
+                        .filter(|&v| v != *dst)
+                        .collect::<Vec<_>>();
                     distinct.dedup();
                     if let [only] = distinct.as_slice() {
                         rewrites.push((*dst, *only));

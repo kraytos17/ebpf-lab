@@ -441,16 +441,11 @@ impl MapStore {
         match self {
             Self::Hash { desc, data } => {
                 let present = data.contains_key(key);
-                match flag {
-                    UpdateFlags::NoExist if present => return Err(MapError::KeyExists),
-                    UpdateFlags::Exist if !present => return Err(MapError::KeyNotFound),
-                    _ => {}
-                }
+                check_update_flags(flag, present)?;
                 if !present && data.len() >= desc.max_entries {
                     return Err(MapError::Full { max_entries: desc.max_entries });
                 }
                 data.insert(key.to_vec(), value.to_vec());
-                Ok(())
             }
             Self::Array { desc, data } => {
                 let idx = array_index(key, desc.max_entries)?;
@@ -460,15 +455,10 @@ impl MapStore {
                     UpdateFlags::Exist | UpdateFlags::Any => {}
                 }
                 data[idx] = value.to_vec();
-                Ok(())
             }
             Self::LruArray { desc, data, stamps, stamp_of, seq } => {
                 let present = data.contains_key(key);
-                match flag {
-                    UpdateFlags::NoExist if present => return Err(MapError::KeyExists),
-                    UpdateFlags::Exist if !present => return Err(MapError::KeyNotFound),
-                    _ => {}
-                }
+                check_update_flags(flag, present)?;
                 if !present
                     && data.len() >= desc.max_entries
                     && let Some((_, old)) = stamps.pop_first()
@@ -479,9 +469,9 @@ impl MapStore {
 
                 lru_touch(stamps, stamp_of, seq, key);
                 data.insert(Rc::from(key), value.to_vec());
-                Ok(())
             }
         }
+        Ok(())
     }
 
     /// Delete an entry. Array slots are zeroed (lab simplification: the
@@ -552,6 +542,17 @@ fn lru_touch(
     let shared: Rc<[u8]> = Rc::from(key);
     stamp_of.insert(shared.clone(), stamp);
     stamps.insert(stamp, shared);
+}
+
+/// Gate an update on `EXIST`/`NOEXIST` semantics against presence.
+/// Shared by the keyed map kinds (array slots always exist, so that arm
+/// keeps its own inline check).
+const fn check_update_flags(flag: UpdateFlags, present: bool) -> Result<(), MapError> {
+    match flag {
+        UpdateFlags::NoExist if present => Err(MapError::KeyExists),
+        UpdateFlags::Exist if !present => Err(MapError::KeyNotFound),
+        _ => Ok(()),
+    }
 }
 
 /// Array key bytes → slot index (first 4 bytes, little-endian).
@@ -684,13 +685,13 @@ mod tests {
     #[test]
     fn hash_crud() {
         let mut m = MapStore::new(hash_desc()).unwrap();
-        assert!(m.is_empty());
+        assert_eq!(m.len(), 0);
         m.update(&[1, 0, 0, 0], &[10, 0, 0, 0, 0, 0, 0, 0], 0).unwrap();
         assert_eq!(m.len(), 1);
         assert_eq!(m.lookup(&[1, 0, 0, 0]).unwrap(), Some([10, 0, 0, 0, 0, 0, 0, 0].as_slice()));
         assert_eq!(m.lookup(&[9, 0, 0, 0]).unwrap(), None);
         m.delete(&[1, 0, 0, 0]).unwrap();
-        assert!(m.is_empty());
+        assert_eq!(m.len(), 0);
         assert_eq!(m.delete(&[1, 0, 0, 0]), Err(MapError::KeyNotFound));
     }
 
@@ -804,12 +805,12 @@ mod tests {
         let m = MapStore::new(hash_desc()).unwrap();
         assert_eq!(m.len(), 0);
         assert_eq!(m.capacity(), 2);
-        assert!(m.is_empty());
+        assert_eq!(m.len(), 0);
         let desc = MapDesc { fd: 2, map_type: MapType::Array, ..hash_desc() };
         let a = MapStore::new(desc).unwrap();
         assert_eq!(a.len(), 2);
         assert_eq!(a.capacity(), 2);
-        assert!(!a.is_empty());
+        assert_ne!(a.len(), 0);
     }
 
     #[test]
@@ -822,7 +823,7 @@ mod tests {
             build_stores(vec![hash_desc(), hash_desc()]),
             Err(MapError::DuplicateFd { fd: 1 })
         ));
-        assert!(build_stores(vec![]).unwrap().is_empty());
+        assert_eq!(build_stores(vec![]).unwrap().len(), 0);
     }
 
     #[test]

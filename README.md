@@ -2,7 +2,7 @@
 
 [![ci](https://github.com/kraytos17/ebpf-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/kraytos17/ebpf-lab/actions/workflows/ci.yml)
 [![fuzz](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml/badge.svg)](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml)
-[![msrv](https://img.shields.io/badge/MSRV-1.98-blue)](https://github.com/kraytos17/ebpf-lab)
+[![msrv](https://img.shields.io/badge/MSRV-1.99-blue)](https://github.com/kraytos17/ebpf-lab)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![tests](https://img.shields.io/badge/tests-302-blue)](https://github.com/kraytos17/ebpf-lab)
 [![fixtures](https://img.shields.io/badge/fixtures-34-orange)](tests/fixtures/)
@@ -161,7 +161,7 @@ just fuzz-smoke      # 3×60s fuzzer runs (needs nightly + cargo-fuzz)
 | `bench` | compile-check + smoke per bench target |
 | `doc` | `RUSTDOCFLAGS="-D warnings"` |
 | `deny` | advisories, licenses, bans, sources |
-| `msrv-minimal` | `minimal-versions` resolve + check on 1.98 |
+| `msrv-minimal` | `minimal-versions` resolve + check on 1.99 |
 | `fuzz build` | nightly ASan build on isa/cfg/disasm/verifier/ssa changes |
 | `fuzz run` | 300s timed runs, all three targets (weekly / manual) |
 

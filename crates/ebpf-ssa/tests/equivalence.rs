@@ -345,6 +345,16 @@ fn crasher_cases() -> Vec<(&'static str, Vec<u8>)> {
         183, 0, 0, 0, 0, 128, 0, 0, 191, 1, 0, 0, 0, 0, 0, 0, 175, 0, 0, 0, 1, 0, 0, 16, 165, 1,
         253, 255, 232, 3, 0, 0,
     ];
+    // A loop over never-written registers: copy-prop forwarded a
+    // dead-predecessor phi input into live store/load positions (its
+    // definition lived only in dead code), and the orphaned versions
+    // shared a live home — the fault address moved. Dead inputs no
+    // longer vote, and anchorless phis materialize zero.
+    let undefined_loop_addrs: Vec<u8> = vec![
+        183, 0, 0, 0, 0, 249, 0, 0, 191, 1, 1, 0, 1, 0, 0, 0, 165, 1, 253, 255, 232, 58, 0, 0, 6,
+        0, 1, 0, 1, 0, 0, 0, 165, 1, 253, 255, 116, 116, 213, 116, 11, 116, 116, 145, 145, 145,
+        145, 145, 145, 145, 145, 145, 145, 116, 244, 253,
+    ];
     vec![
         ("entry_loop", entry_loop),
         ("bad_end", bad_end),
@@ -363,6 +373,7 @@ fn crasher_cases() -> Vec<(&'static str, Vec<u8>)> {
         ("same_pos_clobber", same_pos_clobber),
         ("empty_tail_invert", empty_tail_invert),
         ("self_edge_phi_clobber", self_edge_phi_clobber),
+        ("undefined_loop_addrs", undefined_loop_addrs),
     ]
 }
 

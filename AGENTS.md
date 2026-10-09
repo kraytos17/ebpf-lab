@@ -29,7 +29,7 @@ just fuzz-smoke      # 3×60s libFuzzer runs (needs nightly + cargo-fuzz)
 - `rustfmt.toml`: edition 2024, `max_width = 100`,
   `use_small_heuristics = "Max"`. Run `cargo fmt` before every commit;
   CI checks `--check`.
-- MSRV is 1.98 (`rust-toolchain.toml`, `rust-version.workspace`). The
+- MSRV is 1.99 (`rust-toolchain.toml`, `rust-version.workspace`). The
   `msrv-minimal` CI job runs `-Z minimal-versions -Z direct-minimal-versions`
   with `continue-on-error: true`. Do not add dependencies without checking
   their MSRV floors.

@@ -484,10 +484,23 @@ impl<'p> Lower<'p> {
         let moves = mem::take(&mut self.end_moves[block.index()]);
         for (k, insn) in self.prog.insns[start..end].iter().enumerate() {
             match insn {
-                // Phis, pseudos, and control vanish or are handled
-                // elsewhere.
-                SsaInsn::Phi { .. }
-                | SsaInsn::FramePtr { .. }
+                SsaInsn::Phi { dst, inputs } => {
+                    // Anchorless phis (no start inflow and every live
+                    // inflow is the phi itself) are never defined on any
+                    // executable path: the value is the VM's zero
+                    // initialization. Materialize it so the home never
+                    // carries a leftover from an expired sharer.
+                    if let Some(home) = self.home_of(*dst) {
+                        let anchored = inputs.iter().any(|(pred, v)| {
+                            crate::is_start_pred(*pred) || (self.live[pred.index()] && *v != *dst)
+                        });
+                        if !anchored {
+                            self.emit_const(home, 0);
+                        }
+                    }
+                }
+                // Pseudos and control vanish or are handled elsewhere.
+                SsaInsn::FramePtr { .. }
                 | SsaInsn::EntryCtx { .. }
                 | SsaInsn::Br { .. }
                 | SsaInsn::Ja { .. }

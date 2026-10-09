@@ -2,7 +2,7 @@ name: release
 # Tag-driven releases: `git tag vX.Y.0 && git push origin vX.Y.0` builds
 # the GitHub Release from the matching `## [X.Y.0]` CHANGELOG section.
 # The tag/version/section/link checks below fail the run instead of
-# publishing a malformed release (they mirror the AGENTS.md §9 contract).
+# publishing a malformed release.
 on:
   push:
     tags: ["v*"]
@@ -29,7 +29,6 @@ jobs:
           [ -n "$notes" ] || { echo "no '## [$version]' section in CHANGELOG.md"; exit 1; }
           grep -q "^\[$version\]:" CHANGELOG.md || { echo "missing '[$version]:' link (AGENTS.md §9)"; exit 1; }
           printf '%s\n' "$notes" > release-notes.md
-      # gh is preinstalled on runners: no third-party action needed.
       - name: create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
