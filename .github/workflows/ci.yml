@@ -71,7 +71,10 @@ jobs:
 
   bench:
     # Smoke-plus-detection: benches must build and run, and no suite may
-    # regress beyond +30% vs the cached baseline.
+    # regress beyond +30% after normalizing by the run's machine factor
+    # (the median ratio — GitHub runners vary by CPU and region, so a
+    # machine shift moves every raw ratio together). Quiet-machine
+    # `bench-release` runs stay the source of truth for absolute numbers.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -88,6 +91,11 @@ jobs:
           key: bench-base-${{ github.run_id }}
           restore-keys: |
             bench-base-
+      - name: clean criterion state
+        # Stale baseline dirs restored with the rust cache cause criterion
+        # to log "Failed to access file .../ci/sample.json"; the gate
+        # compares the fresh `critcmp --export`, never these directories.
+        run: rm -rf target/criterion
       - run: cargo bench --workspace --locked --no-run
       - run: cargo bench -p ebpf-isa --locked --bench decode -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
       - run: cargo bench -p ebpf-cfg --locked --bench cfg -- --save-baseline ci --measurement-time 5 --warm-up-time 0.5 --sample-size 30
