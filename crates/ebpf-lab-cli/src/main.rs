@@ -219,7 +219,7 @@ fn load_decoded(path: &Path) -> anyhow::Result<Vec<DecodedProgram>> {
 ///
 /// Anonymous descriptors (`name: None`) are skipped: they still serve
 /// `.bin` immediates. Duplicate names are a hard error — silently picking
-/// one would mis-link the program.
+/// one would mislink the program.
 fn map_name_table(descs: &[ebpf_vm::MapDesc]) -> anyhow::Result<HashMap<String, i32>> {
     let mut table = HashMap::new();
     for desc in descs {
