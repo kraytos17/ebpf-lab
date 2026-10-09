@@ -3,7 +3,7 @@
 An eBPF laboratory in Rust: decode → disassemble → CFG → VM → verify → optimize.
 Eight workspace crates, zero `unsafe`, interval-lattice verifier with
 threshold widening + typed/map/packet helpers, SSA optimizer with
-run-equivalence oracle, 302 tests, ~90% line coverage.
+run-equivalence oracle, 303 tests, ~90% line coverage.
 
 ## 1. Gates (run these, in this order)
 
@@ -282,6 +282,14 @@ behaviour without reading the body.
   from `decode.rs`/`classify` and verified through a `disasm` round-trip
   (never copy hex from memory); acceptance must not drop below ~10/256
   (rebalance `mov`/`add` weights first, cut arms last).
+- **Maps oracle** (`accept_implies_vm_safe_maps`): the maps-configured
+  sibling — `VerifyConfig::with_maps(test_maps())` +
+  `Vm::new_with_maps`, over well-formed lookup/update/delete shapes
+  (guarded accesses bounded by each fd's `value_size`, keys crossing the
+  array `max_entries` boundary). Acceptance is full by construction, so
+  a rejected shape means the builder drifted; it covers the map surface
+  the default property cannot reach (every `call` rejects vacuously
+  there).
 
 ## 6. Testing strategy (what lives where)
 
@@ -292,7 +300,7 @@ behaviour without reading the body.
 | Golden (insta) | `ebpf-disasm/tests/golden.rs` (11), `ebpf-cfg/tests/golden.rs` (6) | disassembly text, DOT graphs — incl. loop back-edge, `call`, packet loads, multi-branch dispatch |
 | Trace snapshots (insta) | `ebpf-verifier/tests/trace_snapshot.rs` (9) | JSON schema incl. widened intervals, `maybe_map_ptr`/`map_ptr`, `xdp_md_ptr`/`packet_ptr`, helper `Top` ranges, `BPF_END` |
 | Fixture accept/reject | `ebpf-verifier/tests/fixtures.rs`, `ebpf-vm/src/exec.rs` | exact `VerifyError`/`VmError` variants, pinned exit codes |
-| Differential oracle | `ebpf-verifier/tests/differential.rs` | fixtures + 256 random programs |
+| Differential oracle | `ebpf-verifier/tests/differential.rs` | fixtures + two 256-case properties (default + maps) |
 | CLI e2e | `ebpf-lab-cli/tests/cli.rs` (38) | every subcommand/flag via `CARGO_BIN_EXE`, incl. `--maps` errors |
 | Fuzz | `fuzz/fuzz_targets/` (decode_program + verify_pipeline + ssa_pipeline) | totality: errors, never panic/hang/OOM; `ssa_pipeline` asserts run-equivalence |
 
