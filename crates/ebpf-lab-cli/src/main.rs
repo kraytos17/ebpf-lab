@@ -277,7 +277,7 @@ fn cmd_inspect(path: &Path) -> anyhow::Result<()> {
         print!("{}", ebpf_disasm::disassemble(&prog.insns));
     }
     // BTF is file-level metadata: one block after all programs. A `.bin`
-    // has no ELF wrapper, so anything unparseable means "none", not an
+    // has no ELF wrapper, so anything unparsable means "none", not an
     // error (`load_programs` above already rejected unreadable files).
     match fs::read(path).ok().and_then(|b| ebpf_elf::btf_sections(&b).ok()) {
         Some(sections) if !sections.is_empty() => {
