@@ -134,6 +134,7 @@ mod tests {
     use super::*;
     use crate::insn::{AluOp, JumpOp, MemSize};
     use proptest::prelude::*;
+    use std::assert_matches;
 
     fn word(opcode: u8, regs: u8, offset: i16, imm: i32) -> [u8; 8] {
         RawInsn { opcode, regs, offset, imm }.to_bytes()
@@ -215,7 +216,7 @@ mod tests {
 
     #[test]
     fn rejects_truncated_tail() {
-        assert!(matches!(decode_program(&[0xb7, 0x00, 0]), Err(DecodeError::Truncated { .. })));
+        assert_matches!(decode_program(&[0xb7, 0x00, 0]), Err(DecodeError::Truncated { .. }));
     }
 
     proptest! {

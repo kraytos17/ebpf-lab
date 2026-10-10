@@ -616,6 +616,7 @@ pub fn build_stores(descs: Vec<MapDesc>) -> Result<Vec<Option<MapStore>>, MapErr
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::assert_matches;
 
     /// Fixed-shape hash for model tests: 4-byte keys, 8-byte values.
     fn model_desc(max: usize) -> MapDesc {
@@ -747,18 +748,18 @@ mod tests {
 
     #[test]
     fn rejects_bad_descriptors() {
-        assert!(matches!(
+        assert_matches!(
             MapStore::new(MapDesc { fd: 0, ..hash_desc() }),
             Err(MapError::BadFd { .. })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             MapStore::new(MapDesc { key_size: 0, ..hash_desc() }),
             Err(MapError::InvalidDesc(_))
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             MapStore::new(MapDesc { fd: 2, map_type: MapType::Array, key_size: 8, ..hash_desc() }),
             Err(MapError::InvalidDesc(_))
-        ));
+        );
         let mut m = MapStore::new(hash_desc()).unwrap();
         assert_eq!(
             m.update(&[1, 0], &[0; 8], 0),
@@ -829,10 +830,10 @@ mod tests {
         assert_eq!(table.len(), 2);
         assert!(table[0].is_none());
         assert!(table[1].is_some());
-        assert!(matches!(
+        assert_matches!(
             build_stores(vec![hash_desc(), hash_desc()]),
             Err(MapError::DuplicateFd { fd: 1 })
-        ));
+        );
         assert_eq!(build_stores(vec![]).unwrap().len(), 0);
     }
 
@@ -840,10 +841,10 @@ mod tests {
     fn oversized_fd_rejected_before_allocation() {
         // `i64::MAX` must fail fast: without the `MAX_MAP_FD` ceiling this
         // would attempt a multi-exabyte `Vec` allocation.
-        assert!(matches!(
+        assert_matches!(
             build_stores(vec![MapDesc { fd: i64::MAX, ..hash_desc() }]),
             Err(MapError::FdTooLarge { .. })
-        ));
+        );
         assert!(matches!(
             build_stores(vec![MapDesc { fd: MAX_MAP_FD + 1, ..hash_desc() }]),
             Err(MapError::FdTooLarge { fd, .. }) if fd == MAX_MAP_FD + 1

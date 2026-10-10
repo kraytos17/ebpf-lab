@@ -106,6 +106,13 @@ enum Command {
         /// contract in `ebpf-verifier` docs).
         #[arg(long, default_value_t = 16)]
         max_iterations: usize,
+        /// Loop step budget: every proven loop trip-count must fit, else
+        /// the program rejects. Acceptance then implies termination
+        /// inside the run budget below.
+        // `usize` to `u64` is exact on all targets (widening on 32-bit,
+        // same size on 64-bit).
+        #[arg(long, default_value_t = DEFAULT_MAX_STEPS as u64)]
+        max_loop_steps: u64,
         /// Path to a `--maps` JSON file (map descriptors with initial values).
         #[arg(long)]
         maps: Option<PathBuf>,
@@ -137,6 +144,11 @@ enum Command {
         /// analysis, not the program).
         #[arg(long, default_value_t = 16)]
         max_iterations: usize,
+        /// Loop step budget for the pre-run verification (see `verify`).
+        // `usize` to `u64` is exact on all targets (widening on 32-bit,
+        // same size on 64-bit).
+        #[arg(long, default_value_t = DEFAULT_MAX_STEPS as u64)]
+        max_loop_steps: u64,
     },
     /// Optimize a program (SSA constant folding, copy propagation, dead-code
     /// and unreachable-block elimination) and write flat bytecode.
@@ -238,10 +250,10 @@ fn map_name_table(descs: &[ebpf_vm::MapDesc]) -> anyhow::Result<HashMap<String, 
 
 /// Load, link, then decode every program in `path`.
 ///
-/// Map-fd relocations resolve against `descs` names before decode, so every
-/// downstream stage sees the linked bytes and decode-once still holds.
-/// Programs without relocations skip resolution; anything unresolvable is a
-/// fatal error (never a silent placeholder fd).
+/// Map-fd and data relocations resolve before decode, so every downstream
+/// stage sees the linked bytes and decode-once still holds. Programs
+/// without relocations skip resolution; anything unresolvable is a fatal
+/// error (never a silent placeholder fd or address).
 fn load_decoded_with_maps(
     path: &Path,
     descs: &[ebpf_vm::MapDesc],
@@ -251,12 +263,47 @@ fn load_decoded_with_maps(
         .into_iter()
         .map(|mut prog| {
             if !prog.relocations.is_empty() {
-                prog.resolve_map_relocs(&table)
+                let data = data_table(&prog);
+                // A map name colliding with a data section name would
+                // mislink silently one layer down (`resolve_all_relocs`
+                // also rejects it); fail here with the file named.
+                if let Some(clash) = table.keys().find(|name| data.contains_key(name.as_str())) {
+                    anyhow::bail!(
+                        "linking program `{}`: map name `{clash}` collides with a data section",
+                        prog.name
+                    );
+                }
+                prog.resolve_all_relocs(&table, &data)
                     .with_context(|| format!("linking program `{}`", prog.name))?;
             }
             DecodedProgram::decode(prog)
         })
         .collect()
+}
+
+/// Build a data-section name → (staged base, length) table.
+///
+/// Sections concatenate in object order from [`ebpf_vm::RODATA_BASE`];
+/// [`stage_data`] must use the same layout so addresses agree.
+fn data_table(prog: &ebpf_elf::ElfProgram) -> HashMap<String, (i64, usize)> {
+    let mut table = HashMap::new();
+    let mut base = ebpf_vm::RODATA_BASE;
+    for section in &prog.data_sections {
+        table.insert(section.name.clone(), (base, section.bytes.len()));
+        base = base.saturating_add(i64::try_from(section.bytes.len()).unwrap_or(i64::MAX));
+    }
+    table
+}
+
+/// Concatenate a program's data sections in object order (the layout
+/// [`data_table`] assigns addresses from).
+fn stage_data(prog: &ebpf_elf::ElfProgram) -> Vec<u8> {
+    let len = prog.data_sections.iter().map(|s| s.bytes.len()).sum();
+    let mut out = Vec::with_capacity(len);
+    for section in &prog.data_sections {
+        out.extend_from_slice(&section.bytes);
+    }
+    out
 }
 
 /// Print a header (name, type, instruction count, relocations) followed by
@@ -274,6 +321,11 @@ fn cmd_inspect(path: &Path) -> anyhow::Result<()> {
                 "  reloc {}: {symbol} (r_type {r_type}, addend {})",
                 reloc.offset, reloc.addend
             );
+        }
+
+        println!("Data sections: {}", prog.meta.data_sections.len());
+        for section in &prog.meta.data_sections {
+            println!("  data {} ({} bytes)", section.name, section.bytes.len());
         }
 
         println!();
@@ -334,6 +386,7 @@ fn cmd_verify(
     path: &Path,
     trace: bool,
     max_iterations: usize,
+    max_loop_steps: u64,
     maps: Option<&PathBuf>,
     packet: Option<&PathBuf>,
     packet_len: Option<usize>,
@@ -348,13 +401,23 @@ fn cmd_verify(
     };
 
     let descs = load_maps(maps)?;
-    let config = ebpf_verifier::VerifyConfig {
+    let base_config = ebpf_verifier::VerifyConfig {
         widening_threshold: max_iterations,
         maps: descs.clone(),
         packet_len,
+        data_len: None,
+        max_loop_steps: Some(max_loop_steps),
     };
 
     for prog in &load_decoded_with_maps(path, &descs)? {
+        // Staged data length rides per program (sections live on the
+        // metadata, not the flags); empty means unstaged (`None`).
+        let staged = stage_data(&prog.meta);
+        let config = ebpf_verifier::VerifyConfig {
+            data_len: (!staged.is_empty()).then_some(staged.len()),
+            ..base_config.clone()
+        };
+
         let insns = &prog.insns;
         let cfg = ebpf_cfg::build_cfg(insns)
             .with_context(|| format!("building CFG for `{}`", prog.meta.name))?;
@@ -402,11 +465,17 @@ fn cmd_run(path: &Path, trace: bool, maps: Option<&PathBuf>) -> anyhow::Result<(
     };
 
     for prog in programs {
+        // Stage linked read-only data before execution (empty when the
+        // object carries no data sections).
+        let staged = stage_data(&prog.meta);
         let mut vm = if stores.is_empty() {
             ebpf_vm::Vm::new(prog.insns)
         } else {
             ebpf_vm::Vm::new_with_stores(prog.insns, stores.clone())
         };
+        if !staged.is_empty() {
+            vm.install_rodata(staged);
+        }
 
         if !trace {
             match vm.run(DEFAULT_MAX_STEPS) {
@@ -458,6 +527,7 @@ fn cmd_xdp(
     trace: bool,
     maps: Option<&PathBuf>,
     max_iterations: usize,
+    max_loop_steps: u64,
 ) -> anyhow::Result<()> {
     use ebpf_vm::StepResult;
     let packet = fs::read(packet_path)
@@ -466,6 +536,8 @@ fn cmd_xdp(
         widening_threshold: max_iterations,
         maps: load_maps(maps)?,
         packet_len: Some(packet.len()),
+        data_len: None,
+        max_loop_steps: Some(max_loop_steps),
     };
 
     let descs = config.maps.clone();
@@ -476,6 +548,11 @@ fn cmd_xdp(
     };
 
     for prog in load_decoded_with_maps(path, &config.maps)? {
+        let staged = stage_data(&prog.meta);
+        let config = ebpf_verifier::VerifyConfig {
+            data_len: (!staged.is_empty()).then_some(staged.len()),
+            ..config.clone()
+        };
         let cfg = ebpf_cfg::build_cfg(&prog.insns)
             .with_context(|| format!("building CFG for `{}`", prog.meta.name))?;
         if let Err(e) = ebpf_verifier::verify_with_config(&prog.insns, &cfg, &config) {
@@ -489,6 +566,9 @@ fn cmd_xdp(
         } else {
             ebpf_vm::Vm::new_with_stores(prog.insns, stores.clone())
         };
+        if !staged.is_empty() {
+            vm.install_rodata(staged);
+        }
 
         vm.install_xdp_packet(ebpf_vm::PacketBuffer::from(packet.as_slice()));
         if !trace {
@@ -620,16 +700,25 @@ fn main() -> anyhow::Result<()> {
         Command::Disasm { input } => cmd_disasm(&input.path),
         Command::Cfg { input, dot } => cmd_cfg(&input.path, *dot),
         Command::Run { input, trace, maps } => cmd_run(&input.path, *trace, maps.as_ref()),
-        Command::Verify { input, trace, max_iterations, maps, packet, packet_len } => cmd_verify(
+        Command::Verify {
+            input,
+            trace,
+            max_iterations,
+            max_loop_steps,
+            maps,
+            packet,
+            packet_len,
+        } => cmd_verify(
             &input.path,
             *trace,
             *max_iterations,
+            *max_loop_steps,
             maps.as_ref(),
             packet.as_ref(),
             *packet_len,
         ),
-        Command::Xdp { input, packet, trace, maps, max_iterations } => {
-            cmd_xdp(&input.path, packet, *trace, maps.as_ref(), *max_iterations)
+        Command::Xdp { input, packet, trace, maps, max_iterations, max_loop_steps } => {
+            cmd_xdp(&input.path, packet, *trace, maps.as_ref(), *max_iterations, *max_loop_steps)
         }
         Command::Optimize { input, output } => cmd_optimize(&input.path, output),
     }

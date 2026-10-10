@@ -391,6 +391,7 @@ fn coalesce_phi_home(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     fn build(bytes: &[u8]) -> (SsaProgram, Vec<ebpf_isa::Insn>) {
         let insns = ebpf_isa::decode_program(bytes).unwrap();
@@ -458,9 +459,6 @@ mod tests {
         words.push(w(0x95, 0, 0, 0, 0));
         let bytes = words.concat();
         let (prog, _) = build(&bytes);
-        assert!(matches!(
-            allocate(&prog, &Liveness::compute(&prog)),
-            Err(SsaError::OutOfRegisters)
-        ));
+        assert_matches!(allocate(&prog, &Liveness::compute(&prog)), Err(SsaError::OutOfRegisters));
     }
 }

@@ -93,3 +93,20 @@ fn trace_schema_endian() {
     // singleton scalar range through the instruction.
     insta::assert_snapshot!(trace_json("endian.bin"));
 }
+
+#[test]
+fn trace_schema_data() {
+    // Pins `data_ptr` rendering: a linked data address (immediate in
+    // staged range with a data length configured) flows as an exact
+    // offset pointer, and the bounded load yields Top.
+    use ebpf_isa::{Insn, MemSize, Reg};
+    let insns = vec![
+        Insn::LoadImm64 { dst: Reg(1), imm: ebpf_vm::memory::RODATA_BASE },
+        Insn::Load { size: MemSize::W, dst: Reg(0), base: Reg(1), offset: 8 },
+        Insn::Exit,
+    ];
+    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+    let config = ebpf_verifier::VerifyConfig::with_data_len(16);
+    let json = ebpf_verifier::verify_traced(&insns, &cfg, &config).unwrap().to_json().unwrap();
+    insta::assert_snapshot!(json);
+}

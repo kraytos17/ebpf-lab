@@ -310,6 +310,17 @@ pub enum RegType {
         /// Byte offset from the packet start.
         offset: Range,
     },
+    /// Pointer into staged read-only data at `RODATA_BASE + offset`.
+    ///
+    /// Same range discipline as [`RegType::PacketPtr`], but the bound is
+    /// the staged length (absolute — no `data_end` register exists, so no
+    /// edge refinement applies). Pointer arithmetic (`mov`, `add`/`sub`
+    /// by constant) preserves data-ness by shifting the range; anything
+    /// else degrades to `Scalar(Top)`.
+    DataPtr {
+        /// Byte offset from the staged data start.
+        offset: Range,
+    },
 }
 
 impl RegType {
@@ -348,6 +359,9 @@ impl RegType {
             (Self::PacketPtr { offset: o1 }, Self::PacketPtr { offset: o2 }) => {
                 Self::PacketPtr { offset: o1.join(*o2) }
             }
+            (Self::DataPtr { offset: o1 }, Self::DataPtr { offset: o2 }) => {
+                Self::DataPtr { offset: o1.join(*o2) }
+            }
             _ => Self::Scalar(Range::Top),
         }
     }
@@ -378,6 +392,7 @@ impl fmt::Display for RegType {
             Self::MaybeMapPtr { fd } => write!(f, "?mp({fd})"),
             Self::XdpMdPtr => f.write_str("xdp_md"),
             Self::PacketPtr { offset } => write!(f, "pkt+{offset}"),
+            Self::DataPtr { offset } => write!(f, "dat+{offset}"),
         }
     }
 }
@@ -429,6 +444,10 @@ pub struct VerifierState {
     /// configuration, shared across every worklist state like `maps`
     /// (Copy, so no `Rc` needed — joins keep it when both sides agree).
     pub packet_len: Option<usize>,
+    /// Staged read-only data length for bound checks (`None` = nothing
+    /// staged: data loads reject). Immutable configuration, shared like
+    /// `packet_len` (joins keep it when both sides agree).
+    pub data_len: Option<usize>,
 }
 
 impl VerifierState {
@@ -443,7 +462,7 @@ impl VerifierState {
     pub fn initial_with_maps(maps: Vec<Option<MapDesc>>) -> Self {
         let mut regs = array::from_fn(|_| RegType::NotInit);
         regs[10] = RegType::StackPtr { offset: 0 };
-        Self { regs, stack_init: [0u64; 8], maps: maps.into(), packet_len: None }
+        Self { regs, stack_init: [0u64; 8], maps: maps.into(), packet_len: None, data_len: None }
     }
 
     /// XDP entry state: `r1` is the `xdp_md` context pointer, `r10` the
@@ -454,7 +473,7 @@ impl VerifierState {
         let mut regs = array::from_fn(|_| RegType::NotInit);
         regs[1] = RegType::XdpMdPtr;
         regs[10] = RegType::StackPtr { offset: 0 };
-        Self { regs, stack_init: [0u64; 8], maps: maps.into(), packet_len }
+        Self { regs, stack_init: [0u64; 8], maps: maps.into(), packet_len, data_len: None }
     }
 
     /// Set one byte in the `stack_init` bitset.
@@ -521,7 +540,8 @@ impl VerifierState {
         let stack_init = array::from_fn(|i| a.stack_init[i] & b.stack_init[i]);
         let maps = Self::join_maps(&a.maps, &b.maps);
         let packet_len = if a.packet_len == b.packet_len { a.packet_len } else { None };
-        Self { regs, stack_init, maps, packet_len }
+        let data_len = if a.data_len == b.data_len { a.data_len } else { None };
+        Self { regs, stack_init, maps, packet_len, data_len }
     }
 
     /// Widen two states at a loop header: widen each scalar register,
@@ -534,13 +554,17 @@ impl VerifierState {
             (RegType::PacketPtr { offset: o1 }, RegType::PacketPtr { offset: o2 }) => {
                 RegType::PacketPtr { offset: o1.widen(*o2) }
             }
+            (RegType::DataPtr { offset: o1 }, RegType::DataPtr { offset: o2 }) => {
+                RegType::DataPtr { offset: o1.widen(*o2) }
+            }
             _ => RegType::join(&old.regs[i], &new.regs[i]),
         });
 
         let stack_init = array::from_fn(|i| old.stack_init[i] & new.stack_init[i]);
         let maps = Self::join_maps(&old.maps, &new.maps);
         let packet_len = if old.packet_len == new.packet_len { old.packet_len } else { None };
-        Self { regs, stack_init, maps, packet_len }
+        let data_len = if old.data_len == new.data_len { old.data_len } else { None };
+        Self { regs, stack_init, maps, packet_len, data_len }
     }
 
     /// Join `other` into `self` in place. Returns true if anything changed.
@@ -569,6 +593,10 @@ impl VerifierState {
             self.packet_len = None;
             changed = true;
         }
+        if self.data_len != other.data_len && self.data_len.is_some() {
+            self.data_len = None;
+            changed = true;
+        }
         changed
     }
 
@@ -584,6 +612,9 @@ impl VerifierState {
                 (RegType::Scalar(r1), RegType::Scalar(r2)) => RegType::Scalar(r1.widen(*r2)),
                 (RegType::PacketPtr { offset: o1 }, RegType::PacketPtr { offset: o2 }) => {
                     RegType::PacketPtr { offset: o1.widen(*o2) }
+                }
+                (RegType::DataPtr { offset: o1 }, RegType::DataPtr { offset: o2 }) => {
+                    RegType::DataPtr { offset: o1.widen(*o2) }
                 }
                 _ => RegType::join(a, b),
             };
@@ -605,6 +636,11 @@ impl VerifierState {
             self.packet_len = None;
             changed = true;
         }
+        if self.data_len != other.data_len && self.data_len.is_some() {
+            // Same immutable-configuration discipline as `packet_len`.
+            self.data_len = None;
+            changed = true;
+        }
         changed
     }
 }
@@ -613,6 +649,7 @@ impl VerifierState {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::assert_matches;
 
     /// Any lattice element: extremes plus a random valid interval.
     fn arb_range() -> impl Strategy<Value = Range> {
@@ -841,7 +878,7 @@ mod tests {
     fn reg_join_notinit() {
         let a = RegType::NotInit;
         let b = RegType::Scalar(Range::exact(5));
-        assert!(matches!(RegType::join(&a, &b), RegType::NotInit));
+        assert_matches!(RegType::join(&a, &b), RegType::NotInit);
     }
 
     #[test]
@@ -876,7 +913,7 @@ mod tests {
     #[test]
     fn stack_slot_default() {
         let s: StackSlot = RegType::NotInit;
-        assert!(matches!(s, RegType::NotInit));
+        assert_matches!(s, RegType::NotInit);
     }
 
     #[test]
@@ -890,8 +927,8 @@ mod tests {
     #[test]
     fn verifier_state_initial() {
         let s = VerifierState::initial();
-        assert!(matches!(s.regs[10], RegType::StackPtr { offset: 0 }));
-        assert!(matches!(s.regs[0], RegType::NotInit));
+        assert_matches!(s.regs[10], RegType::StackPtr { offset: 0 });
+        assert_matches!(s.regs[0], RegType::NotInit);
         assert!(s.stack_init.iter().all(|&w| w == 0));
         assert_eq!(s.packet_len, None);
     }
@@ -921,10 +958,31 @@ mod tests {
     }
 
     #[test]
+    fn data_ptr_join_keeps_precision() {
+        // Same discipline as packet pointers: same-shape joins merge
+        // ranges, cross-kind pairs degrade to Top.
+        let a = RegType::DataPtr { offset: Range::Interval { lo: 0, hi: 4 } };
+        let b = RegType::DataPtr { offset: Range::Interval { lo: 2, hi: 8 } };
+        assert_eq!(
+            RegType::join(&a, &b),
+            RegType::DataPtr { offset: Range::Interval { lo: 0, hi: 8 } }
+        );
+        assert_eq!(RegType::join(&a, &a), a);
+        assert_eq!(
+            RegType::join(&a, &RegType::Scalar(Range::exact(0))),
+            RegType::Scalar(Range::Top)
+        );
+        assert_eq!(
+            RegType::join(&a, &RegType::PacketPtr { offset: Range::exact(0) }),
+            RegType::Scalar(Range::Top)
+        );
+    }
+
+    #[test]
     fn initial_xdp_shape() {
         let s = VerifierState::initial_xdp(Some(64), Vec::new());
-        assert!(matches!(s.regs[1], RegType::XdpMdPtr));
-        assert!(matches!(s.regs[10], RegType::StackPtr { offset: 0 }));
+        assert_matches!(s.regs[1], RegType::XdpMdPtr);
+        assert_matches!(s.regs[10], RegType::StackPtr { offset: 0 });
         assert_eq!(s.packet_len, Some(64));
         // Mismatched lengths degrade to no context.
         let t = VerifierState::initial_xdp(Some(128), Vec::new());
@@ -974,7 +1032,7 @@ mod tests {
         let w = VerifierState::widen(&a, &b);
         assert_eq!(w.regs[0], RegType::Scalar(Range::Interval { lo: 0, hi: i64::MAX }));
         // StackPtr registers fall back to join.
-        assert!(matches!(w.regs[10], RegType::StackPtr { offset: 0 }));
+        assert_matches!(w.regs[10], RegType::StackPtr { offset: 0 });
     }
 
     #[test]

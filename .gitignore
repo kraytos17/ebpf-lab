@@ -14,4 +14,7 @@
 fuzz/artifacts/
 fuzz/coverage/
 fuzz/corpus/
+# proptest failing-seed files: never commit the raw file — pin a
+# regression worth keeping inline.
+proptest-regressions/
 __pycache__

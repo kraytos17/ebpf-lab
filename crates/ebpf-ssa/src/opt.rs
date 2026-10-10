@@ -563,6 +563,7 @@ fn unreachable_block_eliminate(prog: &mut SsaProgram) -> bool {
 mod tests {
     use super::*;
     use ebpf_isa::decode::decode_program;
+    use std::assert_matches;
 
     /// Run one folding round with a fresh table (tests only;
     /// `optimize` threads a single table across rounds instead).
@@ -621,7 +622,7 @@ mod tests {
             _ => None,
         });
         let r0 = exit_r0.unwrap();
-        assert!(matches!(prog.def_of(r0), Some(SsaInsn::Const { value: 0, .. })));
+        assert_matches!(prog.def_of(r0), Some(SsaInsn::Const { value: 0, .. }));
     }
 
     #[test]
@@ -635,10 +636,10 @@ mod tests {
             SsaInsn::Exit { r0 } => Some(*r0),
             _ => None,
         });
-        assert!(matches!(
+        assert_matches!(
             prog.def_of(exit_r0.unwrap()),
             Some(SsaInsn::Const { value: 0xFFFF_FFFF, .. })
-        ));
+        );
     }
 
     #[test]
@@ -657,10 +658,7 @@ mod tests {
             SsaInsn::Exit { r0 } => Some(*r0),
             _ => None,
         });
-        assert!(matches!(
-            prog.def_of(exit_r0.unwrap()),
-            Some(SsaInsn::Const { value: 0x1234, .. })
-        ));
+        assert_matches!(prog.def_of(exit_r0.unwrap()), Some(SsaInsn::Const { value: 0x1234, .. }));
 
         let mut prog = build(&[
             w(0xb7, 2, 0, 0, 5),
@@ -686,10 +684,10 @@ mod tests {
             SsaInsn::Exit { r0 } => Some(*r0),
             _ => None,
         });
-        assert!(matches!(
+        assert_matches!(
             prog.def_of(exit_r0.unwrap()),
             Some(SsaInsn::LoadImm64 { .. } | SsaInsn::Const { .. })
-        ));
+        );
     }
 
     #[test]
@@ -708,7 +706,7 @@ mod tests {
             SsaInsn::Exit { r0 } => Some(*r0),
             _ => None,
         });
-        assert!(matches!(prog.def_of(exit_r0.unwrap()), Some(SsaInsn::Const { value: 7, .. })));
+        assert_matches!(prog.def_of(exit_r0.unwrap()), Some(SsaInsn::Const { value: 7, .. }));
     }
 
     #[test]
@@ -746,7 +744,7 @@ mod tests {
         optimize(&mut prog);
         for insn in &prog.insns {
             if let SsaInsn::Br { lhs, .. } = insn {
-                assert!(matches!(lhs, SsaOperand::Value(_)));
+                assert_matches!(lhs, SsaOperand::Value(_));
             }
         }
     }

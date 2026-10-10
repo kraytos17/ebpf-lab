@@ -84,7 +84,13 @@ fn main() {
     if !pointers {
         let bytes = wide_program();
         let insns = ebpf_isa::decode_program(&bytes).expect("driver program decodes");
-        let config = VerifyConfig { widening_threshold: 16, maps: Vec::new(), packet_len: None };
+        let config = VerifyConfig {
+            widening_threshold: 16,
+            maps: Vec::new(),
+            packet_len: None,
+            data_len: None,
+            max_loop_steps: None,
+        };
 
         // Sized so a capture spans several seconds at samply's 1 ms sampling rate.
         let acc = run_case(&insns, &config, 2_000_000);
@@ -96,14 +102,25 @@ fn main() {
     // then packet-pointer arithmetic under a 54-byte packet context.
     let map_bytes = fixture("map_guarded_value_access.bin");
     let map_insns = ebpf_isa::decode_program(&map_bytes).expect("map fixture decodes");
-    let map_config = VerifyConfig { widening_threshold: 16, maps: test_maps(), packet_len: None };
-    let map_acc = run_case(&map_insns, &map_config, 3_000_000);
+    let map_config = VerifyConfig {
+        widening_threshold: 16,
+        maps: test_maps(),
+        packet_len: None,
+        data_len: None,
+        max_loop_steps: None,
+    };
 
+    let map_acc = run_case(&map_insns, &map_config, 3_000_000);
     let xdp_bytes = fixture("xdp_ethertype_pass.bin");
     let xdp_insns = ebpf_isa::decode_program(&xdp_bytes).expect("xdp fixture decodes");
-    let xdp_config =
-        VerifyConfig { widening_threshold: 16, maps: Vec::new(), packet_len: Some(54) };
-    let xdp_acc = run_case(&xdp_insns, &xdp_config, 3_000_000);
+    let xdp_config = VerifyConfig {
+        widening_threshold: 16,
+        maps: Vec::new(),
+        packet_len: Some(54),
+        data_len: None,
+        max_loop_steps: None,
+    };
 
+    let xdp_acc = run_case(&xdp_insns, &xdp_config, 3_000_000);
     println!("map_pc={map_acc} xdp_pc={xdp_acc}");
 }

@@ -197,6 +197,7 @@ fn slot_table(insns: &[Insn]) -> (Vec<u32>, Vec<usize>) {
         };
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     let mut rev = vec![usize::MAX; slot as usize];
     for (i, &s) in slots.iter().enumerate() {
         rev[s as usize] = i;
@@ -241,6 +242,7 @@ mod tests {
     use crate::{MemError, Vm};
     use ebpf_isa::decode::decode_program;
     use petgraph::visit::EdgeRef;
+    use std::assert_matches;
 
     fn decode_bytes(bytes: &[u8]) -> Vec<Insn> {
         decode_program(bytes).expect("fixture decodes")
@@ -282,7 +284,7 @@ mod tests {
         // loop.bin: r0=0; r1=0; add; add; jlt r1,10,-3 (idx 4) -> idx 2; exit
         let bytes = include_bytes!("../../../tests/fixtures/loop.bin");
         let exec = load(&decode_bytes(bytes));
-        assert!(matches!(exec[4], ExecInsn::JumpImm { target: 2, op: JumpOp::Lt, .. }));
+        assert_matches!(exec[4], ExecInsn::JumpImm { target: 2, op: JumpOp::Lt, .. });
     }
 
     #[test]
@@ -308,12 +310,12 @@ mod tests {
         let raw = [0x05u8, 0x00, 100, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0];
         let insns = decode_program(&raw).expect("decodes");
         let exec = load(&insns);
-        assert!(matches!(exec[0], ExecInsn::Trap(TrapKind::OobJump { .. })));
+        assert_matches!(exec[0], ExecInsn::Trap(TrapKind::OobJump { .. }));
         // bad End width (0xdc with imm 7)
         let raw = [0xdcu8, 0x00, 0, 0, 7, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0];
         let insns = decode_program(&raw).expect("decodes");
         let exec = load(&insns);
-        assert!(matches!(exec[0], ExecInsn::Trap(TrapKind::BadEndWidth { .. })));
+        assert_matches!(exec[0], ExecInsn::Trap(TrapKind::BadEndWidth { .. }));
     }
 
     #[test]
@@ -385,30 +387,30 @@ mod tests {
     fn invalid_fixtures_trap_at_load() {
         // oob_jump.bin: ja +100 past the end; illegal.bin: class-0 opcode.
         let exec = load(&decode_bytes(include_bytes!("../../../tests/fixtures/oob_jump.bin")));
-        assert!(matches!(exec[0], ExecInsn::Trap(TrapKind::OobJump { .. })));
+        assert_matches!(exec[0], ExecInsn::Trap(TrapKind::OobJump { .. }));
         let exec = load(&decode_bytes(include_bytes!("../../../tests/fixtures/illegal.bin")));
-        assert!(matches!(exec[0], ExecInsn::Trap(TrapKind::Illegal)));
+        assert_matches!(exec[0], ExecInsn::Trap(TrapKind::Illegal));
     }
 
     #[test]
     fn rejection_fixtures_fail_at_runtime() {
         let run = |bytes: &[u8]| Vm::new(decode_bytes(bytes)).run(100);
-        assert!(matches!(
+        assert_matches!(
             run(include_bytes!("../../../tests/fixtures/uninit_read.bin")),
             Err(VmError::Memory(MemError::UninitializedRead { .. }))
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             run(include_bytes!("../../../tests/fixtures/oob_jump.bin")),
             Err(VmError::JumpOutOfBounds { .. })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             run(include_bytes!("../../../tests/fixtures/illegal.bin")),
             Err(VmError::IllegalInstruction { .. })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             run(include_bytes!("../../../tests/fixtures/misaligned.bin")),
             Err(VmError::Memory(MemError::Misaligned { .. }))
-        ));
+        );
     }
 
     #[test]

@@ -39,8 +39,8 @@ use thiserror::Error;
 
 pub use maps::{MapDesc, MapError, MapStore, MapType};
 pub use memory::{
-    MAP_SCRATCH_BASE, MemError, MemRegion, MemoryView, PACKET_BASE, PacketBuffer, STACK_BASE,
-    STACK_SIZE, XDP_MD_BASE, XDP_MD_LEN,
+    MAP_SCRATCH_BASE, MemError, MemRegion, MemoryView, PACKET_BASE, PacketBuffer, RODATA_BASE,
+    STACK_BASE, STACK_SIZE, XDP_MD_BASE, XDP_MD_LEN,
 };
 pub use xdp::{XdpAction, annotate_packet_load, parse_eth, parse_ipv4, run_xdp};
 
@@ -448,6 +448,14 @@ impl Vm {
         self.regs[Reg(1)] = XDP_MD_BASE;
     }
 
+    /// Stage read-only data (`.rodata`/`.data` from the object file).
+    ///
+    /// Called once at load time after linking; the linker resolves data
+    /// relocations against [`RODATA_BASE`] plus the section offset.
+    pub fn install_rodata(&mut self, data: Vec<u8>) {
+        self.memory.set_rodata(data);
+    }
+
     /// Current program counter (decoded index).
     #[must_use]
     pub const fn pc(&self) -> usize {
@@ -686,6 +694,7 @@ pub fn run_bytes(bytes: &[u8], max_steps: usize) -> Result<RunOutcome, ebpf_isa:
 mod tests {
     use super::*;
     use ebpf_isa::decode::decode_program;
+    use std::assert_matches;
 
     fn run_asm(words: &[[u8; 8]]) -> RunOutcome {
         let bytes: Vec<u8> = words.iter().flatten().copied().collect();
@@ -903,7 +912,7 @@ mod tests {
     fn oob_stack_access_errors() {
         // ldxdw r0, [r10+8]; exit (above the frame pointer)
         let prog = [w(0x79, 0, 10, 8, 0), w(0x95, 0, 0, 0, 0)];
-        assert!(matches!(run_asm(&prog), Err(VmError::Memory(_))));
+        assert_matches!(run_asm(&prog), Err(VmError::Memory(_)));
     }
 
     #[test]

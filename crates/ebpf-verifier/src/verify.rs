@@ -12,14 +12,15 @@
 //! [`verify`] do not, so the verdict-only paths never allocate trace strings.
 //!
 //! Bounded-loop contract: widening forces the *analysis* to terminate
-//! (finite ascent toward Top), which is not a promise that the *program*
-//! terminates. Acceptance is memory-safety: an exitless loop verifies
-//! (there is no fault to find) and the interpreter stops it with its own
-//! step budget instead. Every accepted fixture terminates inside the
-//! stated test budgets except the `loop_unbounded` / `loop_over_budget`
-//! pair, which pin exactly this gap (see
-//! `crates/ebpf-verifier/tests/bounded.rs`). Iteration-bound enforcement
-//! belongs to a later stage.
+//! (finite ascent toward Top); iteration-bound enforcement (see
+//! [`crate::bound`]) additionally proves the *program* terminates inside
+//! `VerifyConfig::max_loop_steps` when configured. With a budget set
+//! (the CLI always sets one), acceptance implies termination inside it:
+//! every natural loop needs a proven trip count fitting the budget, and
+//! unprovable shapes reject with `UnboundedLoop`. With no budget
+//! (`None`, the lib default), loops need provability but no numeric cap
+//! — `loop_over_budget` still verifies there. Pinned in
+//! `crates/ebpf-verifier/tests/bounded.rs`.
 
 use ebpf_cfg::{Cfg, EdgeKind};
 use ebpf_isa::insn::{AluOp, Insn, JumpOp, MemSize, Operand, Reg, Width};
@@ -33,7 +34,7 @@ use crate::state::{Range, RegType, STACK_BYTES, VerifierState};
 use crate::trace::{TraceEntry, format_reg, format_stack};
 use crate::{VerifiedProgram, VerifyError};
 
-/// Semantic configuration for the verifier: widening, maps, packets.
+/// Semantic configuration for the verifier: widening, maps, packets, data.
 ///
 /// Trace collection is deliberately *not* a field here — it is an
 /// entry-point choice ([`verify_traced`] vs [`verify_with_config`]), so
@@ -55,11 +56,26 @@ pub struct VerifyConfig {
     /// [`VerifyError::NoPacketContext`]). Set from `--packet` /
     /// `--packet-len` (CLI) or the `xdp` subcommand's packet file.
     pub packet_len: Option<usize>,
+    /// Staged read-only data length for bound checks (`None` = nothing
+    /// staged: data loads reject with [`VerifyError::NoDataContext`]).
+    /// Set from the object file's data sections at link time.
+    pub data_len: Option<usize>,
+    /// Step budget for iteration-bound enforcement (`None` = provability
+    /// only: loops need a proven trip count, but no numeric cap applies).
+    /// The CLI passes its run budget here so acceptance implies termination
+    /// inside it; see the module-level bounded-loop contract.
+    pub max_loop_steps: Option<u64>,
 }
 
 impl Default for VerifyConfig {
     fn default() -> Self {
-        Self { widening_threshold: 16, maps: Vec::new(), packet_len: None }
+        Self {
+            widening_threshold: 16,
+            maps: Vec::new(),
+            packet_len: None,
+            data_len: None,
+            max_loop_steps: None,
+        }
     }
 }
 
@@ -67,13 +83,49 @@ impl VerifyConfig {
     /// Config with default widening settings and `maps` installed.
     #[must_use]
     pub const fn with_maps(maps: Vec<MapDesc>) -> Self {
-        Self { widening_threshold: 16, maps, packet_len: None }
+        Self {
+            widening_threshold: 16,
+            maps,
+            packet_len: None,
+            data_len: None,
+            max_loop_steps: None,
+        }
     }
 
     /// Config with default widening settings and a packet length installed.
     #[must_use]
     pub const fn with_packet_len(packet_len: usize) -> Self {
-        Self { widening_threshold: 16, maps: Vec::new(), packet_len: Some(packet_len) }
+        Self {
+            widening_threshold: 16,
+            maps: Vec::new(),
+            packet_len: Some(packet_len),
+            data_len: None,
+            max_loop_steps: None,
+        }
+    }
+
+    /// Config with default widening settings and a data length installed.
+    #[must_use]
+    pub const fn with_data_len(data_len: usize) -> Self {
+        Self {
+            widening_threshold: 16,
+            maps: Vec::new(),
+            packet_len: None,
+            data_len: Some(data_len),
+            max_loop_steps: None,
+        }
+    }
+
+    /// Config with default widening settings and a loop step budget.
+    #[must_use]
+    pub const fn with_loop_steps(max_loop_steps: u64) -> Self {
+        Self {
+            widening_threshold: 16,
+            maps: Vec::new(),
+            packet_len: None,
+            data_len: None,
+            max_loop_steps: Some(max_loop_steps),
+        }
     }
 }
 
@@ -146,7 +198,8 @@ fn map_fd(state: &VerifierState, pc: usize) -> Result<Option<i64>, VerifyError> 
         | RegType::MapPtr { .. }
         | RegType::MaybeMapPtr { .. }
         | RegType::XdpMdPtr
-        | RegType::PacketPtr { .. } => Err(VerifyError::TypeMismatch {
+        | RegType::PacketPtr { .. }
+        | RegType::DataPtr { .. } => Err(VerifyError::TypeMismatch {
             pc,
             register: 1,
             expected: "scalar file descriptor",
@@ -174,7 +227,8 @@ const fn map_value_fd(
         | RegType::Scalar(_)
         | RegType::StackPtr { .. }
         | RegType::XdpMdPtr
-        | RegType::PacketPtr { .. } => Ok(None),
+        | RegType::PacketPtr { .. }
+        | RegType::DataPtr { .. } => Ok(None),
     }
 }
 
@@ -220,6 +274,7 @@ impl HelperSignature for MapLookup {
         let Some(desc) = map_desc(state, fd) else {
             return Err(VerifyError::BadMapFd { pc, fd });
         };
+
         check_map_ptr(state, Reg(2), desc.key_size, pc)?;
         Ok(RegType::MaybeMapPtr { fd })
     }
@@ -262,6 +317,7 @@ impl HelperSignature for MapDelete {
         let Some(desc) = map_desc(state, fd) else {
             return Err(VerifyError::BadMapFd { pc, fd });
         };
+
         check_map_ptr(state, Reg(2), desc.key_size, pc)?;
         Ok(RegType::Scalar(Range::exact(0)))
     }
@@ -438,12 +494,28 @@ fn verify_core(
     let mut states: Vec<Option<VerifierState>> = vec![None; block_count];
     // XDP entry (`r1 = xdp_md`) exactly when a packet length is configured;
     // otherwise the legacy entry (`r1` uninitialized) so non-packet
-    // programs verify exactly as before.
-    states[entry] = Some(if config.packet_len.is_some() {
+    // programs verify exactly as before. Staged data length rides along
+    // in both modes (data loads only need the length, not an entry type).
+    let mut entry_state = if config.packet_len.is_some() {
         VerifierState::initial_xdp(config.packet_len, map_table)
     } else {
         VerifierState::initial_with_maps(map_table)
-    });
+    };
+
+    entry_state.data_len = config.data_len;
+    states[entry] = Some(entry_state);
+
+    // First-visit register snapshots for iteration-bound inference (see
+    // `bound.rs`): the registers on a loop header's first arrival are
+    // pre-widening and entry-guard-refined by RPO-order construction —
+    // recording here (arrival, not processing) is what keeps latch
+    // feedback out, since a header always arrives before its latch can
+    // propagate (dominance). Post-widening ranges would be useless as
+    // init values. Allocated only when the graph can loop.
+    let mut snapshots: Vec<Option<[RegType; 11]>> = vec![None; block_count];
+    if ebpf_cfg::has_back_edge(cfg) {
+        snapshots[entry] = states[entry].as_ref().map(|st| st.regs.clone());
+    }
 
     // `states_gen[block]` bumps on every input change; `processed_gen[block]`
     // records the last generation processed. Equal generations mean the
@@ -515,10 +587,13 @@ fn verify_core(
             let mut out = current.clone();
             refine_edge(&mut out, *edge.weight(), last_jump, last_jump_reg);
             merge_successor(
-                &mut states,
-                &mut states_gen,
-                &mut block_iterations,
-                &mut worklist,
+                &mut MergeCtx {
+                    states: &mut states,
+                    states_gen: &mut states_gen,
+                    block_iterations: &mut block_iterations,
+                    worklist: &mut worklist,
+                    snapshots: &mut snapshots,
+                },
                 edge.target(),
                 out,
                 config.widening_threshold,
@@ -528,10 +603,13 @@ fn verify_core(
             let mut out = current;
             refine_edge(&mut out, *edge.weight(), last_jump, last_jump_reg);
             merge_successor(
-                &mut states,
-                &mut states_gen,
-                &mut block_iterations,
-                &mut worklist,
+                &mut MergeCtx {
+                    states: &mut states,
+                    states_gen: &mut states_gen,
+                    block_iterations: &mut block_iterations,
+                    worklist: &mut worklist,
+                    snapshots: &mut snapshots,
+                },
                 edge.target(),
                 out,
                 config.widening_threshold,
@@ -539,6 +617,11 @@ fn verify_core(
         }
     }
 
+    // Iteration bounds now that the fixed point holds: every natural
+    // loop needs a proven trip count fitting the configured budget (see
+    // `bound.rs` and the module-level bounded-loop contract). Acyclic
+    // programs skip this inside `enforce_loop_bounds`.
+    crate::bound::enforce_loop_bounds(cfg, insns, &snapshots, config.max_loop_steps)?;
     Ok(VerifiedProgram { trace, total_pc })
 }
 
@@ -626,34 +709,53 @@ const fn swap_op(op: JumpOp) -> Option<JumpOp> {
 /// Merge a successor's entry state: first write, or join (widen after the
 /// configured re-join threshold); bump the generation and requeue only
 /// when the entry changed (and only if not already pending).
+/// Mutable worklist bookkeeping for successor merges.
+///
+/// One bundle instead of parallel array params; the slices stay disjoint
+/// borrows. `snapshots` parallels `states` 1:1 (empty on acyclic graphs —
+/// see the guard in the first-arrival arm).
+struct MergeCtx<'a> {
+    states: &'a mut [Option<VerifierState>],
+    states_gen: &'a mut [u32],
+    block_iterations: &'a mut [usize],
+    worklist: &'a mut BlockWorklist,
+    snapshots: &'a mut [Option<[RegType; 11]>],
+}
+
 #[inline]
 fn merge_successor(
-    states: &mut [Option<VerifierState>],
-    states_gen: &mut [u32],
-    block_iterations: &mut [usize],
-    worklist: &mut BlockWorklist,
+    ctx: &mut MergeCtx<'_>,
     target: NodeIndex,
     incoming: VerifierState,
     widening_threshold: usize,
 ) {
     let block = target.index();
-    match &mut states[block] {
+    match &mut ctx.states[block] {
         None => {
-            states[block] = Some(incoming);
-            states_gen[block] = states_gen[block].wrapping_add(1);
-            worklist.push(target);
+            // First arrival: snapshot registers before any merge can
+            // pollute them (empty table on acyclic graphs skips this —
+            // indexing a zero-length vec would panic, so guard).
+            // Correctness note: `snapshots` is sized by block count
+            // exactly when the graph can loop (see setup above).
+            if block < ctx.snapshots.len() {
+                ctx.snapshots[block] = Some(incoming.regs.clone());
+            }
+
+            ctx.states[block] = Some(incoming);
+            ctx.states_gen[block] = ctx.states_gen[block].wrapping_add(1);
+            ctx.worklist.push(target);
         }
         Some(existing) => {
-            block_iterations[block] += 1;
-            let changed = if block_iterations[block] > widening_threshold {
+            ctx.block_iterations[block] += 1;
+            let changed = if ctx.block_iterations[block] > widening_threshold {
                 existing.widen_assign(&incoming)
             } else {
                 existing.join_assign(&incoming)
             };
 
             if changed {
-                states_gen[block] = states_gen[block].wrapping_add(1);
-                worklist.push(target);
+                ctx.states_gen[block] = ctx.states_gen[block].wrapping_add(1);
+                ctx.worklist.push(target);
             }
         }
     }
@@ -679,6 +781,10 @@ fn ptr_alu_transfer(state: &mut VerifierState, op: AluOp, dst: Reg, src: Operand
                     }
                     RegType::PacketPtr { offset } => {
                         state.regs[dst.index()] = RegType::PacketPtr { offset };
+                        return true;
+                    }
+                    RegType::DataPtr { offset } => {
+                        state.regs[dst.index()] = RegType::DataPtr { offset };
                         return true;
                     }
                     RegType::XdpMdPtr => {
@@ -731,6 +837,27 @@ fn ptr_alu_transfer(state: &mut VerifierState, op: AluOp, dst: Reg, src: Operand
                         },
                     };
 
+                    if !dst.is_frame_ptr() {
+                        state.regs[dst.index()] = next;
+                    }
+                    return true;
+                }
+            }
+            if let RegType::DataPtr { offset } = state.regs[dst.index()] {
+                let delta: Option<i64> = match src {
+                    Operand::Imm(v) => Some(i64::from(v)),
+                    Operand::Reg(r) => match state.regs[r.index()] {
+                        RegType::Scalar(Range::Interval { lo, hi }) if lo == hi => Some(lo),
+                        _ => None,
+                    },
+                };
+                if let Some(k) = delta {
+                    let next = RegType::DataPtr {
+                        offset: match op {
+                            AluOp::Add => offset + Range::exact(k),
+                            _ => offset - Range::exact(k),
+                        },
+                    };
                     if !dst.is_frame_ptr() {
                         state.regs[dst.index()] = next;
                     }
@@ -825,7 +952,18 @@ fn check_and_transfer(
         }
         Insn::LoadImm64 { dst, imm } => {
             if !dst.is_frame_ptr() {
-                state.regs[dst.index()] = RegType::Scalar(Range::exact(*imm));
+                // A linked data address (staged at `RODATA_BASE`) yields a
+                // data pointer; every other immediate is a plain scalar.
+                // The range check doubles as the length proof the bound
+                // checks below rely on.
+                let data_ptr = state.data_len.and_then(|len| {
+                    let off = imm.checked_sub(ebpf_vm::memory::RODATA_BASE)?;
+                    let len_i64 = i64::try_from(len).ok()?;
+                    (off >= 0 && off < len_i64)
+                        .then(|| RegType::DataPtr { offset: Range::exact(off) })
+                });
+                state.regs[dst.index()] =
+                    data_ptr.unwrap_or_else(|| RegType::Scalar(Range::exact(*imm)));
             }
         }
         Insn::Load { size, dst, base, offset } => {
@@ -846,6 +984,11 @@ fn check_and_transfer(
                 }
             } else if let RegType::PacketPtr { offset: base_off } = state.regs[base.index()] {
                 check_packet_bounds(state, base_off, *offset, *size, pc)?;
+                if !dst.is_frame_ptr() {
+                    state.regs[dst.index()] = RegType::Scalar(Range::Top);
+                }
+            } else if let RegType::DataPtr { offset: base_off } = state.regs[base.index()] {
+                check_data_bounds(state, base_off, *offset, *size, pc)?;
                 if !dst.is_frame_ptr() {
                     state.regs[dst.index()] = RegType::Scalar(Range::Top);
                 }
@@ -874,12 +1017,13 @@ fn check_and_transfer(
                 check_map_value_bounds(state, fd, *offset, *size, pc)?;
             } else if matches!(
                 state.regs[base.index()],
-                RegType::XdpMdPtr | RegType::PacketPtr { .. }
+                RegType::XdpMdPtr | RegType::PacketPtr { .. } | RegType::DataPtr { .. }
             ) {
-                // Packet and context memory are read-only: the VM faults
-                // every store there, so the verifier rejects with the
-                // packet bound (bounds before alignment, same priority).
-                return Err(packet_store_error(state, *offset, *size, pc));
+                // Packet, context, and staged data are read-only: the VM
+                // faults every store there, so the verifier rejects with
+                // the matching bound (bounds before alignment, same
+                // priority).
+                return Err(store_readonly_error(state, *base, *offset, *size, pc));
             } else {
                 let (_, lo, hi) = check_mem_access(state, *base, *offset, *size, pc)?;
                 state.mark_stack_range(lo, hi);
@@ -1141,6 +1285,96 @@ fn packet_store_error(state: &VerifierState, offset: i16, size: MemSize, pc: usi
     )
 }
 
+/// Error for stores through a staged-data pointer (read-only memory).
+///
+/// Mirrors [`packet_store_error`]: [`VerifyError::DataOutOfBounds`] with
+/// the staged length when known, or [`VerifyError::NoDataContext`].
+fn data_store_error(state: &VerifierState, offset: i16, size: MemSize, pc: usize) -> VerifyError {
+    state.data_len.map_or_else(
+        || VerifyError::NoDataContext { pc },
+        |data_len| VerifyError::DataOutOfBounds {
+            pc,
+            offset: i32::from(offset),
+            size: size.bytes(),
+            data_len,
+        },
+    )
+}
+
+/// Error for stores through any read-only base: packet/context shape
+/// keeps the packet diagnostic, staged data keeps the data diagnostic.
+fn store_readonly_error(
+    state: &VerifierState,
+    base: Reg,
+    offset: i16,
+    size: MemSize,
+    pc: usize,
+) -> VerifyError {
+    if matches!(state.regs[base.index()], RegType::DataPtr { .. }) {
+        data_store_error(state, offset, size, pc)
+    } else {
+        packet_store_error(state, offset, size, pc)
+    }
+}
+
+/// Check a staged-data load against the staged length.
+///
+/// Bounds before alignment mirrors the VM (`rodata_load`). `Bottom`
+/// offsets (dead branches) pass without checking. Alignment is
+/// conservative like [`check_packet_bounds`]: multi-byte accesses
+/// require an exact aligned offset.
+fn check_data_bounds(
+    state: &VerifierState,
+    base_off: Range,
+    offset: i16,
+    size: MemSize,
+    pc: usize,
+) -> Result<(), VerifyError> {
+    let Some(len) = state.data_len else {
+        return Err(VerifyError::NoDataContext { pc });
+    };
+    if matches!(base_off, Range::Bottom) {
+        return Ok(());
+    }
+
+    let width = usize::from(size.bytes());
+    let out_of_bounds = || VerifyError::DataOutOfBounds {
+        pc,
+        offset: i32::from(offset),
+        size: size.bytes(),
+        data_len: len,
+    };
+
+    let (lo, hi) = match base_off {
+        Range::Interval { lo, hi } => (lo, hi),
+        Range::Top => (i64::MIN, i64::MAX),
+        Range::Bottom => return Ok(()),
+    };
+
+    let imm = i64::from(offset);
+    let start_lo = lo.checked_add(imm).ok_or_else(out_of_bounds)?;
+    let start_hi = hi.checked_add(imm).ok_or_else(out_of_bounds)?;
+    let end_hi = start_hi
+        .checked_add(i64::try_from(width).map_err(|_| out_of_bounds())?)
+        .ok_or_else(out_of_bounds)?;
+
+    let len_i64 = i64::try_from(len).map_err(|_| out_of_bounds())?;
+    if start_lo < 0 || end_hi > len_i64 {
+        return Err(out_of_bounds());
+    }
+    if width > 1
+        && (start_lo != start_hi
+            || start_lo.rem_euclid(i64::try_from(width).map_err(|_| out_of_bounds())?) != 0)
+    {
+        return Err(VerifyError::MisalignedAccess {
+            pc,
+            offset: i32::try_from(start_lo).unwrap_or(i32::MAX),
+            size: size.bytes(),
+        });
+    }
+    Ok(())
+}
+
 /// Shared memory-access prologue for `Load`/`Store`.
 ///
 /// Resolves the r10-relative byte range, then enforces bounds before
@@ -1240,6 +1474,12 @@ const fn ensure_stack_ptr(state: &VerifierState, r: Reg, pc: usize) -> Result<()
             expected: "stack pointer",
             found: "packet pointer",
         }),
+        RegType::DataPtr { .. } => Err(VerifyError::TypeMismatch {
+            pc,
+            register: r.0,
+            expected: "stack pointer",
+            found: "data pointer",
+        }),
     }
 }
 
@@ -1274,7 +1514,8 @@ impl RegType {
             | Self::MapPtr { .. }
             | Self::MaybeMapPtr { .. }
             | Self::XdpMdPtr
-            | Self::PacketPtr { .. } => Range::Top,
+            | Self::PacketPtr { .. }
+            | Self::DataPtr { .. } => Range::Top,
             Self::NotInit => Range::Bottom,
         }
     }
@@ -1297,6 +1538,7 @@ mod tests {
     use super::{refine_packet_edge, refine_reg, swap_op};
     use crate::VerifyError;
     use crate::state::{Range, RegType, VerifierState};
+    use std::assert_matches;
 
     /// Refine on one successor edge the way `verify` does: `out` starts as
     /// a clone of the block-exit state, `incoming` is the pre-edge state.
@@ -1407,17 +1649,106 @@ mod tests {
         assert_eq!(untouched, pkt);
     }
 
+    /// Data-pointer transfer coverage: linked immediates, bounded loads,
+    /// read-only stores, and arithmetic preservation.
+    #[test]
+    fn data_transfers() {
+        use ebpf_isa::insn::Insn;
+        use ebpf_isa::{MemSize, Reg};
+        use ebpf_vm::memory::RODATA_BASE;
+
+        let helpers = super::HelperSignatureRegistry::built_in();
+        let mut state = VerifierState::initial();
+        state.data_len = Some(16);
+
+        // Linked immediate yields an exact data pointer …
+        let ld = Insn::LoadImm64 { dst: Reg(1), imm: RODATA_BASE + 4 };
+        super::check_and_transfer(0, &ld, &mut state, helpers).unwrap();
+        assert_eq!(state.regs[1], RegType::DataPtr { offset: Range::Interval { lo: 4, hi: 4 } });
+        // … outside the staged length it stays a scalar …
+        let ld = Insn::LoadImm64 { dst: Reg(1), imm: RODATA_BASE + 64 };
+        super::check_and_transfer(0, &ld, &mut state, helpers).unwrap();
+        assert_eq!(state.regs[1], RegType::Scalar(Range::exact(RODATA_BASE + 64)));
+        // … and without staged data every immediate is a scalar.
+        state.data_len = None;
+        let ld = Insn::LoadImm64 { dst: Reg(1), imm: RODATA_BASE };
+        super::check_and_transfer(0, &ld, &mut state, helpers).unwrap();
+        assert_eq!(state.regs[1], RegType::Scalar(Range::exact(RODATA_BASE)));
+        state.data_len = Some(16);
+
+        // In-bounds load succeeds and yields Top …
+        state.regs[1] = RegType::DataPtr { offset: Range::exact(0) };
+        let load = Insn::Load { size: MemSize::W, dst: Reg(2), base: Reg(1), offset: 0 };
+        super::check_and_transfer(0, &load, &mut state, helpers).unwrap();
+        assert_eq!(state.regs[2], RegType::Scalar(Range::Top));
+        // … past-the-end rejects with the staged length …
+        let load = Insn::Load { size: MemSize::W, dst: Reg(2), base: Reg(1), offset: 14 };
+        assert_eq!(
+            super::check_and_transfer(0, &load, &mut state, helpers).unwrap_err(),
+            VerifyError::DataOutOfBounds { pc: 0, offset: 14, size: 4, data_len: 16 }
+        );
+        // … unaligned in-range access rejects …
+        let load = Insn::Load { size: MemSize::W, dst: Reg(2), base: Reg(1), offset: 1 };
+        assert_matches!(
+            super::check_and_transfer(0, &load, &mut state, helpers).unwrap_err(),
+            VerifyError::MisalignedAccess { .. }
+        );
+        // … and stores reject read-only with the staged length.
+        let store = Insn::Store {
+            size: MemSize::W,
+            base: Reg(1),
+            offset: 0,
+            src: ebpf_isa::Operand::Imm(0),
+        };
+        assert_eq!(
+            super::check_and_transfer(0, &store, &mut state, helpers).unwrap_err(),
+            VerifyError::DataOutOfBounds { pc: 0, offset: 0, size: 4, data_len: 16 }
+        );
+        // Without staged data the same load names the missing context.
+        state.data_len = None;
+        let load = Insn::Load { size: MemSize::W, dst: Reg(2), base: Reg(1), offset: 0 };
+        assert_eq!(
+            super::check_and_transfer(0, &load, &mut state, helpers).unwrap_err(),
+            VerifyError::NoDataContext { pc: 0 }
+        );
+    }
+
+    #[test]
+    fn data_pointer_arithmetic_preserved() {
+        use ebpf_isa::insn::Insn;
+        use ebpf_isa::{AluOp, Operand, Reg, Width};
+
+        let helpers = super::HelperSignatureRegistry::built_in();
+        let mut state = VerifierState::initial();
+        state.data_len = Some(16);
+        state.regs[1] = RegType::DataPtr { offset: Range::exact(0) };
+        // `mov` copies provenance …
+        let mov =
+            Insn::Alu { width: Width::B64, op: AluOp::Mov, dst: Reg(2), src: Operand::Reg(Reg(1)) };
+        super::check_and_transfer(0, &mov, &mut state, helpers).unwrap();
+        assert_eq!(state.regs[2], RegType::DataPtr { offset: Range::exact(0) });
+        // … `add` by a constant shifts the range …
+        let add =
+            Insn::Alu { width: Width::B64, op: AluOp::Add, dst: Reg(2), src: Operand::Imm(4) };
+        super::check_and_transfer(0, &add, &mut state, helpers).unwrap();
+        assert_eq!(state.regs[2], RegType::DataPtr { offset: Range::Interval { lo: 4, hi: 4 } });
+        // … anything else degrades to Top.
+        let or = Insn::Alu { width: Width::B64, op: AluOp::Or, dst: Reg(2), src: Operand::Imm(4) };
+        super::check_and_transfer(0, &or, &mut state, helpers).unwrap();
+        assert_eq!(state.regs[2], RegType::Scalar(Range::Top));
+    }
+
     #[test]
     fn packet_store_error_names_context() {
         let some = VerifierState::initial_xdp(Some(54), Vec::new());
-        assert!(matches!(
+        assert_matches!(
             super::packet_store_error(&some, 0, ebpf_isa::MemSize::W, 0),
             VerifyError::PacketOutOfBounds { packet_len: 54, .. }
-        ));
+        );
         let none = VerifierState::initial();
-        assert!(matches!(
+        assert_matches!(
             super::packet_store_error(&none, 0, ebpf_isa::MemSize::W, 0),
             VerifyError::NoPacketContext { .. }
-        ));
+        );
     }
 }

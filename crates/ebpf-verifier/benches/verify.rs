@@ -46,7 +46,13 @@ fn prepared(
     packet_len: Option<usize>,
 ) -> (ebpf_cfg::Cfg, ebpf_verifier::VerifyConfig) {
     let cfg = ebpf_cfg::build_cfg(insns).expect("cfg builds");
-    let config = ebpf_verifier::VerifyConfig { widening_threshold: 16, maps, packet_len };
+    let config = ebpf_verifier::VerifyConfig {
+        widening_threshold: 16,
+        maps,
+        packet_len,
+        data_len: None,
+        max_loop_steps: None,
+    };
     (cfg, config)
 }
 

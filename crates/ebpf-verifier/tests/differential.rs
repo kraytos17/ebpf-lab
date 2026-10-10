@@ -8,6 +8,7 @@
 
 use ebpf_vm::{Vm, VmError};
 use proptest::prelude::*;
+use std::assert_matches;
 
 mod common;
 
@@ -22,11 +23,11 @@ const ACCEPT_FIXTURES: &[&str] = &[
     "stack",
     "loop",
     "loop_1000_iters",
-    // Accepted-but-unbounded: widening converges (memory-safe), the VM
-    // exhausts every budget. `StepsExceeded` is a `VmError`, not a
-    // `MemError`, so MemError-freedom holds — see the bounded-loops
-    // contract (`crates/ebpf-verifier/tests/bounded.rs`).
-    "loop_unbounded",
+    // Accepted-but-over-budget: provable trip counts that exceed the
+    // run budget. `StepsExceeded` is a `VmError`, not a `MemError`, so
+    // MemError-freedom holds — see the bounded-loops contract
+    // (`crates/ebpf-verifier/tests/bounded.rs`). (`loop_unbounded` left
+    // this list: unprovable loops now reject with `UnboundedLoop`.)
     "loop_over_budget",
     "helper_prandom",
     "helper_ktime",
@@ -89,7 +90,7 @@ fn rejected_map_value_fixtures_agree_with_vm() {
         assert!(err.to_string().contains(verdict), "{name}: unexpected verdict {err}");
         let mut vm = Vm::new_with_maps(insns, test_maps()).unwrap();
         let err = vm.run(10_000).unwrap_err();
-        assert!(matches!(err, VmError::Memory(_)), "{name}: unexpected runtime {err}");
+        assert_matches!(err, VmError::Memory(_), "{name}: unexpected runtime {err}");
         assert!(err.to_string().contains(runtime), "{name}: unexpected runtime {err}");
     }
 }
@@ -129,6 +130,48 @@ fn xdp_fixtures_verify_and_run_memory_clean() {
 }
 
 #[test]
+fn data_fixtures_verify_and_run_memory_clean() {
+    // The oracle holds under staged data when the verifier and the VM
+    // share the staged length (the CLI pairs them exactly this way):
+    // a linked `table[2]` load verifies and exits 30, while the same
+    // program past the staged bytes rejects and faults in agreement.
+    use ebpf_isa::{Insn, MemSize, Reg};
+    let base = ebpf_vm::RODATA_BASE;
+    let data: Vec<u8> = [10u32, 20, 30, 40].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let program = || {
+        vec![
+            Insn::LoadImm64 { dst: Reg(1), imm: base },
+            Insn::Load { size: MemSize::W, dst: Reg(0), base: Reg(1), offset: 8 },
+            Insn::Exit,
+        ]
+    };
+    let config = ebpf_verifier::VerifyConfig::with_data_len(data.len());
+    let insns = program();
+    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+    ebpf_verifier::verify_with_config(&insns, &cfg, &config).expect("data load verifies");
+    let mut vm = Vm::new(program());
+    vm.install_rodata(data.clone());
+    assert_eq!(vm.run(10_000).unwrap(), 30);
+
+    // Past-the-bytes load: verifier and VM agree on the fault.
+    let insns = vec![
+        Insn::LoadImm64 { dst: Reg(1), imm: base },
+        Insn::Load { size: MemSize::W, dst: Reg(0), base: Reg(1), offset: 16 },
+        Insn::Exit,
+    ];
+    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+    let err = ebpf_verifier::verify_with_config(&insns, &cfg, &config).unwrap_err();
+    assert!(
+        matches!(err, ebpf_verifier::VerifyError::DataOutOfBounds { .. }),
+        "unexpected verdict {err}"
+    );
+    let mut vm = Vm::new(insns);
+    vm.install_rodata(data);
+    let err = vm.run(10_000).unwrap_err();
+    assert_matches!(err, VmError::Memory(_), "unexpected runtime {err}");
+}
+
+#[test]
 fn rejected_xdp_fixtures_agree_with_vm() {
     // Every rejected XDP program faults (or would fault) in the VM with
     // the memory error its verifier diagnostic names.
@@ -145,7 +188,7 @@ fn rejected_xdp_fixtures_agree_with_vm() {
         let mut vm = Vm::new(insns);
         vm.install_xdp_packet(ebpf_vm::PacketBuffer::from(packet.as_slice()));
         let err = vm.run(10_000).unwrap_err();
-        assert!(matches!(err, VmError::Memory(_)), "{name}: unexpected runtime {err}");
+        assert_matches!(err, VmError::Memory(_), "{name}: unexpected runtime {err}");
         assert!(err.to_string().contains(runtime), "{name}: unexpected runtime {err}");
     }
 }

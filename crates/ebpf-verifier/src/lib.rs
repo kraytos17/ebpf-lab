@@ -19,6 +19,7 @@
 //! assert_eq!(result.total_pc, 2);
 //! ```
 
+pub mod bound;
 pub mod refine;
 pub mod state;
 pub mod trace;
@@ -110,6 +111,30 @@ pub enum VerifyError {
         fd: i64,
     },
 
+    /// Loop with no provable trip count.
+    ///
+    /// Widening proves the analysis converges, not that the loop
+    /// terminates: exitless loops, non-counter conditions, and shapes
+    /// the induction analysis cannot attribute reject here instead of
+    /// executing on hope. Returned by the post-convergence bound check,
+    /// never by the transfer functions.
+    #[error("unbounded loop at pc {pc}: no trip count infers")]
+    UnboundedLoop {
+        /// PC of the condition (or latch) carrying the failed bound.
+        pc: usize,
+    },
+
+    /// Loop with a proven trip count that does not fit the step budget.
+    #[error("loop at pc {pc} runs {trip} trips exceeding budget {limit}")]
+    LoopBudgetExceeded {
+        /// PC of the condition carrying the bound.
+        pc: usize,
+        /// Proven latch executions.
+        trip: u64,
+        /// Configured step budget.
+        limit: u64,
+    },
+
     /// Map value accessed through a possibly-null lookup result.
     #[error("null map pointer access at pc {pc}: r{register} may be null (fd {fd})")]
     NullMapPtrAccess {
@@ -159,6 +184,31 @@ pub enum VerifyError {
     /// `--packet-len` rejects packet programs instead of guessing a length.
     #[error("packet access with no packet context at pc {pc}")]
     NoPacketContext {
+        /// PC of the offending instruction.
+        pc: usize,
+    },
+
+    /// Data access outside the staged read-only bytes.
+    #[error(
+        "data out of bounds at pc {pc}: offset {offset} size {size} exceeds data length {data_len}"
+    )]
+    DataOutOfBounds {
+        /// PC of the offending instruction.
+        pc: usize,
+        /// Byte offset from the staged data start.
+        offset: i32,
+        /// Access width in bytes.
+        size: u8,
+        /// Staged data length.
+        data_len: usize,
+    },
+
+    /// Data access with no staged data length configured.
+    ///
+    /// Like [`VerifyError::NoPacketContext`]: strict by design, the
+    /// verifier rejects instead of guessing a length.
+    #[error("data access with no data context at pc {pc}")]
+    NoDataContext {
         /// PC of the offending instruction.
         pc: usize,
     },

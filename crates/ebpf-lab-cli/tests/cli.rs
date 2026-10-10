@@ -149,6 +149,33 @@ fn verify_max_iterations_flag_accepted() {
 }
 
 #[test]
+fn verify_rejects_unbounded_loop() {
+    let out = run_ok(&["verify", &fixture("loop_unbounded.bin").to_string_lossy()]);
+    assert!(out.contains("rejected:"), "out: {out}");
+    assert!(out.contains("unbounded loop"), "names the verdict: {out}");
+}
+
+#[test]
+fn verify_rejects_over_budget_loop() {
+    let out = run_ok(&["verify", &fixture("loop_over_budget.bin").to_string_lossy()]);
+    assert!(out.contains("rejected:"), "out: {out}");
+    assert!(out.contains("exceeding budget"), "names the verdict: {out}");
+}
+
+#[test]
+fn verify_loop_budget_flag_raises_ceiling() {
+    // The 10M-bound loop fits a 100M-step budget: the flag only moves
+    // the ceiling, provability still does the work.
+    let out = run_ok(&[
+        "verify",
+        "--max-loop-steps",
+        "100000000",
+        &fixture("loop_over_budget.bin").to_string_lossy(),
+    ]);
+    assert!(out.contains("verified:"), "out: {out}");
+}
+
+#[test]
 fn verify_maps_lookup() {
     let out = run_ok(&[
         "verify",
@@ -293,6 +320,42 @@ fn inspect_lists_relocations() {
     assert!(out.contains("Relocations: 1"), "count: {out}");
     assert!(out.contains("my_map"), "symbol: {out}");
     assert!(out.contains("r_type 1"), "raw code: {out}");
+}
+
+#[test]
+fn inspect_lists_data_sections() {
+    let out = run_ok(&["inspect", &fixture("rodata_lookup.o").to_string_lossy()]);
+    assert!(out.contains("Relocations: 1"), "count: {out}");
+    assert!(out.contains(".rodata"), "symbol: {out}");
+    assert!(out.contains("Data sections: 1"), "sections: {out}");
+    assert!(out.contains("data .rodata (16 bytes)"), "listing: {out}");
+}
+
+#[test]
+fn verify_rodata_accepts_with_packet_context() {
+    // The probe spills the (XDP-initialized) context pointer; default
+    // entry rejects the uninitialized read instead.
+    let out =
+        run_ok(&["verify", "--packet-len", "64", &fixture("rodata_lookup.o").to_string_lossy()]);
+    assert!(out.contains("verified:"), "out: {out}");
+}
+
+#[test]
+fn verify_rodata_rejects_without_context() {
+    let out = run_ok(&["verify", &fixture("rodata_lookup.o").to_string_lossy()]);
+    assert!(out.contains("rejected:"), "out: {out}");
+    assert!(out.contains("r1"), "names the register: {out}");
+}
+
+#[test]
+fn xdp_rodata_exit_value() {
+    // Constant index: `table[2]` is 30 regardless of the packet.
+    let out = run_ok(&[
+        "xdp",
+        &fixture("rodata_lookup.o").to_string_lossy(),
+        &fixture("pkt_ipv4_tcp.pkt").to_string_lossy(),
+    ]);
+    assert!(out.contains("(30)"), "out: {out}");
 }
 
 #[test]

@@ -537,6 +537,7 @@ pub fn to_dot(cfg: &Cfg, insns: &[Insn]) -> String {
 mod tests {
     use super::*;
     use ebpf_isa::decode::decode_program;
+    use std::assert_matches;
 
     fn decode(bytes: &[u8]) -> Vec<Insn> {
         decode_program(bytes).expect("fixture decodes")
@@ -605,7 +606,7 @@ mod tests {
             0x95, 0, 0, 0, 0, 0, 0, 0, //
         ];
         let err = build_cfg(&decode(&bytes)).unwrap_err();
-        assert!(matches!(err, CfgError::JumpOutOfBounds { .. }));
+        assert_matches!(err, CfgError::JumpOutOfBounds { .. });
     }
 
     /// A wide load advances the slot numbering by two while consuming one

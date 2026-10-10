@@ -4,16 +4,16 @@
 [![fuzz](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml/badge.svg)](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml)
 [![msrv](https://img.shields.io/badge/MSRV-1.99-blue)](https://github.com/kraytos17/ebpf-lab)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-322-blue)](https://github.com/kraytos17/ebpf-lab)
-[![fixtures](https://img.shields.io/badge/fixtures-38-orange)](tests/fixtures/)
+[![tests](https://img.shields.io/badge/tests-349-blue)](https://github.com/kraytos17/ebpf-lab)
+[![fixtures](https://img.shields.io/badge/fixtures-39-orange)](tests/fixtures/)
 
 An eBPF laboratory in Rust: inspect, verify, execute, and optimize eBPF programs.
 
 Implements the **decode → disassemble → CFG → VM → verify → optimize** pipeline:
-a memory model (uninitialized-stack detection, alignment enforcement, packet and
-map regions), an XDP packet simulator (`xdp` subcommand, `xdp_md` staging,
-`PacketPtr` bound checks), and an SSA optimizer (`optimize` subcommand, verified
-run-equivalence oracle). Backed by 36 hand-assembled fixtures plus two
+a memory model (uninitialized-stack detection, alignment enforcement, packet,
+map, and read-only data regions), an XDP packet simulator (`xdp` subcommand,
+`xdp_md` staging, `PacketPtr` bound checks), and an SSA optimizer (`optimize` subcommand, verified
+run-equivalence oracle). Backed by 36 hand-assembled fixtures plus three
 clang-built objects, three libFuzzer
 harnesses, property-based tests, and golden/snapshot coverage.
 
@@ -30,7 +30,7 @@ cargo build --workspace
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `inspect` | Program header + disassembly (relocs, BTF summary) | `ebpf-lab inspect program.o` |
+| `inspect` | Program header + disassembly (relocs, data + BTF summary) | `ebpf-lab inspect program.o` |
 | `disasm` | Raw disassembly only | `ebpf-lab disasm program.bin` |
 | `cfg` | Control-flow graph (block listing) | `ebpf-lab cfg program.bin` |
 | `cfg --dot` | Graphviz DOT output | `ebpf-lab cfg program.bin --dot \| dot -Tsvg -o cfg.svg` |
@@ -39,6 +39,7 @@ cargo build --workspace
 | `verify` | Statically verify (interval analysis, widening for loops) | `ebpf-lab verify program.bin` |
 | `verify --trace` | Per-PC abstract-state trace as JSON | `ebpf-lab verify --trace program.bin` |
 | `verify --max-iterations N` | Widening threshold for loops (default 16) | `ebpf-lab verify --max-iterations 32 program.bin` |
+| `verify/xdp --max-loop-steps N` | Loop step budget, proven trips must fit (default 1000000) | `ebpf-lab verify --max-loop-steps 100000000 program.bin` |
 | `verify/run --maps M` | Map descriptors with initial values (JSON) | `ebpf-lab verify --maps maps.json program.bin` |
 | `verify --packet P` / `--packet-len N` | Packet context for bound checks (file wins) | `ebpf-lab verify --packet pkt.bin program.bin` |
 | `xdp` | Verify then run an XDP program against a packet | `ebpf-lab xdp program.bin packet.bin` |
@@ -72,11 +73,11 @@ Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
 | Crate | Purpose | Key types |
 |-------|---------|-----------|
 | [`ebpf-isa`](crates/ebpf-isa) | Instruction encoding/decoding | `RawInsn`, `Insn`, `Reg`, `MemSize`, `Width`, `encode_program`, `AluOp::apply` |
-| [`ebpf-elf`](crates/ebpf-elf) | ELF `.o` parsing, section extraction, reloc linking, BTF presence | `ElfProgram`, `ProgType`, `SectionKind`, `BtfSection`, `resolve_map_relocs` |
+| [`ebpf-elf`](crates/ebpf-elf) | ELF `.o` parsing, section extraction, reloc linking, BTF presence | `ElfProgram`, `ProgType`, `SectionKind`, `BtfSection`, `DataSection`, `resolve_map_relocs`, `resolve_data_relocs`, `resolve_all_relocs` |
 | [`ebpf-disasm`](crates/ebpf-disasm) | Bytecode → human-readable text | `disassemble`, `Display for Insn` |
 | [`ebpf-cfg`](crates/ebpf-cfg) | Control-flow graph construction | `BasicBlock`, `Cfg`, `Pc`, `Slot`, `to_dot` |
-| [`ebpf-vm`](crates/ebpf-vm) | Interpreter + memory + map/XDP simulator | `Vm`, `ExecInsn`, `MemoryView`, `MemError`, `MapStore`, `MapDesc`, `XdpAction`, `run_xdp` |
-| [`ebpf-verifier`](crates/ebpf-verifier) | Static verifier (interval lattice, widening, typed + map helpers, packet bounds) | `verify`, `verify_with_config`, `verify_traced`, `Range`, `VerifierState`, `VerifyError`, `HelperSignature`, `MapPtr`, `MaybeMapPtr`, `PacketPtr` |
+| [`ebpf-vm`](crates/ebpf-vm) | Interpreter + memory + map/XDP/rodata simulator | `Vm`, `ExecInsn`, `MemoryView`, `MemError`, `MapStore`, `MapDesc`, `XdpAction`, `run_xdp`, `RODATA_BASE` |
+| [`ebpf-verifier`](crates/ebpf-verifier) | Static verifier (interval lattice, widening, typed + map helpers, packet/data/loop bounds) | `verify`, `verify_with_config`, `verify_traced`, `Range`, `VerifierState`, `VerifyError`, `HelperSignature`, `MapPtr`, `MaybeMapPtr`, `PacketPtr`, `DataPtr`, `LoopBound` |
 | [`ebpf-ssa`](crates/ebpf-ssa) | Register SSA + optimizer (Braun construction, fold/copy/DCE, lowering) | `build_ssa`, `optimize`, `lower`, `SsaProgram`, `SsaError` |
 | [`ebpf-lab-cli`](crates/ebpf-lab-cli) | `ebpf-lab` binary | clap derive, tracing |
 
@@ -95,13 +96,15 @@ The interpreter's `MemoryView` routes every load/store through a single chokepoi
 | XDP context stores | `OutOfBounds` | Read-only, like packet |
 | Map scratch OOB | `OutOfBounds` | Readable scratch at `MAP_SCRATCH_BASE` (latest lookup value) |
 | Map scratch misaligned | `Misaligned` | Natural alignment enforced, toggleable |
+| Read-only data | `OutOfBounds` past staged bytes | Read-only bytes at `RODATA_BASE` (staged `.rodata`/`.data`, fully initialized) |
+| Read-only data stores | `OutOfBounds` | Read-only, like packet |
 
 Bounds are checked **before** alignment, so a straddling access reports the
 range fault — matching the kernel verifier's diagnostic priority.
 
 ## Test fixtures
 
-36 hand-assembled `.bin` programs + 2 clang-built `.o` + 3 raw `.pkt` packets exercising the
+36 hand-assembled `.bin` programs + 3 clang-built `.o` + 3 raw `.pkt` packets exercising the
 happy path *and* canonical rejections. See
 [`tests/fixtures/README.md`](tests/fixtures/README.md) for the full table
 (bytes, assembly, exit code, what each exercises).
@@ -137,8 +140,9 @@ Highlights:
 | `misaligned.bin` | `Misaligned` rejection (unaligned access path) |
 | `illegal.bin` | Unknown opcode → `IllegalInstruction` |
 | `reloc_map_lookup.o` | Clang-built XDP prog: map-fd reloc links via `--maps` names, exit 1 |
+| `rodata_lookup.o` | Clang-built XDP prog: const-table data reloc links at load, exit 30 |
 | `reloc_btf.o` | Same probe with debug info: `inspect` shows the BTF block |
-| `loop_unbounded.bin` | Accepted-but-unbounded gap pin: verifies, exhausts every step budget |
+| `loop_unbounded.bin` | `UnboundedLoop` rejection (exitless loops prove no trip count) |
 | `loop_over_budget.bin` | Accepted-but-over-budget gap pin: 10M-bound loop vs the 1M CLI budget |
 
 Fuzz seeds are staged from these via `fuzz/build.rs` (protobuf-style: refreshed only when
@@ -259,7 +263,7 @@ for the SSA pipeline end to end.
 
 1. `git clone` → `cargo build --workspace`
 2. Add fixtures to `tests/fixtures/` (see [the guide](tests/fixtures/README.md))
-3. Run `just verify` — all 322 tests + clippy + doc must be green
+3. Run `just verify` — all 349 tests + clippy + doc must be green
 4. Run `cargo insta review` after disassembler/CFG changes to accept new snapshots
 5. Run `just fuzz-smoke` before touching the decoder or verifier
 

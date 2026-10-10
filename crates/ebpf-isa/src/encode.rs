@@ -233,6 +233,7 @@ mod tests {
     use super::*;
     use crate::decode::decode_program;
     use crate::insn::Width;
+    use std::assert_matches;
 
     fn roundtrip(bytes: &[u8]) {
         let insns = decode_program(bytes).expect("test bytes decode");
@@ -295,13 +296,13 @@ mod tests {
 
     #[test]
     fn refusals() {
-        assert!(matches!(
+        assert_matches!(
             encode_program(&[Insn::Unknown {
                 raw: RawInsn { opcode: 0, regs: 0, offset: 0, imm: 0 }
             }]),
             Err(EncodeError::UnknownInstruction { pc: 0 })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             encode_program(&[Insn::Jump {
                 width: Width::B64,
                 op: JumpOp::Call,
@@ -310,8 +311,8 @@ mod tests {
                 offset: 0
             }]),
             Err(EncodeError::InvalidJump { pc: 0 })
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             encode_program(&[Insn::Alu {
                 width: Width::B64,
                 op: AluOp::End(Endian::Le),
@@ -319,7 +320,7 @@ mod tests {
                 src: Operand::Reg(Reg(1)),
             }]),
             Err(EncodeError::InvalidEnd { pc: 0 })
-        ));
+        );
     }
 
     #[test]

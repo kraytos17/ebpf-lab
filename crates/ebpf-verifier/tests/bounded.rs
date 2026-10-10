@@ -40,14 +40,37 @@ fn bounded_loops_terminate_in_budget() {
 }
 
 #[test]
-fn unbounded_loop_accepts_but_exhausts_budget() {
-    // `ja -1` self-loop: one instruction, no exit, no memory fault. The
-    // verifier accepts (widening converges on a fixed point); the VM
-    // exhausts every budget. Acceptance is memory-safety, not liveness.
-    let insns = verify_ok("loop_unbounded.bin");
-    assert_eq!(insns.len(), 1);
+fn unbounded_loop_rejects() {
+    // `ja -1` self-loop: one instruction, no exit, no memory fault.
+    // Widening converges, but no trip count infers — enforcement rejects
+    // instead of executing on hope (accepted through v0.11; the
+    // bounded-loop contract now guarantees termination in budget).
+    let insns = fixture("loop_unbounded.bin");
+    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+    let err = ebpf_verifier::verify(&insns, &cfg).unwrap_err();
+    assert_eq!(err, ebpf_verifier::VerifyError::UnboundedLoop { pc: 0 });
+    // … and the VM still exhausts every budget on its own terms.
     let err = ebpf_vm::Vm::new(insns).run(100).unwrap_err();
     assert_eq!(err, ebpf_vm::VmError::StepsExceeded { limit: 100 });
+}
+
+#[test]
+fn over_budget_loop_rejects_under_cli_budget() {
+    // 10M-bound counter: provable (10_000_001 trips), but 60M steps do
+    // not fit the CLI's 1M budget. Default lib config (provability only)
+    // still accepts — see `over_budget_loop_accepts_but_exceeds_cli_budget`.
+    let insns = fixture("loop_over_budget.bin");
+    let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+    let config = ebpf_verifier::VerifyConfig::with_loop_steps(1_000_000);
+    let err = ebpf_verifier::verify_with_config(&insns, &cfg, &config).unwrap_err();
+    assert_eq!(
+        err,
+        ebpf_verifier::VerifyError::LoopBudgetExceeded {
+            pc: 4,
+            trip: 10_000_001,
+            limit: 1_000_000
+        }
+    );
 }
 
 #[test]
@@ -71,6 +94,8 @@ fn loop_accepts_across_widening_thresholds() {
             widening_threshold: threshold,
             maps: Vec::new(),
             packet_len: None,
+            data_len: None,
+            max_loop_steps: None,
         };
         ebpf_verifier::verify_with_config(&insns, &cfg, &config)
             .unwrap_or_else(|e| panic!("threshold {threshold} should accept: {e}"));

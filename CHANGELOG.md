@@ -5,6 +5,46 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `ebpf-verifier`: iteration-bound enforcement (`bound.rs`, post-convergence).
+  Every natural loop (back-edges by dominance) needs a proven trip count:
+  single-counter loops with a constant bound/stride infer via first-visit
+  snapshots (latch- and header-conditioned shapes, signed and unsigned);
+  anything else rejects with the new `UnboundedLoop` error. With
+  `VerifyConfig::max_loop_steps` set, proven trips must also fit, else
+  the new `LoopBudgetExceeded` error. New `with_loop_steps` constructor
+  and CLI `--max-loop-steps` (default 1M, matching the run budget).
+
+- `ebpf-elf`: data-section capture (`.rodata*`/`.data*`, with the section
+  name falling back to the section header for unnamed section symbols)
+  plus `resolve_data_relocs` (patches `base + addend` across both halves
+  of the wide immediate) and the `resolve_all_relocs` dispatcher (map
+  vs data by table membership, ambiguous dual-table symbols reject).
+  New `UnresolvedDataSymbol` error for names matching no section.
+- `ebpf-vm`: read-only data region at `RODATA_BASE` (bounds before
+  alignment, stores fault, fully initialized by construction) with
+  `install_rodata` staging.
+- `ebpf-verifier`: range-tracked `DataPtr` (same arithmetic discipline
+  as `PacketPtr`, no guard refinement), `with_data_len` configuration,
+  and `DataOutOfBounds` / `NoDataContext` errors with a `data_ptr`
+  trace rendering.
+- CLI: `verify`/`run`/`xdp` stage linked data and thread its length
+  into verification (unresolvable data relocs are fatal); `inspect`
+  lists data sections.
+- Fixtures: `rodata_lookup.o` (clang `-O2` const-table probe, one
+  `R_BPF_64_64` reloc for `.rodata.cst16`), with `verify` (packet
+  context), `xdp` exit 30, unresolved-`inspect`, and differential
+  verify/run agreement pins.
+
+### Changed
+
+- **BREAKING** `ebpf-verifier`: `loop_unbounded.bin` now rejects with
+  `UnboundedLoop` (accepted through v0.11 on widening convergence alone;
+  acceptance is now memory-safety plus termination, per the updated
+  bounded-loop contract). `loop_over_budget.bin` still verifies by
+  default and rejects under the CLI budget with `LoopBudgetExceeded`.
+
 ## [0.11.0] - 2026-10-10
 
 ### Added

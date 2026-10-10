@@ -601,6 +601,7 @@ impl<'a> Builder<'a> {
 mod tests {
     use super::*;
     use ebpf_isa::decode::decode_program;
+    use std::assert_matches;
 
     fn decode(bytes: &[u8]) -> Vec<Insn> {
         decode_program(bytes).expect("test bytes decode")
@@ -808,7 +809,7 @@ mod tests {
             _ => None,
         });
         let r0 = exit.expect("exit exists");
-        assert!(matches!(prog.def_of(r0), Some(SsaInsn::Const { value: 0, .. })));
+        assert_matches!(prog.def_of(r0), Some(SsaInsn::Const { value: 0, .. }));
         assert_defs_total(&prog);
     }
 
@@ -839,7 +840,7 @@ mod tests {
         // Unknown-class words may still fail CFG or SSA: either refusal is
         // a sound verdict, but SSA must never accept silently.
         if let Ok(cfg) = ebpf_cfg::build_cfg(&insns) {
-            assert!(matches!(build_ssa(&insns, &cfg), Err(SsaError::IllegalInstruction { pc: 0 })));
+            assert_matches!(build_ssa(&insns, &cfg), Err(SsaError::IllegalInstruction { pc: 0 }));
         }
     }
 
@@ -847,6 +848,6 @@ mod tests {
     fn empty_refused() {
         let insns = decode(&w(0x95, 0, 0, 0, 0));
         let cfg = ebpf_cfg::build_cfg(&insns).expect("cfg builds");
-        assert!(matches!(build_ssa(&[], &cfg), Err(SsaError::EmptyProgram)));
+        assert_matches!(build_ssa(&[], &cfg), Err(SsaError::EmptyProgram));
     }
 }

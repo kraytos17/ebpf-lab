@@ -3,7 +3,7 @@
 An eBPF laboratory in Rust: decode → disassemble → CFG → VM → verify → optimize.
 Eight workspace crates, zero `unsafe`, interval-lattice verifier with
 threshold widening + typed/map/packet helpers, SSA optimizer with
-run-equivalence oracle, 322 tests, ~90% line coverage.
+run-equivalence oracle, 349 tests, ~90% line coverage.
 
 ## 1. Gates (run these, in this order)
 
@@ -271,7 +271,11 @@ behaviour without reading the body.
   Verdict-only runs must stay ~6× faster than trace runs (pinned by the
   verify bench); `jump_info` computed once per block.
 - **Differential oracle** (`accept_implies_vm_safe`): anything the verifier
-  accepts must run `MemError`-free. The random-program generator is weighted
+  accepts must run `MemError`-free. With `max_loop_steps` set (the CLI
+  always sets it), acceptance additionally implies termination inside
+  the budget — iteration bounds are enforced post-convergence
+  (`bound.rs`), unprovable loops reject (`loop_unbounded` left the
+  accept list for exactly this). The random-program generator is weighted
   (ALU-heavy, small reg universe, aligned stack offsets, exit-terminated);
   acceptance is intentionally thin (~12/256 reach the oracle after the
   2026-09 widening added div/mod/shifts/`BPF_END`/ALU32/`mov r10`, nine

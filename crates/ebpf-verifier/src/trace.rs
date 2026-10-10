@@ -77,6 +77,13 @@ pub const fn format_reg(index: usize, reg: &RegType) -> RegSummary {
             };
             RegSummary { r: index, ty: "packet_ptr", range, offset: None }
         }
+        RegType::DataPtr { offset } => {
+            let range = match offset {
+                Range::Interval { lo, hi } => Some([*lo, *hi]),
+                Range::Bottom | Range::Top => None,
+            };
+            RegSummary { r: index, ty: "data_ptr", range, offset: None }
+        }
     }
 }
 

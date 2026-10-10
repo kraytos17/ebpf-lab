@@ -30,7 +30,11 @@ cov-lcov:
     @echo "wrote lcov.info"
 
 insta:
-    cargo insta test --accept
+    # Regenerate pending snapshots WITHOUT accepting: eyeball every
+    # `.snap.new` diff field-by-field, then `cargo insta review`
+    # (interactive) or `cargo insta accept`. Never bulk-accept here —
+    # AGENTS.md §7 requires review semantics for schema changes.
+    cargo insta test
 
 [working-directory: 'fuzz']
 fuzz-smoke:

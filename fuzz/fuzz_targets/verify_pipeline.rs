@@ -65,6 +65,8 @@ fuzz_target!(|data: &[u8]| {
         maps: test_maps(),
         // Split coverage across both entry modes (see header note).
         packet_len: data.first().is_some_and(|b| b % 2 == 0).then_some(64),
+        data_len: None,
+        max_loop_steps: None,
     };
     let _ = ebpf_verifier::verify_with_config(&insns, &cfg, &config);
 });

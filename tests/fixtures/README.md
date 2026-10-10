@@ -10,7 +10,7 @@ staged *from* these files by `fuzz/build.rs`; fixtures are its upstream
 (`*.bin` only — the `.o` is excluded, it needs the ELF loader rather than
 the raw decoder).
 
-## The thirty-eight programs
+## The thirty-nine programs
 
 | File | Slots | Program | Exit | Exercises |
 |---|---|---|---|---|
@@ -22,8 +22,8 @@ the raw decoder).
 | `ldimm.bin` | 3 slots (2 insns) | `r2 = 0x5566778811223344; exit` | 0 | Wide `ld_imm_dw` (occupies slots 0–1, hence PC 0 → 2) |
 | `loop.bin` | 6 | `r0 = 0; r1 = 0; add r0, 1; add r1, 1; jlt r1, 10, -3; exit` | 10 | Bounded loop; verifier converges via widening (v0.6) |
 | `loop_1000_iters.bin` | 6 | `r0 = 0; r1 = 0; add r0, 1; add r1, 1; jlt r1, 1000, -3; exit` | 1000 | Long loop; widening fires after threshold (v0.6) |
-| `loop_unbounded.bin` | 1 | `ja -1` (self-loop, no exit) | ❌ `StepsExceeded` at run (verifier: accepted) | Accepted-but-unbounded gap pin (v0.11 bounded loops): widening converges, the VM exhausts every budget |
-| `loop_over_budget.bin` | 6 | Same counter shape with bound 10M | ❌ `StepsExceeded` under the 1M CLI budget (verifier: accepted) | Accepted-but-over-budget gap pin (v0.11): ~30M steps, safe but not runnable under the default budget |
+| `loop_unbounded.bin` | 1 | `ja -1` (self-loop, no exit) | ❌ `UnboundedLoop` (accepted ≤ v0.11; VM: `StepsExceeded`) | Exitless loops reject: widening converges but no trip count infers |
+| `loop_over_budget.bin` | 6 | Same counter shape with bound 10M | 10M trips verify by default; ❌ `LoopBudgetExceeded` under the CLI budget | Proven trip (10_000_001) exceeds 1M steps: safe but not runnable there |
 | `helper_prandom.bin` | 4 | `call 43; stxdw [r10-8], r0; ldxdw r0, [r10-8]; exit` | nondet | Typed helper `bpf_get_prandom_u32` + stack roundtrip (v0.6) |
 | `helper_ktime.bin` | 2 | `call 5; exit` | nondet | Typed helper `bpf_ktime_get_ns` (v0.6) |
 | `helper_printk.bin` | 3 | `call 6; mov r0, 0; exit` | 0 | `bpf_trace_printk` returns `Top`, exit pinned (v0.7) |
@@ -52,6 +52,7 @@ the raw decoder).
 | `opt_branch_preserved.bin` | 7 | `mov r1, 5; jeq r1, 5, +2; mov r0, 1; ja +1; mov r0, 2; add r0, 5; exit` | 25 (taken path; shape preserved) | Passes respect control flow; per-arm constants fold (v0.10 Part B) |
 | `reloc_map_lookup.o` | 12 slots (11 insns) | clang-built XDP prog: stack key, `ld_imm_dw r1, my_map` + `R_BPF_64_64` reloc at slot 4, `call 1`, null-guard, `XDP_DROP`/`XDP_PASS` | 1 (empty-map miss → drop) | Map-fd relocation linking (v0.11): `inspect` lists the reloc, `verify`/`run` resolve it via `maps_named.json`, unresolved is a fatal link error. Generated with `clang -target bpf -O2 -c prog.c -o reloc_map_lookup.o` (see spike source below); fuzz corpus excludes it (`*.bin` only) |
 | `reloc_btf.o` | 12 slots (11 insns) | Same probe rebuilt with `-g`: identical program + reloc, plus `.BTF` (401 B) and `.BTF.ext` (112 B) | 1 (empty-map miss → drop) | BTF presence (v0.11): `inspect` prints the BTF block; `verify`/`run` ignore debug sections. Generated with `clang -target bpf -O2 -g -c prog.c -o reloc_btf.o` (clang 23.1.1); fuzz corpus excludes it |
+| `rodata_lookup.o` | 7 slots (6 insns) | Clang `-O2` const-table probe: `table[2]` via one `R_BPF_64_64` reloc for `.rodata.cst16` (section symbol) | 30 (`xdp` run; default `verify` rejects the uninitialized context spill) | Static-data linking (v0.11): `inspect` lists the reloc + data section, `verify` threads the staged length, `xdp` exits 30. Generated with `clang -target bpf -O2 -c fix.c -o rodata_lookup.o` (clang 23.1.1); fuzz corpus excludes it |
 
 ## The three packets (raw bytes, `.pkt`)
 

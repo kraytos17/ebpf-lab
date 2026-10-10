@@ -17,6 +17,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::assert_matches;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -200,10 +201,10 @@ fn refusals_are_stable() {
     let bytes = fixture("illegal.bin");
     let insns = ebpf_isa::decode_program(&bytes).unwrap();
     let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
-    assert!(matches!(
+    assert_matches!(
         ebpf_ssa::build_ssa(&insns, &cfg),
         Err(ebpf_ssa::SsaError::IllegalInstruction { pc: 0 })
-    ));
+    );
 }
 
 /// libFuzzer-found divergences, pinned as inline byte programs: the

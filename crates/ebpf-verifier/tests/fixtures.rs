@@ -7,6 +7,7 @@
 
 mod common;
 
+use std::assert_matches;
 use std::collections::BTreeMap;
 
 use common::fixtures::decode_fixture as fixture;
@@ -102,7 +103,7 @@ fn rejects_map_call_with_uninit_fd() {
         0x95, 0, 0, 0, 0, 0, 0, 0, // exit
     ];
     let err = verify_map_bytes(&bytes).unwrap_err();
-    assert!(matches!(err, VerifyError::UninitRegister { reg: 1, .. }), "unexpected: {err}");
+    assert_matches!(err, VerifyError::UninitRegister { reg: 1, .. }, "unexpected: {err}");
 }
 
 #[test]
@@ -114,7 +115,7 @@ fn rejects_map_call_with_pointer_fd() {
         0x95, 0, 0, 0, 0, 0, 0, 0, // exit
     ];
     let err = verify_map_bytes(&bytes).unwrap_err();
-    assert!(matches!(err, VerifyError::TypeMismatch { .. }), "unexpected: {err}");
+    assert_matches!(err, VerifyError::TypeMismatch { .. }, "unexpected: {err}");
 }
 
 #[test]
@@ -188,26 +189,26 @@ fn accepts_map_guarded_value_access() {
 
 #[test]
 fn rejects_map_null_load() {
-    assert!(matches!(
+    assert_matches!(
         verify_fixture_with_maps("map_lookup_null_load.bin", test_maps()),
         Err(VerifyError::NullMapPtrAccess { register: 0, fd: 1, .. })
-    ));
+    );
 }
 
 #[test]
 fn rejects_map_value_oob() {
-    assert!(matches!(
+    assert_matches!(
         verify_fixture_with_maps("map_value_oob.bin", test_maps()),
         Err(VerifyError::MapValueOutOfBounds { fd: 1, offset: 8, size: 8, value_size: 8, .. })
-    ));
+    );
 }
 
 #[test]
 fn rejects_map_value_misaligned() {
-    assert!(matches!(
+    assert_matches!(
         verify_fixture_with_maps("map_value_misaligned.bin", test_maps()),
         Err(VerifyError::MisalignedAccess { .. })
-    ));
+    );
 }
 
 #[test]
@@ -218,10 +219,10 @@ fn accepts_map_array_update() {
 
 #[test]
 fn rejects_map_bad_fd() {
-    assert!(matches!(
+    assert_matches!(
         verify_fixture_with_maps("map_bad_fd.bin", test_maps()),
         Err(VerifyError::BadMapFd { fd: 99, .. })
-    ));
+    );
 }
 
 #[test]
@@ -245,7 +246,7 @@ fn oversized_map_fd_capped_not_allocated() {
 #[test]
 fn rejects_map_call_without_maps() {
     // No descriptors installed: even fd 1 is unknown.
-    assert!(matches!(verify_fixture("map_hash_lookup.bin"), Err(VerifyError::BadMapFd { .. })));
+    assert_matches!(verify_fixture("map_hash_lookup.bin"), Err(VerifyError::BadMapFd { .. }));
 }
 
 #[test]
@@ -325,7 +326,7 @@ fn rejects_map_access_after_nullable_merge() {
         0x95, 0, 0, 0, 0, 0, 0, 0, // exit
     ];
     let err = verify_map_bytes(&bytes).unwrap_err();
-    assert!(matches!(err, VerifyError::NullMapPtrAccess { .. }), "unexpected: {err}");
+    assert_matches!(err, VerifyError::NullMapPtrAccess { .. }, "unexpected: {err}");
 }
 
 #[test]
@@ -343,7 +344,7 @@ fn rejects_map_value_negative_offset() {
         0x95, 0, 0, 0, 0, 0, 0, 0, // exit
     ];
     let err = verify_map_bytes(&bytes).unwrap_err();
-    assert!(matches!(err, VerifyError::MapValueOutOfBounds { .. }), "unexpected: {err}");
+    assert_matches!(err, VerifyError::MapValueOutOfBounds { .. }, "unexpected: {err}");
 }
 
 #[test]
@@ -369,22 +370,22 @@ fn accepts_computed_stack_pointer() {
 fn exit_requires_initialized_r0() {
     // ldimm.bin never writes r0; the kernel likewise requires a readable
     // return register at exit, so this is a rejection, not an acceptance.
-    assert!(matches!(verify_fixture("ldimm.bin"), Err(VerifyError::UninitRegister { reg: 0, .. })));
+    assert_matches!(verify_fixture("ldimm.bin"), Err(VerifyError::UninitRegister { reg: 0, .. }));
 }
 
 #[test]
 fn rejects_uninit_read() {
-    assert!(matches!(verify_fixture("uninit_read.bin"), Err(VerifyError::UninitStackRead { .. })));
+    assert_matches!(verify_fixture("uninit_read.bin"), Err(VerifyError::UninitStackRead { .. }));
 }
 
 #[test]
 fn rejects_illegal() {
-    assert!(matches!(verify_fixture("illegal.bin"), Err(VerifyError::IllegalInstruction { .. })));
+    assert_matches!(verify_fixture("illegal.bin"), Err(VerifyError::IllegalInstruction { .. }));
 }
 
 #[test]
 fn rejects_misaligned() {
-    assert!(matches!(verify_fixture("misaligned.bin"), Err(VerifyError::MisalignedAccess { .. })));
+    assert_matches!(verify_fixture("misaligned.bin"), Err(VerifyError::MisalignedAccess { .. }));
 }
 
 #[test]
@@ -397,7 +398,7 @@ fn join_rejects_partially_initialized_merge() {
     // first reached via the storing (taken) path with a clean state.
     // Without reprocessing on joined-input change, the stale clean state
     // would propagate and the load would wrongly verify.
-    assert!(matches!(verify_fixture("join_uninit.bin"), Err(VerifyError::UninitStackRead { .. })));
+    assert_matches!(verify_fixture("join_uninit.bin"), Err(VerifyError::UninitStackRead { .. }));
 }
 
 #[test]
@@ -421,19 +422,19 @@ fn accepts_xdp_bounded_access() {
 fn rejects_xdp_unguarded_access() {
     // Half-word load at offset 100 with a 54-byte packet: bounds before
     // alignment (100 is 2-aligned, so only the bound fails).
-    assert!(matches!(
+    assert_matches!(
         verify_fixture_with_packet("xdp_unguarded_access.bin", 54),
         Err(VerifyError::PacketOutOfBounds { offset: 100, size: 2, packet_len: 54, .. })
-    ));
+    );
 }
 
 #[test]
 fn rejects_xdp_store() {
     // Packet memory is read-only: even an in-bounds store rejects.
-    assert!(matches!(
+    assert_matches!(
         verify_fixture_with_packet("xdp_store_rejected.bin", 54),
         Err(VerifyError::PacketOutOfBounds { packet_len: 54, .. })
-    ));
+    );
 }
 
 #[test]
@@ -441,8 +442,8 @@ fn rejects_xdp_without_packet_context() {
     // Strict by design (D4): no `--packet`/`--packet-len` means the legacy
     // entry with `r1` uninitialized, so the first context load rejects
     // instead of guessing a length.
-    assert!(matches!(
+    assert_matches!(
         verify_fixture("xdp_ethertype_pass.bin"),
         Err(VerifyError::UninitRegister { reg: 1, .. })
-    ));
+    );
 }

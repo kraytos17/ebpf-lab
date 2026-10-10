@@ -58,6 +58,15 @@ pub const XDP_MD_BASE: i64 = 0x4_0000;
 /// Length of the staged `xdp_md` struct in bytes.
 pub const XDP_MD_LEN: usize = 8;
 
+/// Virtual address of staged read-only data (`.rodata`, `.data`).
+///
+/// Well clear of every lower region so classification never overlaps;
+/// the [`MemRegion::Rodata`] arm in [`MemoryView::classify`] precedes
+/// [`MemRegion::XdpMd`] for exactly this reason. Bytes come from the
+/// object file at link time and are fully initialized by construction.
+/// Stores fault (read-only, like packet).
+pub const RODATA_BASE: i64 = 0x5_0000;
+
 /// Require natural alignment for multi-byte accesses.
 #[inline]
 fn check_alignment(addr: i64, size: MemSize) -> Result<(), MemError> {
@@ -126,6 +135,8 @@ pub enum MemRegion {
     MapScratch,
     /// `[XDP_MD_BASE, XDP_MD_BASE + XDP_MD_LEN)`.
     XdpMd,
+    /// `[RODATA_BASE, …)` (length-checked on access, read-only).
+    Rodata,
     /// Outside every known region.
     Unknown,
 }
@@ -339,26 +350,32 @@ impl Default for StackMemory {
     }
 }
 
-/// The VM's view of memory: stack, optional packet buffer, XDP context,
-/// and the map-value scratch area (written by `bpf_map_lookup_elem`, read by
-/// direct loads through the returned pointer).
+/// The VM's view of memory.
+///
+/// Stack, optional packet buffer, XDP context, the map-value scratch area
+/// (written by `bpf_map_lookup_elem`, read by direct loads through the
+/// returned pointer), and staged read-only data (`.rodata`/`.data` from
+/// the object file, served by direct loads through linked addresses).
 #[derive(Debug, Clone)]
 pub struct MemoryView {
     stack: StackMemory,
     packet: Option<PacketBuffer>,
     xdp_md: [u8; XDP_MD_LEN],
     map_scratch: Vec<u8>,
+    rodata: Option<Vec<u8>>,
     align_checks: bool,
 }
 
 impl Default for MemoryView {
-    /// Empty stack, no packet, zeroed `xdp_md`, empty scratch, alignment on.
+    /// Empty stack, no packet, zeroed `xdp_md`, empty scratch, no data,
+    /// alignment on.
     fn default() -> Self {
         Self {
             stack: StackMemory::default(),
             packet: None,
             xdp_md: [0u8; XDP_MD_LEN],
             map_scratch: Vec::new(),
+            rodata: None,
             align_checks: true,
         }
     }
@@ -372,19 +389,24 @@ impl MemoryView {
     /// reports [`MemError::StackOverflow`] rather than a generic fault.
     /// The frame-pointer value itself (`STACK_BASE`, one past the top)
     /// counts as stack-shaped for the same reason. Higher regions win over
-    /// lower ones (`XdpMd` > `MapScratch` > `Packet`), so the bases never
+    /// lower ones (`Rodata` > `XdpMd` > `MapScratch` > `Packet`), so the bases never
     /// overlap. Packet-shaped addresses classify as [`MemRegion::Packet`]
     /// whether or not a packet is currently loaded; the access itself
     /// reports [`MemError::NoPacket`] when unset. Scratch-shaped addresses
     /// classify as [`MemRegion::MapScratch`]; the access itself reports
     /// [`MemError::OutOfBounds`] past the latest lookup's value. Context
     /// addresses classify as [`MemRegion::XdpMd`]; past-the-struct reads
-    /// report [`MemError::OutOfBounds`].
+    /// report [`MemError::OutOfBounds`]. Data-shaped addresses classify as
+    /// [`MemRegion::Rodata`]; the access itself reports
+    /// [`MemError::OutOfBounds`] past the staged bytes (or with nothing
+    /// staged).
     #[must_use]
     #[inline]
     pub const fn classify(addr: i64) -> MemRegion {
         if addr >= StackMemory::LOW && addr <= STACK_BASE {
             MemRegion::Stack
+        } else if addr >= RODATA_BASE {
+            MemRegion::Rodata
         } else if addr >= XDP_MD_BASE {
             MemRegion::XdpMd
         } else if addr >= MAP_SCRATCH_BASE {
@@ -448,6 +470,22 @@ impl MemoryView {
         self.map_scratch.len()
     }
 
+    /// Stage read-only data (`.rodata`/`.data` from the object file).
+    ///
+    /// Called once at load time with the concatenated section bytes; the
+    /// linker resolves data relocations against [`RODATA_BASE`] plus the
+    /// section offset. Staged bytes are fully readable (no init bitmap);
+    /// stores fault (read-only, like packet).
+    pub fn set_rodata(&mut self, data: Vec<u8>) {
+        self.rodata = Some(data);
+    }
+
+    /// Length of the staged read-only data (0 when nothing is staged).
+    #[must_use]
+    pub fn rodata_len(&self) -> usize {
+        self.rodata.as_ref().map_or(0, Vec::len)
+    }
+
     /// Enable or disable natural-alignment enforcement.
     pub const fn set_align_checks(&mut self, enabled: bool) {
         self.align_checks = enabled;
@@ -474,6 +512,8 @@ impl MemoryView {
     /// [`MemError::UninitializedRead`] for stack bytes never written.
     /// Scratch reads need no init tracking (a hit always fills the whole
     /// value); past-the-value reads are [`MemError::OutOfBounds`].
+    /// Staged read-only data behaves the same (fully initialized by
+    /// construction); past-the-bytes reads are [`MemError::OutOfBounds`].
     #[inline]
     pub fn load(&self, addr: i64, size: MemSize) -> Result<i64, MemError> {
         match Self::classify(addr) {
@@ -486,6 +526,7 @@ impl MemoryView {
             }
             MemRegion::MapScratch => self.scratch_load(addr, size),
             MemRegion::XdpMd => self.xdp_md_load(addr, size),
+            MemRegion::Rodata => self.rodata_load(addr, size),
             MemRegion::Unknown => Err(MemError::OutOfBounds { addr, size: size.bytes() }),
         }
     }
@@ -551,6 +592,15 @@ impl MemoryView {
                 }
                 Some(self.xdp_md[off..end].to_vec())
             }
+            MemRegion::Rodata => {
+                let data = self.rodata.as_ref()?;
+                let off = addr.checked_sub(RODATA_BASE).and_then(|o| usize::try_from(o).ok())?;
+                let end = off.checked_add(len)?;
+                if end > data.len() {
+                    return None;
+                }
+                Some(data[off..end].to_vec())
+            }
             MemRegion::Unknown => None,
         }
     }
@@ -611,13 +661,39 @@ impl MemoryView {
         Ok(v)
     }
 
+    /// Read-only data load: bounds then alignment (same diagnostic
+    /// priority as every other region), then a direct little-endian
+    /// copy. Staged bytes are fully initialized; unstaged (no `set_rodata`
+    /// yet) reads are [`MemError::OutOfBounds`].
+    fn rodata_load(&self, addr: i64, size: MemSize) -> Result<i64, MemError> {
+        let width = usize::from(size.bytes());
+        let data = self
+            .rodata
+            .as_ref()
+            .ok_or_else(|| MemError::OutOfBounds { addr, size: size.bytes() })?;
+        let off = addr
+            .checked_sub(RODATA_BASE)
+            .and_then(|o| usize::try_from(o).ok())
+            .filter(|&o| o.checked_add(width).is_some_and(|end| end <= data.len()))
+            .ok_or_else(|| MemError::OutOfBounds { addr, size: size.bytes() })?;
+        if self.align_checks {
+            check_alignment(addr, size)?;
+        }
+
+        let mut v: i64 = 0;
+        for (i, b) in data[off..off + width].iter().enumerate() {
+            v |= i64::from(*b) << (8 * i);
+        }
+        Ok(v)
+    }
+
     /// Store the low `size` bytes of `value` at `addr`.
     ///
-    /// Packet and `xdp_md` memory are read-only: stores there report
-    /// [`MemError::OutOfBounds`]. Scratch memory is writable (it models a
-    /// kernel map value obtained through lookup). All other error cases
-    /// mirror [`load`](Self::load); a successful stack store marks the
-    /// stack bytes initialized.
+    /// Packet, `xdp_md`, and staged read-only data are read-only: stores
+    /// there report [`MemError::OutOfBounds`]. Scratch memory is writable
+    /// (it models a kernel map value obtained through lookup). All other
+    /// error cases mirror [`load`](Self::load); a successful stack store
+    /// marks the stack bytes initialized.
     ///
     /// # Errors
     ///
@@ -627,7 +703,7 @@ impl MemoryView {
         match Self::classify(addr) {
             MemRegion::Stack => self.stack.store(addr, size, value, self.align_checks),
             MemRegion::MapScratch => self.scratch_store(addr, size, value),
-            MemRegion::Packet | MemRegion::XdpMd | MemRegion::Unknown => {
+            MemRegion::Packet | MemRegion::XdpMd | MemRegion::Rodata | MemRegion::Unknown => {
                 Err(MemError::OutOfBounds { addr, size: size.bytes() })
             }
         }
@@ -655,6 +731,7 @@ impl MemoryView {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn packet_buffer_from_conversions() {
@@ -688,21 +765,18 @@ mod tests {
     #[test]
     fn rejects_oob() {
         let mem = MemoryView::default();
-        assert!(matches!(mem.load(STACK_BASE, MemSize::B), Err(MemError::StackOverflow { .. })));
-        assert!(matches!(
-            mem.load(STACK_BASE - 4, MemSize::Dw),
-            Err(MemError::StackOverflow { .. })
-        ));
-        assert!(matches!(mem.load(0, MemSize::W), Err(MemError::OutOfBounds { .. })));
+        assert_matches!(mem.load(STACK_BASE, MemSize::B), Err(MemError::StackOverflow { .. }));
+        assert_matches!(mem.load(STACK_BASE - 4, MemSize::Dw), Err(MemError::StackOverflow { .. }));
+        assert_matches!(mem.load(0, MemSize::W), Err(MemError::OutOfBounds { .. }));
     }
 
     #[test]
     fn rejects_uninitialized_read() {
         let mem = MemoryView::default();
-        assert!(matches!(
+        assert_matches!(
             mem.load(STACK_BASE - 8, MemSize::Dw),
             Err(MemError::UninitializedRead { .. })
-        ));
+        );
     }
 
     #[test]
@@ -710,25 +784,22 @@ mod tests {
         let mut mem = MemoryView::default();
         mem.store(STACK_BASE - 8, MemSize::B, 0xAB).unwrap();
         assert_eq!(mem.load(STACK_BASE - 8, MemSize::B).unwrap(), 0xAB);
-        assert!(matches!(
+        assert_matches!(
             mem.load(STACK_BASE - 7, MemSize::B),
             Err(MemError::UninitializedRead { .. })
-        ));
+        );
         // A wide load over a half-written range still faults.
-        assert!(matches!(
+        assert_matches!(
             mem.load(STACK_BASE - 8, MemSize::Dw),
             Err(MemError::UninitializedRead { .. })
-        ));
+        );
     }
 
     #[test]
     fn rejects_misaligned() {
         let mut mem = MemoryView::default();
-        assert!(matches!(
-            mem.store(STACK_BASE - 7, MemSize::W, 1),
-            Err(MemError::Misaligned { .. })
-        ));
-        assert!(matches!(mem.load(STACK_BASE - 12, MemSize::Dw), Err(MemError::Misaligned { .. })));
+        assert_matches!(mem.store(STACK_BASE - 7, MemSize::W, 1), Err(MemError::Misaligned { .. }));
+        assert_matches!(mem.load(STACK_BASE - 12, MemSize::Dw), Err(MemError::Misaligned { .. }));
         // Single-byte accesses are always aligned; disabling the check
         // admits the rest.
         mem.store(STACK_BASE - 8, MemSize::B, 1).unwrap();
@@ -740,26 +811,44 @@ mod tests {
     #[test]
     fn packet_load_and_bounds() {
         let mut mem = MemoryView::default();
-        assert!(matches!(mem.load(PACKET_BASE, MemSize::B), Err(MemError::NoPacket)));
+        assert_matches!(mem.load(PACKET_BASE, MemSize::B), Err(MemError::NoPacket));
         mem.set_packet(PacketBuffer::new(vec![0xAA, 0xBB, 0xCC, 0xDD]));
         assert_eq!(mem.packet_len(), Some(4));
         assert_eq!(mem.load(PACKET_BASE, MemSize::B).unwrap(), 0xAA);
         assert_eq!(mem.load(PACKET_BASE, MemSize::H).unwrap(), 0xBBAA);
         assert_eq!(mem.load(PACKET_BASE, MemSize::W).unwrap(), 0xDDCC_BBAA);
-        assert!(matches!(
-            mem.load(PACKET_BASE + 1, MemSize::Dw),
-            Err(MemError::OutOfBounds { .. })
-        ));
+        assert_matches!(mem.load(PACKET_BASE + 1, MemSize::Dw), Err(MemError::OutOfBounds { .. }));
         // Packet memory is read-only.
-        assert!(matches!(mem.store(PACKET_BASE, MemSize::B, 0), Err(MemError::OutOfBounds { .. })));
+        assert_matches!(mem.store(PACKET_BASE, MemSize::B, 0), Err(MemError::OutOfBounds { .. }));
         // `set_packet` also stages the `xdp_md` context.
         assert_eq!(mem.load(XDP_MD_BASE, MemSize::W).unwrap(), PACKET_BASE);
         assert_eq!(mem.load(XDP_MD_BASE + 4, MemSize::W).unwrap(), PACKET_BASE + 4);
         mem.clear_packet();
         assert_eq!(mem.packet_len(), None);
-        assert!(matches!(mem.load(PACKET_BASE, MemSize::B), Err(MemError::NoPacket)));
+        assert_matches!(mem.load(PACKET_BASE, MemSize::B), Err(MemError::NoPacket));
         // Context zeroes with the packet.
         assert_eq!(mem.load(XDP_MD_BASE, MemSize::W).unwrap(), 0);
+    }
+
+    #[test]
+    fn rodata_load_and_bounds() {
+        let mut mem = MemoryView::default();
+        assert_eq!(mem.rodata_len(), 0);
+        // Nothing staged: data-shaped reads are out-of-bounds (not `NoPacket`).
+        assert_matches!(mem.load(RODATA_BASE, MemSize::B), Err(MemError::OutOfBounds { .. }));
+        assert_eq!(MemoryView::classify(RODATA_BASE), MemRegion::Rodata);
+        mem.set_rodata(vec![0x0A, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00]);
+        assert_eq!(mem.rodata_len(), 8);
+        assert_eq!(mem.load(RODATA_BASE, MemSize::W).unwrap(), 10);
+        assert_eq!(mem.load(RODATA_BASE + 4, MemSize::W).unwrap(), 20);
+        // Bounds before alignment: straddling read faults OOB, not misaligned.
+        assert_matches!(mem.load(RODATA_BASE + 6, MemSize::W), Err(MemError::OutOfBounds { .. }));
+        // In-range but unaligned.
+        assert_matches!(mem.load(RODATA_BASE + 1, MemSize::W), Err(MemError::Misaligned { .. }));
+        // Read-only data: stores fault like packet stores.
+        assert_matches!(mem.store(RODATA_BASE, MemSize::W, 0), Err(MemError::OutOfBounds { .. }));
+        // Bulk path serves staged bytes too.
+        assert_eq!(mem.load_bytes(RODATA_BASE + 4, 4).unwrap(), vec![0x14, 0x00, 0x00, 0x00]);
     }
 
     #[test]
@@ -768,12 +857,12 @@ mod tests {
         // Zeroed before any packet: reads succeed (the struct exists),
         // stores fault (read-only).
         assert_eq!(mem.load(XDP_MD_BASE, MemSize::Dw).unwrap(), 0);
-        assert!(matches!(mem.store(XDP_MD_BASE, MemSize::W, 1), Err(MemError::OutOfBounds { .. })));
-        assert!(matches!(mem.load(XDP_MD_BASE + 8, MemSize::B), Err(MemError::OutOfBounds { .. })));
+        assert_matches!(mem.store(XDP_MD_BASE, MemSize::W, 1), Err(MemError::OutOfBounds { .. }));
+        assert_matches!(mem.load(XDP_MD_BASE + 8, MemSize::B), Err(MemError::OutOfBounds { .. }));
         // Straddling the 8-byte struct faults before alignment is checked.
-        assert!(matches!(mem.load(XDP_MD_BASE + 6, MemSize::W), Err(MemError::OutOfBounds { .. })));
+        assert_matches!(mem.load(XDP_MD_BASE + 6, MemSize::W), Err(MemError::OutOfBounds { .. }));
         // Misaligned in-bounds access faults (base is 8-aligned).
-        assert!(matches!(mem.load(XDP_MD_BASE + 1, MemSize::W), Err(MemError::Misaligned { .. })));
+        assert_matches!(mem.load(XDP_MD_BASE + 1, MemSize::W), Err(MemError::Misaligned { .. }));
         assert_eq!(MemoryView::classify(XDP_MD_BASE), MemRegion::XdpMd);
         assert_eq!(MemoryView::classify(XDP_MD_BASE + 100), MemRegion::XdpMd);
     }
@@ -783,33 +872,30 @@ mod tests {
         let mut mem = MemoryView::default();
         assert_eq!(mem.map_scratch_len(), 0);
         // Empty scratch: every read is out of bounds.
-        assert!(matches!(
-            mem.load(MAP_SCRATCH_BASE, MemSize::B),
-            Err(MemError::OutOfBounds { .. })
-        ));
+        assert_matches!(mem.load(MAP_SCRATCH_BASE, MemSize::B), Err(MemError::OutOfBounds { .. }));
         mem.set_map_scratch(vec![0x0A, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(mem.map_scratch_len(), 8);
         assert_eq!(mem.load(MAP_SCRATCH_BASE, MemSize::B).unwrap(), 0x0A);
         assert_eq!(mem.load(MAP_SCRATCH_BASE, MemSize::Dw).unwrap(), 0x0A);
         // Past-the-value reads fault; stores work and are readable back.
-        assert!(matches!(
+        assert_matches!(
             mem.load(MAP_SCRATCH_BASE + 8, MemSize::B),
             Err(MemError::OutOfBounds { .. })
-        ));
+        );
         mem.store(MAP_SCRATCH_BASE, MemSize::B, 0xFF).unwrap();
         assert_eq!(mem.load(MAP_SCRATCH_BASE, MemSize::B).unwrap(), 0xFF);
         // Misaligned multi-byte access faults (scratch base is 8-aligned).
-        assert!(matches!(
+        assert_matches!(
             mem.load(MAP_SCRATCH_BASE + 1, MemSize::W),
             Err(MemError::Misaligned { .. })
-        ));
+        );
         // A fresh lookup overwrites the whole scratch.
         mem.set_map_scratch(vec![1, 2]);
         assert_eq!(mem.map_scratch_len(), 2);
-        assert!(matches!(
+        assert_matches!(
             mem.load(MAP_SCRATCH_BASE + 2, MemSize::B),
             Err(MemError::OutOfBounds { .. })
-        ));
+        );
     }
 
     use proptest::prelude::*;
