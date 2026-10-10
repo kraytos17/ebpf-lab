@@ -1137,7 +1137,11 @@ mod tests {
     }
 
     /// Happy path: `base + addend` across both halves of the wide
-    /// immediate, for both raw codes seen in practice.
+    /// immediate. `R_BPF_64_64` is the observed code (the spike found
+    /// no data shape emitting `R_BPF_64_32` — only subprogram calls do,
+    /// and those never name a data section); the `R_BPF_64_32`/`None`
+    /// arms are defensive tolerance, pinned so a future loosening is
+    /// deliberate.
     #[test]
     fn resolve_data_happy_path() {
         for r_type in [Some(R_BPF_64_64), Some(R_BPF_64_32), None] {
@@ -1178,6 +1182,19 @@ mod tests {
         assert_eq!(
             prog.resolve_data_relocs(&data_table()).unwrap_err(),
             ElfError::RelocOutOfBounds { offset: 3, len: 24 }
+        );
+        // Offset past the section (slot math leaves the bytes).
+        let mut prog = data_prog(24, Some(".rodata"), Some(R_BPF_64_64));
+        assert_eq!(
+            prog.resolve_data_relocs(&data_table()).unwrap_err(),
+            ElfError::RelocOutOfBounds { offset: 24, len: 24 }
+        );
+        // `base + addend` overflow is not a linkable address.
+        let mut prog = data_prog(0, Some(".rodata"), Some(R_BPF_64_64));
+        let huge = std::collections::HashMap::from([(".rodata".to_string(), (i64::MAX, 20usize))]);
+        assert_eq!(
+            prog.resolve_data_relocs(&huge).unwrap_err(),
+            ElfError::RelocOutOfBounds { offset: 0, len: 24 }
         );
     }
 
@@ -1249,6 +1266,54 @@ mod tests {
             }
         );
         // … and the list survives the failure too.
+        assert_eq!(prog.relocations.len(), 1);
+    }
+
+    /// A subprogram-call reloc (`R_BPF_64_32` against `.text`, not an
+    /// `ld_imm_dw`) matches neither table and stays unsupported: the
+    /// data arm's `R_BPF_64_32` tolerance must never silently link a
+    /// call (calls are a v1.0 slice; the spike found no data shape
+    /// emitting this code).
+    #[test]
+    fn resolve_all_rejects_call_reloc() {
+        let mut prog = ElfProgram {
+            name: "xdp".into(),
+            prog_type: ProgType::Xdp,
+            bytes: vec![
+                ebpf_isa::opcode::JMP_CALL,
+                0x10,
+                0x00,
+                0x00,
+                0x01,
+                0x00,
+                0x00,
+                0x00,
+                0x95,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+            ],
+            relocations: vec![Relocation {
+                offset: 0,
+                symbol: Some(".text".into()),
+                kind: 0,
+                r_type: Some(R_BPF_64_32),
+                addend: 0,
+            }],
+            data_sections: Vec::new(),
+        };
+        assert_eq!(
+            prog.resolve_all_relocs(&fds(), &data_table()).unwrap_err(),
+            ElfError::UnsupportedReloc {
+                offset: 0,
+                r_type: Some(R_BPF_64_32),
+                symbol: Some(".text".into()),
+            }
+        );
         assert_eq!(prog.relocations.len(), 1);
     }
 }

@@ -1,16 +1,17 @@
 # Test fixtures
 
 Hand-assembled eBPF programs (flat `.bin`: raw little-endian 8-byte words,
-no ELF wrapper), plus two clang-built objects (`.o`, see below). Total ~6 KB.
+no ELF wrapper), plus four clang-built objects (`.o`, see below). Total ~9 KB
+of programs.
 
 They load at compile time via `include_bytes!`, so they must exist before
 `cargo test` runs — another reason they live in git rather than behind a
 generation step. The fuzz seed corpus (`fuzz/corpus/`, gitignored) is
 staged *from* these files by `fuzz/build.rs`; fixtures are its upstream
-(`*.bin` only — the `.o` is excluded, it needs the ELF loader rather than
+(`*.bin` only — the `.o` files are excluded, they need the ELF loader rather than
 the raw decoder).
 
-## The thirty-nine programs
+## The forty programs
 
 | File | Slots | Program | Exit | Exercises |
 |---|---|---|---|---|
@@ -28,7 +29,7 @@ the raw decoder).
 | `helper_ktime.bin` | 2 | `call 5; exit` | nondet | Typed helper `bpf_ktime_get_ns` (v0.6) |
 | `helper_printk.bin` | 3 | `call 6; mov r0, 0; exit` | 0 | `bpf_trace_printk` returns `Top`, exit pinned (v0.7) |
 | `map_hash_lookup.bin` | 8 slots (7 insns) | `ldimm r1, 1; r2 = r10-8; stw [r10-8], 1; call 1; stxdw [r10-16], r0; exit` | ptr (`0x30000`) | Hash lookup hit → `MapPtr`, scratch pointer saved (v0.7) |
-| `map_array_update.bin` | 10 slots (10 insns) | `ldimm r1, 2; key@r10-8 = 0; val@r10-16 = 42; r4 = 0; call 2; exit` | 0 | Array update success path (v0.7) |
+| `map_array_update.bin` | 11 slots (10 insns) | `ldimm r1, 2; key@r10-8 = 0; val@r10-16 = 42; r4 = 0; call 2; exit` | 0 | Array update success path (v0.7) |
 | `map_bad_fd.bin` | 7 slots (6 insns) | `ldimm r1, 99; call 1; exit` | ❌ `BadMapFd` (fd 99) | Unknown-fd rejection (v0.7) |
 | `map_guarded_value_access.bin` | 11 slots (10 insns) | `ldimm r1, 1; key@r10-8 = 1; call 1; jeq r0, 0, +3; stw [r0+4], 0x1234; ldxw r3, [r0+4]; mov r0, r3; exit` | 4660 | Guarded lookup → `MapPtr`, descriptor-bounded store/load roundtrip (v0.8) |
 | `map_lookup_null_load.bin` | 8 slots (7 insns) | `ldimm r1, 1; key@r10-8 = 2 (absent); call 1; ldxdw r3, [r0+0]; exit` | ❌ `NullMapPtrAccess` (VM: `OutOfBounds` @0x0) | Unguarded dereference of a lookup miss (v0.8) |
@@ -50,9 +51,74 @@ the raw decoder).
 | `opt_copy_chain.bin` | 5 | `mov r1, 7; mov r2, r1; mov r3, r2; mov r0, r3; exit` | 7 (optimized: 2 insns) | Copy-propagation chain (v0.10 Part B) |
 | `opt_dead_code.bin` | 3 | `mov r0, 1; mov r1, 99 (dead); exit` | 1 (optimized: 2 insns) | Dead-def elimination (v0.10 Part B) |
 | `opt_branch_preserved.bin` | 7 | `mov r1, 5; jeq r1, 5, +2; mov r0, 1; ja +1; mov r0, 2; add r0, 5; exit` | 25 (taken path; shape preserved) | Passes respect control flow; per-arm constants fold (v0.10 Part B) |
-| `reloc_map_lookup.o` | 12 slots (11 insns) | clang-built XDP prog: stack key, `ld_imm_dw r1, my_map` + `R_BPF_64_64` reloc at slot 4, `call 1`, null-guard, `XDP_DROP`/`XDP_PASS` | 1 (empty-map miss → drop) | Map-fd relocation linking (v0.11): `inspect` lists the reloc, `verify`/`run` resolve it via `maps_named.json`, unresolved is a fatal link error. Generated with `clang -target bpf -O2 -c prog.c -o reloc_map_lookup.o` (see spike source below); fuzz corpus excludes it (`*.bin` only) |
-| `reloc_btf.o` | 12 slots (11 insns) | Same probe rebuilt with `-g`: identical program + reloc, plus `.BTF` (401 B) and `.BTF.ext` (112 B) | 1 (empty-map miss → drop) | BTF presence (v0.11): `inspect` prints the BTF block; `verify`/`run` ignore debug sections. Generated with `clang -target bpf -O2 -g -c prog.c -o reloc_btf.o` (clang 23.1.1); fuzz corpus excludes it |
-| `rodata_lookup.o` | 7 slots (6 insns) | Clang `-O2` const-table probe: `table[2]` via one `R_BPF_64_64` reloc for `.rodata.cst16` (section symbol) | 30 (`xdp` run; default `verify` rejects the uninitialized context spill) | Static-data linking (v0.11): `inspect` lists the reloc + data section, `verify` threads the staged length, `xdp` exits 30. Generated with `clang -target bpf -O2 -c fix.c -o rodata_lookup.o` (clang 23.1.1); fuzz corpus excludes it |
+| `reloc_map_lookup.o` | 12 slots (11 insns) | clang-built XDP prog: stack key, `ld_imm_dw r1, my_map` + `R_BPF_64_64` reloc at slot 4, `call 1`, null-guard, `XDP_DROP`/`XDP_PASS` | 1 (empty-map miss → drop) | Map-fd relocation linking (v0.11): `inspect` lists the reloc, `verify`/`run` resolve it via `maps_named.json`, unresolved is a fatal link error. Generated with `clang -target bpf -O2 -c prog.c -o reloc_map_lookup.o` (probe source below); fuzz corpus excludes it (`*.bin` only) |
+| `reloc_btf.o` | 12 slots (11 insns) | Same probe rebuilt with `-g`: identical program + reloc, plus `.BTF` (401 B) and `.BTF.ext` (112 B) | 1 (empty-map miss → drop) | BTF presence (v0.11): `inspect` prints the BTF block; `verify`/`run` ignore debug sections. Generated with `clang -target bpf -O2 -g -c prog.c -o reloc_btf.o` (clang 23.1.1, probe source below); fuzz corpus excludes it |
+| `rodata_lookup.o` | 5 slots (4 insns) | Clang `-O0` const-table probe: `table[2]` via one `R_BPF_64_64` reloc for `.rodata` (section symbol) | 30 (`xdp` run; default `verify` rejects the uninitialized context spill) | Static-data linking (v0.12): `inspect` lists the reloc + data section, `verify` threads the staged length, `xdp` exits 30. Generated with `clang -target bpf -O0 -c fix.c -o rodata_lookup.o` (clang 23.1.1, probe source below); fuzz corpus excludes it (`*.bin` only) |
+| `data_lookup.o` | 5 slots (4 insns) | Clang `-O0` mutable-table probe: `dtable[2]` via one `R_BPF_64_64` reloc for `.data` (section symbol, `WA` flags — staged read-only like `.rodata`) | 33 (`xdp` run; default `verify` rejects the uninitialized context spill) | Writable-ELF read-only staging: `inspect` lists the `.data` section, `verify --packet-len` accepts, `optimize` links with no `--maps`. Generated with `clang -target bpf -O0 -c data_lookup.c -o data_lookup.o` (clang 23.1.1, probe source below); fuzz corpus excludes it (`*.bin` only) |
+
+## Probe sources
+
+The `.o` fixtures reproduce from these probes with clang 23.1.1.
+Rebuilding was verified identical against the committed objects:
+program bytes, section headers and contents, relocation entries, and
+symbol names/sizes all match. `reloc_btf.o` is `prog.c` rebuilt with
+`-g` (identical program and reloc, plus debug sections).
+
+`prog.c` → `reloc_map_lookup.o` (`-O2`; null-guarded lookup, exit 1
+on an empty-map miss):
+
+```c
+typedef unsigned int __u32;
+typedef unsigned long long __u64;
+
+struct bpf_map_def {
+    __u32 type;
+    __u32 key_size;
+    __u32 value_size;
+    __u32 max_entries;
+};
+
+struct bpf_map_def __attribute__((section(".maps"), used)) my_map = {
+    .type = 2 /* BPF_MAP_TYPE_ARRAY: descriptor bytes are inert (linking is name-based; the runtime uses --maps JSON) */,
+    .key_size = 4,
+    .value_size = 8,
+    .max_entries = 4,
+};
+
+static __u64 *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *)1;
+
+__attribute__((section("xdp"), used))
+int xdp_prog(void *ctx) {
+    __u32 key = 0;
+    __u64 *v = bpf_map_lookup_elem(&my_map, &key);
+    (void)ctx;
+    if (!v)
+        return 1;
+    return 2;
+}
+```
+
+`fix.c` → `rodata_lookup.o` (`-O0`: constant-index reads fold away
+at `-O1` and above, leaving no reloc to link):
+
+```c
+static const unsigned int table[4] = {10, 20, 30, 40};
+
+__attribute__((section("xdp"), used))
+int xdp_prog(void *ctx) {
+    (void)ctx;
+    return table[2];
+}
+```
+
+`data_lookup.c` → `data_lookup.o` (`-O0`, same folding caveat —
+mutable table, so the section is `.data` instead):
+
+```c
+static unsigned int dtable[4] = {11, 22, 33, 44};
+__attribute__((section("xdp"), used))
+int xdp_prog(void *ctx) { return dtable[2]; }
+```
 
 ## The three packets (raw bytes, `.pkt`)
 
@@ -60,7 +126,7 @@ the raw decoder).
 |---|---|---|---|
 | `pkt_ipv4_tcp.pkt` | 54 | Eth (EtherType `0800`) + IPv4 (proto 6) + 20 B TCP stub | `xdp` pass path (`XDP_PASS`), `--packet` context, `--trace` annotation demo |
 | `pkt_arp.pkt` | 42 | Eth (EtherType `0806`) + 28 B zeros | `xdp` drop path (`XDP_DROP`) |
-| `pkt_short.pkt` | 10 | Truncated frame | Verifier rejection demo (bound check proves `14 > 10` → drop block; direct over-reads reject) |
+| `pkt_short.pkt` | 10 | Truncated frame | `xdp` rejects the ethertype load with `PacketOutOfBounds` (offset-12 halfword past len 10) |
 
 Expected disassembly (from `ebpf-lab disasm`):
 
@@ -77,11 +143,11 @@ stack:     mov r1, 42 / *(dw *)(r10 + -8) = r1 / r0 = *(dw *)(r10 + -8) / exit
 
 - `ebpf-disasm` golden snapshots (11): `mov_exit`, `arith`, `branch`, `branch_untaken`, `diamond`, `ldimm`, `loop` (jump rendering), `stack` (memory ops), `endian` (`BPF_END`), `helper_prandom` (`call`), `xdp_ethertype_pass` (packet loads)
 - `ebpf-cfg` golden DOT snapshots (6): `branch`, `diamond` (merge shape), `arith`, `ldimm`, `loop` (back edge), `xdp_ethertype_pass` (multi-branch guard chain)
-- `ebpf-verifier` trace snapshots (9): `mov_exit`, `diamond`, `stack`, `loop` (widened intervals), `map_hash_lookup` (`maybe_map_ptr`), `map_guarded_value_access` (`maybe_map_ptr` → `map_ptr` across the null guard), `xdp_ethertype_pass` (`xdp_md_ptr`, `packet_ptr` with refined offsets), `helper_prandom` (effectful-helper `Top` range), `endian` (`BPF_END` transfer)
+- `ebpf-verifier` trace snapshots (10): `mov_exit`, `diamond`, `stack`, `loop` (widened intervals), `map_hash_lookup` (`maybe_map_ptr`), `map_guarded_value_access` (`maybe_map_ptr` → `map_ptr` across the null guard), `xdp_ethertype_pass` (`xdp_md_ptr`, `packet_ptr` with refined offsets), `trace_schema_data` (`data_ptr` rendering), `helper_prandom` (effectful-helper `Top` range), `endian` (`BPF_END` transfer)
 - `ebpf-vm` exec tests: listed fixtures trap-free at load (`all_fixtures_trap_free`), exit codes pinned (`fixture_exit_codes`), rejections pinned at load (`invalid_fixtures_trap_at_load`) and runtime (`rejection_fixtures_fail_at_runtime`); `branch`/`loop`/`diamond` target resolution + CFG differential pin
 - `ebpf-verifier` fixture tests: valid fixtures verify (incl. loops via widening + typed helpers + guarded map access + XDP bounded access with `--packet-len`), rejections pin exact `VerifyError` variants (incl. `NullMapPtrAccess`, `MapValueOutOfBounds`, `PacketOutOfBounds`, strict no-context `UninitRegister`)
-- `ebpf-verifier` differential tests: accepted map fixtures run `MemError`-free with pinned exit codes; rejected map-value fixtures fault in the VM with the matching `MemError` variant; XDP fixtures verify + run clean under a shared concrete length, rejections agree with VM faults
-- `ebpf-ssa` equivalence oracle: all fixtures (incl. verifier-rejected ones — passes preserve faults) run identically before/after `optimize`; `opt_*` pins sizes (6→2, 5→2) and branch preservation
+- `ebpf-verifier` differential tests: accepted map fixtures run `MemError`-free with pinned exit codes; rejected map-value fixtures fault in the VM with the matching `MemError` variant; XDP fixtures verify + run clean under a shared concrete length, rejections agree with VM faults; linked data loads verify + run clean under a shared staged length, past-the-bytes twins agree on the fault
+- `ebpf-ssa` equivalence oracle: all `.bin` fixtures (incl. verifier-rejected ones — passes preserve faults) run identically before/after `optimize`; `opt_*` pins sizes (6→2, 5→2) and branch preservation (`.o` fixtures take the CLI `optimize` path instead — see the e2e pins)
 - `ebpf-lab-cli` e2e: `optimize` subcommand (size lines, run-both-compare, idempotence, error paths)
 - Fuzz seeds: all thirty-six `.bin` programs, via `fuzz/build.rs`
 - `maps_example.json`: `--maps` demo (fd 1 hash + fd 2 array with initial values)
@@ -90,8 +156,20 @@ stack:     mov r1, 42 / *(dw *)(r10 + -8) = r1 / r0 = *(dw *)(r10 + -8) / exit
 ## Adding a fixture
 
 1. Hand-assemble the bytes (see `RawInsn::to_bytes` / the `w()` test helper
-   in `ebpf-vm` for the packing layout).
+   in `ebpf-vm` for the packing layout). For clang-built `.o` fixtures,
+   keep the probe minimal (one feature per object), compile with
+   `clang -target bpf` (record the exact flags, source shape, and
+   version in the table row — constant-index data reads need `-O0`,
+   otherwise the access folds away and no reloc is emitted), and confirm
+   the relocation table (`llvm-readelf --relocations`) before staging.
+   The probe sources below are worked examples.
 2. Verify: `ebpf-lab disasm` output matches intent; `ebpf-lab run` exit
    code matches.
 3. Add golden snapshots (`insta`) where the output is load-bearing.
-4. Document it in the table above. Fuzz seeds pick it up automatically.
+   Regenerate with `EBPF_LAB_UPDATE_GOLD=1 just bless`, then eyeball the
+   `*.snap` diff hunk-by-hunk before committing — blessing writes, it
+   never reviews.
+4. Document it in the table above. Fuzz seeds pick up `.bin` files
+   automatically; `.o` files stay out of the corpus (they need the ELF
+   loader) and take the CLI e2e pins instead.
+5. Run `just fixtures-check` — table/file/slot/badge consistency.

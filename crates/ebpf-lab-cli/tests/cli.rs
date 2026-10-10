@@ -359,6 +359,58 @@ fn xdp_rodata_exit_value() {
 }
 
 #[test]
+fn inspect_lists_mutable_data_sections() {
+    // Writable in ELF (`WA`), staged read-only by the lab: the listing
+    // names the section, not its permissions.
+    let out = run_ok(&["inspect", &fixture("data_lookup.o").to_string_lossy()]);
+    assert!(out.contains("Relocations: 1"), "count: {out}");
+    assert!(out.contains(".data"), "symbol: {out}");
+    assert!(out.contains("Data sections: 1"), "sections: {out}");
+    assert!(out.contains("data .data (16 bytes)"), "listing: {out}");
+}
+
+#[test]
+fn verify_data_accepts_with_packet_context() {
+    // Same spill shape as the `.rodata` probe: the context pointer is
+    // only initialized under a packet length.
+    let out =
+        run_ok(&["verify", "--packet-len", "64", &fixture("data_lookup.o").to_string_lossy()]);
+    assert!(out.contains("verified:"), "out: {out}");
+}
+
+#[test]
+fn verify_data_rejects_without_context() {
+    let out = run_ok(&["verify", &fixture("data_lookup.o").to_string_lossy()]);
+    assert!(out.contains("rejected:"), "out: {out}");
+    assert!(out.contains("r1"), "names the register: {out}");
+}
+
+#[test]
+fn xdp_data_exit_value() {
+    // Constant index: `dtable[2]` is 33 regardless of the packet.
+    let out = run_ok(&[
+        "xdp",
+        &fixture("data_lookup.o").to_string_lossy(),
+        &fixture("pkt_ipv4_tcp.pkt").to_string_lossy(),
+    ]);
+    assert!(out.contains("(33)"), "out: {out}");
+}
+
+#[test]
+fn optimize_data_links_without_maps() {
+    // Data addresses are self-contained (staged from the file itself),
+    // so unlike map-fd relocs they need no `--maps` table to optimize.
+    let out_path = temp_out("data_links");
+    let out = run_ok(&[
+        "optimize",
+        &fixture("data_lookup.o").to_string_lossy(),
+        "-o",
+        &out_path.to_string_lossy(),
+    ]);
+    assert!(out.contains("optimized:"), "out: {out}");
+}
+
+#[test]
 fn inspect_lists_btf_sections() {
     let out = run_ok(&["inspect", &fixture("reloc_btf.o").to_string_lossy()]);
     assert!(out.contains("BTF: .BTF ("), "btf: {out}");
@@ -464,6 +516,18 @@ fn xdp_rejects_unguarded_packet_access() {
         "xdp",
         &fixture("xdp_unguarded_access.bin").to_string_lossy(),
         &fixture("pkt_ipv4_tcp.pkt").to_string_lossy(),
+    ]);
+    assert!(out.contains("rejected:"), "out: {out}");
+    assert!(out.contains("packet out of bounds"), "out: {out}");
+}
+
+#[test]
+fn xdp_rejects_truncated_packet() {
+    // 10-byte frame: the offset-12 ethertype load is past the end.
+    let out = run_ok(&[
+        "xdp",
+        &fixture("xdp_ethertype_pass.bin").to_string_lossy(),
+        &fixture("pkt_short.pkt").to_string_lossy(),
     ]);
     assert!(out.contains("rejected:"), "out: {out}");
     assert!(out.contains("packet out of bounds"), "out: {out}");

@@ -139,6 +139,13 @@ jobs:
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - run: actionlint -no-color
 
+  changelog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: python3 .github/scripts/changelog_check.py CHANGELOG.md
+
   dependency-review:
     # This repo pushes straight to main; this gates the day PRs arrive.
     # Licenses stay cargo-deny's single authority (no second allow-list

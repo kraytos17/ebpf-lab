@@ -36,6 +36,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `R_BPF_64_64` reloc for `.rodata.cst16`), with `verify` (packet
   context), `xdp` exit 30, unresolved-`inspect`, and differential
   verify/run agreement pins.
+- Fixtures: `data_lookup.o` (clang `-O0` mutable-table probe, one
+  `R_BPF_64_64` reloc for `.data`), with `verify` (packet context),
+  `xdp` exit 33, `inspect` section listing, and an `optimize` pin
+  proving data addresses link with no `--maps` table.
+- `ebpf-elf`: subprogram-call relocs (`R_BPF_64_32` against `.text`,
+  the only shape clang emits with that code — data references are
+  always `R_BPF_64_64`) reject as `UnsupportedReloc` through
+  `resolve_all_relocs`, pinned (calls stay a v1.0 slice).
 
 ### Changed
 
@@ -44,6 +52,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   acceptance is now memory-safety plus termination, per the updated
   bounded-loop contract). `loop_over_budget.bin` still verifies by
   default and rejects under the CLI budget with `LoopBudgetExceeded`.
+
+### Fixed
+
+- **BREAKING** `ebpf-verifier`: iteration-bound counter provenance
+  (`bound.rs`). The stride must sit on every header-to-latch path (a
+  skippable stride never terminates, yet body-scan math counted it —
+  an infinite loop verified with 11 trips), and no write outside the
+  stride site may sit inside any loop body (a sibling loop mutating
+  the counter invalidates the entry snapshot). Both reject as
+  `UnboundedLoop`, pinned by `stride_off_path_rejects` and
+  `sibling_counter_write_rejects`; loopless writes (preheader init,
+  post-loop reuse) stay legal. No committed fixture changes verdict.
 
 ## [0.11.0] - 2026-10-10
 

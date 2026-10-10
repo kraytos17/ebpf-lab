@@ -4,18 +4,16 @@
 [![fuzz](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml/badge.svg)](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml)
 [![msrv](https://img.shields.io/badge/MSRV-1.99-blue)](https://github.com/kraytos17/ebpf-lab)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-349-blue)](https://github.com/kraytos17/ebpf-lab)
-[![fixtures](https://img.shields.io/badge/fixtures-39-orange)](tests/fixtures/)
+[![tests](https://img.shields.io/badge/tests-358-blue)](https://github.com/kraytos17/ebpf-lab)
+[![fixtures](https://img.shields.io/badge/fixtures-40-orange)](tests/fixtures/)
 
 An eBPF laboratory in Rust: inspect, verify, execute, and optimize eBPF programs.
 
 Implements the **decode → disassemble → CFG → VM → verify → optimize** pipeline:
 a memory model (uninitialized-stack detection, alignment enforcement, packet,
 map, and read-only data regions), an XDP packet simulator (`xdp` subcommand,
-`xdp_md` staging, `PacketPtr` bound checks), and an SSA optimizer (`optimize` subcommand, verified
-run-equivalence oracle). Backed by 36 hand-assembled fixtures plus three
-clang-built objects, three libFuzzer
-harnesses, property-based tests, and golden/snapshot coverage.
+`xdp_md` staging, `PacketPtr` bound checks), and an SSA optimizer (`optimize` subcommand, verified run-equivalence oracle). Backed by 36 hand-assembled fixtures plus four
+clang-built objects, three libFuzzer harnesses, property-based tests, and golden/snapshot coverage.
 
 ## Quickstart
 
@@ -104,7 +102,7 @@ range fault — matching the kernel verifier's diagnostic priority.
 
 ## Test fixtures
 
-36 hand-assembled `.bin` programs + 3 clang-built `.o` + 3 raw `.pkt` packets exercising the
+36 hand-assembled `.bin` programs + 4 clang-built `.o` + 3 raw `.pkt` packets exercising the
 happy path *and* canonical rejections. See
 [`tests/fixtures/README.md`](tests/fixtures/README.md) for the full table
 (bytes, assembly, exit code, what each exercises).
@@ -141,6 +139,7 @@ Highlights:
 | `illegal.bin` | Unknown opcode → `IllegalInstruction` |
 | `reloc_map_lookup.o` | Clang-built XDP prog: map-fd reloc links via `--maps` names, exit 1 |
 | `rodata_lookup.o` | Clang-built XDP prog: const-table data reloc links at load, exit 30 |
+| `data_lookup.o` | Clang-built XDP prog (`-O0`): mutable-table `.data` reloc links at load, exit 33; `optimize` links it with no `--maps` |
 | `reloc_btf.o` | Same probe with debug info: `inspect` shows the BTF block |
 | `loop_unbounded.bin` | `UnboundedLoop` rejection (exitless loops prove no trip count) |
 | `loop_over_budget.bin` | Accepted-but-over-budget gap pin: 10M-bound loop vs the 1M CLI budget |
@@ -263,7 +262,7 @@ for the SSA pipeline end to end.
 
 1. `git clone` → `cargo build --workspace`
 2. Add fixtures to `tests/fixtures/` (see [the guide](tests/fixtures/README.md))
-3. Run `just verify` — all 349 tests + clippy + doc must be green
+3. Run `just verify` — all 358 tests + clippy + doc must be green
 4. Run `cargo insta review` after disassembler/CFG changes to accept new snapshots
 5. Run `just fuzz-smoke` before touching the decoder or verifier
 

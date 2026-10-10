@@ -22,6 +22,7 @@ use std::collections::HashSet;
 
 use ebpf_cfg::{Cfg, EdgeKind};
 use ebpf_isa::insn::{AluOp, Insn, JumpOp, Operand, Reg};
+use petgraph::algo::dominators::Dominators;
 use petgraph::graph::NodeIndex;
 use petgraph::visit::EdgeRef;
 
@@ -69,7 +70,7 @@ pub fn enforce_loop_bounds(
         return Ok(Vec::new());
     }
 
-    let loops = natural_loops(cfg);
+    let (loops, dom) = natural_loops(cfg);
     // Inner-first: strictly smaller bodies solve before the bodies that
     // contain them, so enclosing totals can substitute inner ones (the
     // `totals[j]` lookup below always hits — failure returns early).
@@ -79,7 +80,7 @@ pub fn enforce_loop_bounds(
     let mut totals: Vec<Option<u128>> = vec![None; loops.len()];
     let mut out = Vec::with_capacity(loops.len());
     for i in order {
-        let total = loop_total(cfg, insns, snapshots, &loops, &totals, i)?;
+        let total = loop_total(cfg, insns, snapshots, &loops, &totals, i, &dom)?;
         totals[i] = Some(u128::from(total.steps));
         if let Some(max) = max_steps
             && total.steps > max
@@ -111,7 +112,7 @@ struct NaturalLoop {
 /// The body is the reverse reachable set from the latch stopping at the
 /// header (both endpoints included). Self-edges (`ja -1`) are loops with
 /// a one-block body.
-fn natural_loops(cfg: &Cfg) -> Vec<NaturalLoop> {
+fn natural_loops(cfg: &Cfg) -> (Vec<NaturalLoop>, Dominators<NodeIndex>) {
     let dom = petgraph::algo::dominators::simple_fast(&cfg.graph, cfg.entry);
     let dominates =
         |a: NodeIndex, b: NodeIndex| dom.dominators(b).is_some_and(|mut it| it.any(|n| n == a));
@@ -143,7 +144,7 @@ fn natural_loops(cfg: &Cfg) -> Vec<NaturalLoop> {
 
     loops.sort_by_key(|l| (l.header.index(), l.latch.index()));
     loops.dedup_by_key(|l| (l.header.index(), l.latch.index()));
-    loops
+    (loops, dom)
 }
 
 /// Straight instruction count of one block as `u128` (saturating only
@@ -163,9 +164,10 @@ fn loop_total(
     loops: &[NaturalLoop],
     totals: &[Option<u128>],
     index: usize,
+    dom: &Dominators<NodeIndex>,
 ) -> Result<LoopBound, VerifyError> {
     let desc = &loops[index];
-    let (cond_pc, traversals) = infer_traversals(cfg, insns, snapshots, desc)?;
+    let (cond_pc, traversals) = infer_traversals(cfg, insns, snapshots, desc, loops, dom)?;
     let mut body: u128 = 0;
     for node in &desc.body {
         // A block heading a strictly smaller enclosed loop contributes
@@ -205,6 +207,8 @@ fn infer_traversals(
     insns: &[Insn],
     snapshots: &[Option<[RegType; 11]>],
     desc: &NaturalLoop,
+    loops: &[NaturalLoop],
+    dom: &Dominators<NodeIndex>,
 ) -> Result<(usize, u64), VerifyError> {
     let latch_bb = &cfg.graph[desc.latch];
     let latch_end = latch_bb.end.0;
@@ -229,6 +233,8 @@ fn infer_traversals(
                 snapshots,
                 desc,
                 LatchCond { op: *op, counter: *dst, bound: *k, back_taken },
+                loops,
+                dom,
             );
         }
     }
@@ -250,6 +256,7 @@ fn infer_traversals(
         if !desc.body.contains(&edge.target()) {
             continue;
         }
+
         let back_taken = matches!(edge.weight(), EdgeKind::BranchTrue);
         return trips_from_cond(
             cfg,
@@ -257,6 +264,8 @@ fn infer_traversals(
             snapshots,
             desc,
             LatchCond { op: *op, counter: *dst, bound: *k, back_taken },
+            loops,
+            dom,
         );
     }
     Err(unbounded(desc, header_bb.start.0, "header never enters the body"))
@@ -286,6 +295,8 @@ fn trips_from_cond(
     snapshots: &[Option<[RegType; 11]>],
     desc: &NaturalLoop,
     cond: LatchCond,
+    loops: &[NaturalLoop],
+    dom: &Dominators<NodeIndex>,
 ) -> Result<(usize, u64), VerifyError> {
     let LatchCond { op, counter, bound: k, back_taken } = cond;
     let cond_pc = cfg.graph[desc.latch].end.0.saturating_sub(1);
@@ -334,7 +345,8 @@ fn trips_from_cond(
         return Err(fail("frame-pointer counter"));
     }
 
-    let stride = find_stride(cfg, insns, desc, counter, cond_pc)?;
+    let (stride, site) = find_stride(cfg, insns, desc, counter, cond_pc)?;
+    check_counter_provenance(cfg, insns, loops, dom, desc, counter, site, &fail)?;
     // Init range from the first-visit snapshot: pre-widening and
     // entry-guard-refined by RPO-order construction (see `verify_core`).
     // A missing snapshot is an unreachable header — dead code never
@@ -356,6 +368,7 @@ fn trips_from_cond(
     if !signed && (lo < 0 || bound < 0) {
         return Err(fail("unsigned comparison below zero"));
     }
+
     let traversals = count_traversals(cc, stride, lo, hi, cond_pc)?;
     let traversals =
         u64::try_from(traversals).map_err(|_| unbounded_at(cond_pc, "trip count overflows"))?;
@@ -373,9 +386,9 @@ fn find_stride(
     desc: &NaturalLoop,
     counter: Reg,
     cond_pc: usize,
-) -> Result<i64, VerifyError> {
+) -> Result<(i64, usize), VerifyError> {
     let fail = |why: &str| unbounded_at(cond_pc, why);
-    let mut stride: Option<i64> = None;
+    let mut stride: Option<(i64, usize)> = None;
     for node in &desc.body {
         let bb = &cfg.graph[*node];
         for pc in bb.start.0..bb.end.0 {
@@ -387,8 +400,9 @@ fn find_stride(
                     if stride.is_some() {
                         return Err(fail("multiple counter updates"));
                     }
+
                     let delta = i64::from(*k);
-                    stride = Some(if matches!(op, AluOp::Add) { delta } else { -delta });
+                    stride = Some((if matches!(op, AluOp::Add) { delta } else { -delta }, pc));
                 }
                 Insn::Alu { dst, .. } | Insn::LoadImm64 { dst, .. } | Insn::Load { dst, .. }
                     if *dst == counter =>
@@ -402,11 +416,80 @@ fn find_stride(
             }
         }
     }
-    let Some(stride) = stride else { return Err(fail("no counter stride")) };
+
+    let Some((stride, site)) = stride else { return Err(fail("no counter stride")) };
     if stride == 0 {
         return Err(fail("zero stride"));
     }
-    Ok(stride)
+    Ok((stride, site))
+}
+
+/// Any instruction that can change `counter`, stride-shaped or not.
+///
+/// Mirrors the write arms of [`find_stride`] (stride, redefinition,
+/// call clobber): the provenance scan below runs program-wide, so a
+/// write shape added to one belongs in both.
+fn writes_counter(insn: &Insn, counter: Reg) -> bool {
+    match insn {
+        Insn::Alu { dst, .. } | Insn::LoadImm64 { dst, .. } | Insn::Load { dst, .. } => {
+            *dst == counter
+        }
+        Insn::Call { .. } => counter.0 <= 5,
+        _ => false,
+    }
+}
+
+/// Counter provenance for one loop: liveness plus single-writer.
+///
+/// The trip math counts the stride once per visit, which holds only
+/// if (a) the stride block dominates the latch — every visit, first
+/// included, passes through it, so a path that skips the stride
+/// cannot loop forever uncounted — and (b) no write outside the
+/// stride site sits inside any loop body — a sibling loop mutating
+/// the counter invalidates the entry snapshot the trip is computed
+/// from. Loopless writes (preheader init, post-loop reuse) execute at
+/// most once outside all visits: a loopless block on a latch-to-latch
+/// path would itself be body-contained, so exemption is exact.
+#[allow(clippy::too_many_arguments)]
+fn check_counter_provenance(
+    cfg: &Cfg,
+    insns: &[Insn],
+    loops: &[NaturalLoop],
+    dom: &Dominators<NodeIndex>,
+    desc: &NaturalLoop,
+    counter: Reg,
+    site: usize,
+    fail: &dyn Fn(&str) -> VerifyError,
+) -> Result<(), VerifyError> {
+    let in_body = |pc: usize| {
+        loops.iter().flat_map(|l| l.body.iter()).any(|node| {
+            let bb = &cfg.graph[*node];
+            (bb.start.0..bb.end.0).contains(&pc)
+        })
+    };
+
+    let site_node = desc
+        .body
+        .iter()
+        .find(|node| {
+            let bb = &cfg.graph[**node];
+            (bb.start.0..bb.end.0).contains(&site)
+        })
+        .copied();
+    let live = site_node
+        .is_some_and(|node| dom.dominators(desc.latch).is_some_and(|mut it| it.any(|n| n == node)));
+    if !live {
+        return Err(fail("stride not on every path to the latch"));
+    }
+    for (pc, insn) in insns.iter().enumerate() {
+        if pc == site || !writes_counter(insn, counter) {
+            continue;
+        }
+        if in_body(pc) {
+            return Err(fail("counter written outside the stride"));
+        }
+    }
+    Ok(())
 }
 
 /// Back-edge traversals for one canonical continue-condition.
@@ -692,6 +775,66 @@ mod tests {
         assert_matches!(
             enforce_loop_bounds(&cfg, &insns, &snapshots, None).unwrap_err(),
             VerifyError::UnboundedLoop { .. }
+        );
+    }
+
+    /// A stride the back-edge path can skip never terminates, yet
+    /// body-scan math would count it: the header's taken edge reaches
+    /// the latch without passing the stride block, so r1 stays 0 and
+    /// both conditions hold forever.
+    #[test]
+    fn stride_off_path_rejects() {
+        let insns = vec![
+            jlt(Reg(1), 5, 2),
+            add(Reg(1), 1),
+            Insn::Jump {
+                width: Width::B64,
+                op: JumpOp::Always,
+                dst: Reg(0),
+                src: Operand::Imm(0),
+                offset: 0,
+            },
+            jlt(Reg(1), 10, -4),
+            exit(),
+        ];
+        let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+        let snapshots = snaps(&cfg, Reg(1), Range::exact(0));
+        assert_eq!(
+            enforce_loop_bounds(&cfg, &insns, &snapshots, None).unwrap_err(),
+            VerifyError::UnboundedLoop { pc: 3 }
+        );
+    }
+
+    /// A sibling loop body writing this loop's counter invalidates the
+    /// entry snapshot the trip was computed from: the reset below keeps
+    /// the 0-trip edge dead while its own loop spins, and the analysis
+    /// cannot tell a benign reset from a lethal one — any cross-body
+    /// write rejects.
+    #[test]
+    fn sibling_counter_write_rejects() {
+        let insns = vec![
+            add(Reg(1), 1),
+            jlt(Reg(1), 5, 1),
+            Insn::Jump {
+                width: Width::B64,
+                op: JumpOp::Always,
+                dst: Reg(0),
+                src: Operand::Imm(0),
+                offset: -3,
+            },
+            Insn::Alu { width: Width::B64, op: AluOp::Mov, dst: Reg(1), src: Operand::Imm(0) },
+            add(Reg(2), 1),
+            jlt(Reg(2), 10, -4),
+            exit(),
+        ];
+        let cfg = ebpf_cfg::build_cfg(&insns).unwrap();
+        let mut regs = std::array::from_fn(|_| RegType::NotInit);
+        regs[Reg(1).index()] = RegType::Scalar(Range::exact(0));
+        regs[Reg(2).index()] = RegType::Scalar(Range::exact(0));
+        let snapshots = vec![Some(regs); cfg.graph.node_count()];
+        assert_eq!(
+            enforce_loop_bounds(&cfg, &insns, &snapshots, None).unwrap_err(),
+            VerifyError::UnboundedLoop { pc: 2 }
         );
     }
 

@@ -3,7 +3,7 @@
 An eBPF laboratory in Rust: decode → disassemble → CFG → VM → verify → optimize.
 Eight workspace crates, zero `unsafe`, interval-lattice verifier with
 threshold widening + typed/map/packet helpers, SSA optimizer with
-run-equivalence oracle, 349 tests, ~90% line coverage.
+run-equivalence oracle, 358 tests, ~90% line coverage.
 
 ## 1. Gates (run these, in this order)
 
@@ -48,7 +48,7 @@ crates/
   ebpf-verifier/   static verifier (Range lattice, worklist, helpers, JSON trace)
   ebpf-ssa/        register SSA + optimizer (build_ssa, optimize, lower, SsaError)
   ebpf-lab-cli/    `ebpf-lab` binary (inspect, disasm, cfg, run, verify, optimize)
-tests/fixtures/    36 hand-assembled .bin programs + 2 clang-built .o objects + 3 raw .pkt packets + maps_example.json + maps_named.json
+tests/fixtures/    36 hand-assembled .bin programs + 4 clang-built .o objects + 3 raw .pkt packets + maps_example.json + maps_named.json
 fuzz/              own workspace ([workspace] in fuzz/Cargo.toml, own Cargo.lock)
 ```
 
@@ -224,8 +224,10 @@ behaviour without reading the body.
 
 - **Addresses**: stack `[STACK_BASE-512, STACK_BASE)`, packet at
   `PACKET_BASE`, map scratch at `MAP_SCRATCH_BASE` (higher priority than
-  packet in `classify`). Scratch holds exactly one value (latest lookup);
-  always readable, alignment-checked, bounds-checked.
+  packet in `classify`), read-only data at `RODATA_BASE` (concatenated
+  `.rodata`/`.data` image staged by `install_rodata`, fully initialized
+  by construction, stores fault). Scratch holds exactly one value
+  (latest lookup); always readable, alignment-checked, bounds-checked.
 - **`MemoryView`** is the single chokepoint: `load`/`store` route by region.
   Bounds are checked **before** alignment (kernel diagnostic priority).
   Stack init tracking is a `[u64; 8]` bitset (never a byte bitmap).
@@ -285,7 +287,10 @@ behaviour without reading the body.
   comment naming the transfer path they cover. New arms must be derived
   from `decode.rs`/`classify` and verified through a `disasm` round-trip
   (never copy hex from memory); acceptance must not drop below ~10/256
-  (rebalance `mov`/`add` weights first, cut arms last).
+  (rebalance `mov`/`add` weights first, cut arms last). A deterministic
+  256-program census found 32 cyclic programs, all rejected as
+  unprovable; the accepted programs are all acyclic, so the bounds
+  slice moves verdicts only on loops no trip math could prove.
 - **Maps oracle** (`accept_implies_vm_safe_maps`): the maps-configured
   sibling — `VerifyConfig::with_maps(test_maps())` +
   `Vm::new_with_maps`, over well-formed lookup/update/delete shapes
@@ -304,6 +309,13 @@ behaviour without reading the body.
   the same load one byte past (pinned by
   `packet_guard_complement_pins`). Multi-byte packet loads need a point
   offset range; acceptance is full by construction.
+- **Data oracle** (`data_fixtures_verify_and_run_memory_clean`): the
+  data-configured agreement check — `VerifyConfig::with_data_len` plus
+  `Vm::install_rodata` over a linked `table[2]` load (verifies, exits
+  30) and its past-the-bytes twin (rejects `DataOutOfBounds`, faults
+  with the matching `MemError`). The CLI pairs lengths exactly this
+  way (`data_table` and `stage_data` share the concatenation layout,
+  so multi-section images agree by construction).
 
 ## 6. Testing strategy (what lives where)
 
@@ -312,10 +324,10 @@ behaviour without reading the body.
 | Unit | `src/*.rs` `mod tests` | transfer fns, lattice ops, CRUD, error variants |
 | Proptest (256 cases) | `state.rs`, `maps.rs`, `memory.rs`, `decode.rs`/`encode.rs` | lattice laws, model properties (roundtrip, delete-then-miss, LRU capacity), wire roundtrip, never-panics |
 | Golden (insta) | `ebpf-disasm/tests/golden.rs` (11), `ebpf-cfg/tests/golden.rs` (6) | disassembly text, DOT graphs — incl. loop back-edge, `call`, packet loads, multi-branch dispatch |
-| Trace snapshots (insta) | `ebpf-verifier/tests/trace_snapshot.rs` (9) | JSON schema incl. widened intervals, `maybe_map_ptr`/`map_ptr`, `xdp_md_ptr`/`packet_ptr`, helper `Top` ranges, `BPF_END` |
+| Trace snapshots (insta) | `ebpf-verifier/tests/trace_snapshot.rs` (10) | JSON schema incl. widened intervals, `maybe_map_ptr`/`map_ptr`, `xdp_md_ptr`/`packet_ptr`, `data_ptr`, helper `Top` ranges, `BPF_END` |
 | Fixture accept/reject | `ebpf-verifier/tests/fixtures.rs`, `ebpf-vm/src/exec.rs` | exact `VerifyError`/`VmError` variants, pinned exit codes |
 | Differential oracle | `ebpf-verifier/tests/differential.rs` | fixtures + three 256-case properties (default + maps + packet) |
-| CLI e2e | `ebpf-lab-cli/tests/cli.rs` (46) | every subcommand/flag via `CARGO_BIN_EXE`, incl. `--maps` errors |
+| CLI e2e | `ebpf-lab-cli/tests/cli.rs` (59) | every subcommand/flag via `CARGO_BIN_EXE`, incl. `--maps` errors |
 | Fuzz | `fuzz/fuzz_targets/` (decode_program + verify_pipeline + ssa_pipeline) | totality: errors, never panic/hang/OOM; `ssa_pipeline` asserts run-equivalence |
 
 - Shared verifier-test helpers live in `crates/ebpf-verifier/tests/common/`
@@ -347,7 +359,8 @@ behaviour without reading the body.
 test helper) → `ebpf-lab disasm` matches intent, `ebpf-lab run` exit matches
 → add golden snapshots where output is load-bearing → document in
 `tests/fixtures/README.md` table → fuzz seeds + `all_fixtures_trap_free`
-pick it up automatically → add accept/reject + exit-code pins.
+pick it up automatically → add accept/reject + exit-code pins → `just
+fixtures-check` green.
 
 **Add a helper**: VM impl (`HelperFn` in `ebpf-vm/src/lib.rs`, register in
 `with_map_helpers`) + verifier signature (`HelperSignature` impl +
@@ -370,7 +383,9 @@ type. The `examples/profile_*.rs` drivers are the attribution harness.
 
 **Change JSON trace output**: update code → `INSTA_UPDATE=new cargo test`
 → eyeball the `.snap.new` diff field-by-field → promote → commit the
-`.snap`. Never bulk-accept.
+`.snap`. Never bulk-accept. (`EBPF_LAB_UPDATE_GOLD=1 just bless` rewrites
+the three snapshot suites in place for the same review — it writes, you
+still eyeball every hunk before committing; it refuses under CI.)
 
 **Release**: bump the workspace `version` and the seven path-dep entries →
 `cargo check --locked` (refreshes `Cargo.lock`) → CHANGELOG: move
@@ -421,13 +436,20 @@ counts → commit → tag `vX.Y.0`.
   nothing, so half its work at the fixpoint was no-op (now an early return,
   −24.5 % instructions). The last iteration of any `while changed` loop is
   usually the one that does nothing — make its path cheap.
+- Trip math counts the stride once per visit: `bound.rs` enforces
+  stride-on-every-path (dominance) plus single-writer (no loop-contained
+  write outside the stride site), pinned by `stride_off_path_rejects`
+  and `sibling_counter_write_rejects`. A body-scan-only stride
+  accepts infinite loops — do not "simplify" the provenance check
+  away.
 
 ## 9. Docs that must stay in sync (checklist for every change)
 
 - `README.md`: badges (tests/fixtures counts), subcommand table, crate map,
   memory-model table (incl. scratch rows), fixture highlights, bench
   baselines, milestones, contributing count.
-- `CHANGELOG.md`: Keep-a-Changelog. Per release section:
+- `CHANGELOG.md`: Keep-a-Changelog (`just changelog-check` / CI enforces
+  the structure below; prose stays human review). Per release section:
   - A `## [X.Y.0] - YYYY-MM-DD` heading (date is the release day) **and**
     a matching `[X.Y.0]:` link at the bottom, ascending, before the oldest.
     A section without a link (or a link without a section) is a broken

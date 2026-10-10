@@ -36,6 +36,29 @@ insta:
     # AGENTS.md §7 requires review semantics for schema changes.
     cargo insta test
 
+# Bless snapshot goldens (`scripts/bless.sh`): overwrite `.snap` files in
+# place, but ONLY for the three snapshot suites (disasm/cfg goldens,
+# verifier trace schema). SAIL-style gate: EBPF_LAB_UPDATE_GOLD=1 just
+# bless; refuses under CI. Blessing writes, it never reviews — eyeball
+# the printed `*.snap` diff hunk-by-hunk before committing (AGENTS.md
+# §7). Never wire this into `verify` or CI. CLI text pins, exit codes,
+# and `.bin` inputs are intentionally NOT blessable (user-visible
+# contract, hand-edit them).
+bless:
+    @./scripts/bless.sh
+
+# Fixture-table consistency (`scripts/fixtures-check.sh`): every program
+# file has a README row and vice versa, `.bin` slot counts match file
+# bytes, `.o` instruction counts match `inspect`, packet lengths and the
+# fixtures badge match. Read-only apart from building the CLI.
+fixtures-check:
+    @./scripts/fixtures-check.sh
+
+# CHANGELOG contract (`AGENTS.md` §9): sections, dates, links, heading
+# order. Read-only, stdlib python only.
+changelog-check:
+    @python3 .github/scripts/changelog_check.py CHANGELOG.md
+
 [working-directory: 'fuzz']
 fuzz-smoke:
     cargo +nightly fuzz run decode_program -- -max_total_time=60
@@ -140,8 +163,8 @@ fixtures:
 
 help:
     @echo "Gates:   verify, verify-all, fmt, lint, test, doc, deny"
-    @echo "Quality: cov, cov-lcov, insta"
+    @echo "Quality: cov, cov-lcov, insta, bless"
     @echo "Fuzz:    fuzz-smoke, fuzz-soak [target] [secs]"
     @echo "Bench:   bench-quick, bench-release"
     @echo "Profile: profile <vm|verify|ssa>, profile-counters, cache-profile"
-    @echo "Misc:    size, fixtures"
+    @echo "Misc:    size, fixtures, fixtures-check, changelog-check"

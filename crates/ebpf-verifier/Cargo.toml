@@ -1,6 +1,6 @@
 [package]
 name = "ebpf-verifier"
-description = "eBPF verifier: interval abstract interpretation with threshold widening and typed, map, and packet helpers"
+description = "eBPF verifier: interval abstract interpretation with threshold widening; typed, map, packet, and data helpers; loop iteration bounds"
 keywords = ["ebpf", "bpf", "verifier", "abstract-interpretation"]
 version.workspace = true
 edition.workspace = true
