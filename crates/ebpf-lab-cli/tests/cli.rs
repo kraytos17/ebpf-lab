@@ -7,6 +7,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -37,7 +38,7 @@ fn run_ok(args: &[&str]) -> String {
 /// Unique temp output path per test (parallel-safe).
 fn temp_out(test: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("ebpf-lab-cli-opt-test");
-    std::fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&dir).unwrap();
     dir.join(format!("{test}-{}.bin", std::process::id()))
 }
 
@@ -250,22 +251,22 @@ fn maps_missing_file_errors() {
 #[test]
 fn maps_malformed_json_errors() {
     let dir = std::env::temp_dir().join("ebpf-lab-cli-test");
-    std::fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&dir).unwrap();
     let bad = dir.join("bad-maps.json");
-    std::fs::write(&bad, b"{not json").unwrap();
+    fs::write(&bad, b"{not json").unwrap();
     let out = cli().args(["verify", "--maps", &bad.to_string_lossy(), "x"]).output().unwrap();
     assert!(!out.status.success(), "malformed maps file should fail");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("maps"), "stderr names the maps file: {err}");
-    std::fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
 fn maps_oversized_fd_errors() {
     let dir = std::env::temp_dir().join("ebpf-lab-cli-test-bigfd");
-    std::fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(&dir).unwrap();
     let big = dir.join("big-fd-maps.json");
-    std::fs::write(
+    fs::write(
         &big,
         br#"[{"fd":9999999999,"type":"hash","key_size":4,"value_size":8,"max_entries":2}]"#,
     )
@@ -277,7 +278,7 @@ fn maps_oversized_fd_errors() {
     assert!(!out.status.success(), "oversized fd should fail");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("exceeds maximum"), "stderr names the ceiling: {err}");
-    std::fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -292,6 +293,41 @@ fn inspect_lists_relocations() {
     assert!(out.contains("Relocations: 1"), "count: {out}");
     assert!(out.contains("my_map"), "symbol: {out}");
     assert!(out.contains("r_type 1"), "raw code: {out}");
+}
+
+#[test]
+fn inspect_lists_btf_sections() {
+    let out = run_ok(&["inspect", &fixture("reloc_btf.o").to_string_lossy()]);
+    assert!(out.contains("BTF: .BTF ("), "btf: {out}");
+    assert!(out.contains("BTF: .BTF.ext ("), "btf ext: {out}");
+    // The debug object keeps the program's map reloc.
+    assert!(out.contains("my_map"), "reloc survives -g: {out}");
+}
+
+#[test]
+fn inspect_reports_no_btf() {
+    let out = run_ok(&["inspect", &fixture("mov_exit.bin").to_string_lossy()]);
+    assert!(out.contains("BTF: none"), "out: {out}");
+    let out = run_ok(&["inspect", &fixture("reloc_map_lookup.o").to_string_lossy()]);
+    assert!(out.contains("BTF: none"), "out: {out}");
+}
+
+#[test]
+fn verify_and_run_debug_object() {
+    let out = run_ok(&[
+        "verify",
+        &fixture("reloc_btf.o").to_string_lossy(),
+        "--maps",
+        &fixture("maps_named.json").to_string_lossy(),
+    ]);
+    assert!(out.contains("verified:"), "out: {out}");
+    let out = run_ok(&[
+        "run",
+        &fixture("reloc_btf.o").to_string_lossy(),
+        "--maps",
+        &fixture("maps_named.json").to_string_lossy(),
+    ]);
+    assert!(out.contains("exit: 1"), "out: {out}");
 }
 
 #[test]
@@ -469,7 +505,7 @@ fn optimize_is_idempotent() {
     let once = optimize_fixture("opt_redundant.bin", "idempotent_once");
     let twice_path = temp_out("idempotent_twice");
     run_ok(&["optimize", &once.to_string_lossy(), "-o", &twice_path.to_string_lossy()]);
-    let (once, twice) = (std::fs::read(&once).unwrap(), std::fs::read(&twice_path).unwrap());
+    let (once, twice) = (fs::read(&once).unwrap(), fs::read(&twice_path).unwrap());
     assert_eq!(twice, once, "second pass must be a fixpoint");
 }
 

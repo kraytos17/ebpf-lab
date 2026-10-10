@@ -26,6 +26,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Fixtures: `reloc_map_lookup.o` (clang-built XDP prog, one `R_BPF_64_64`
   reloc for `my_map`) plus `maps_named.json`, with `verify` accept, `run`
   exit 1 (empty-map miss → `XDP_DROP`), and unresolved/optimize error pins.
+- `ebpf-elf`: `BtfSection` + `btf_sections` (presence-only listing of
+  `.BTF`/`.BTF.ext` names and sizes; no type parsing). CLI `inspect`
+  prints one `BTF: <name> (<n> bytes)` line per section, or `BTF: none`
+  for BTF-less objects and flat `.bin` (never an error).
+- Fixtures: `reloc_btf.o` (the reloc probe rebuilt with `clang -target bpf
+  -O2 -g`: identical 11-insn program and `my_map` reloc, plus 401 B
+  `.BTF` and 112 B `.BTF.ext`), with `inspect` presence/absence pins and
+  `verify` accept / `run` exit 1 pins proving debug sections disturb
+  nothing.
 
 ### Fixed
 

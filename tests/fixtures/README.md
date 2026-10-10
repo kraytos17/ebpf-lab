@@ -1,7 +1,7 @@
 # Test fixtures
 
 Hand-assembled eBPF programs (flat `.bin`: raw little-endian 8-byte words,
-no ELF wrapper), plus one clang-built object (`.o`, see below). Total ~2 KB.
+no ELF wrapper), plus two clang-built objects (`.o`, see below). Total ~6 KB.
 
 They load at compile time via `include_bytes!`, so they must exist before
 `cargo test` runs — another reason they live in git rather than behind a
@@ -10,7 +10,7 @@ staged *from* these files by `fuzz/build.rs`; fixtures are its upstream
 (`*.bin` only — the `.o` is excluded, it needs the ELF loader rather than
 the raw decoder).
 
-## The thirty-five programs
+## The thirty-six programs
 
 | File | Slots | Program | Exit | Exercises |
 |---|---|---|---|---|
@@ -49,6 +49,7 @@ the raw decoder).
 | `opt_dead_code.bin` | 3 | `mov r0, 1; mov r1, 99 (dead); exit` | 1 (optimized: 2 insns) | Dead-def elimination (v0.10 Part B) |
 | `opt_branch_preserved.bin` | 7 | `mov r1, 5; jeq r1, 5, +2; mov r0, 1; ja +1; mov r0, 2; add r0, 5; exit` | 25 (taken path; shape preserved) | Passes respect control flow; per-arm constants fold (v0.10 Part B) |
 | `reloc_map_lookup.o` | 12 slots (11 insns) | clang-built XDP prog: stack key, `ld_imm_dw r1, my_map` + `R_BPF_64_64` reloc at slot 4, `call 1`, null-guard, `XDP_DROP`/`XDP_PASS` | 1 (empty-map miss → drop) | Map-fd relocation linking (v0.11): `inspect` lists the reloc, `verify`/`run` resolve it via `maps_named.json`, unresolved is a fatal link error. Generated with `clang -target bpf -O2 -c prog.c -o reloc_map_lookup.o` (see spike source below); fuzz corpus excludes it (`*.bin` only) |
+| `reloc_btf.o` | 12 slots (11 insns) | Same probe rebuilt with `-g`: identical program + reloc, plus `.BTF` (401 B) and `.BTF.ext` (112 B) | 1 (empty-map miss → drop) | BTF presence (v0.11): `inspect` prints the BTF block; `verify`/`run` ignore debug sections. Generated with `clang -target bpf -O2 -g -c prog.c -o reloc_btf.o` (clang 23.1.1); fuzz corpus excludes it |
 
 ## The three packets (raw bytes, `.pkt`)
 

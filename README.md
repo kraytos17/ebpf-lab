@@ -4,8 +4,8 @@
 [![fuzz](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml/badge.svg)](https://github.com/kraytos17/ebpf-lab/actions/workflows/fuzz.yml)
 [![msrv](https://img.shields.io/badge/MSRV-1.99-blue)](https://github.com/kraytos17/ebpf-lab)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![tests](https://img.shields.io/badge/tests-313-blue)](https://github.com/kraytos17/ebpf-lab)
-[![fixtures](https://img.shields.io/badge/fixtures-35-orange)](tests/fixtures/)
+[![tests](https://img.shields.io/badge/tests-318-blue)](https://github.com/kraytos17/ebpf-lab)
+[![fixtures](https://img.shields.io/badge/fixtures-36-orange)](tests/fixtures/)
 
 An eBPF laboratory in Rust: inspect, verify, execute, and optimize eBPF programs.
 
@@ -13,8 +13,8 @@ Implements the **decode → disassemble → CFG → VM → verify → optimize**
 a memory model (uninitialized-stack detection, alignment enforcement, packet and
 map regions), an XDP packet simulator (`xdp` subcommand, `xdp_md` staging,
 `PacketPtr` bound checks), and an SSA optimizer (`optimize` subcommand, verified
-run-equivalence oracle). Backed by 34 hand-assembled fixtures plus one
-clang-built object, three libFuzzer
+run-equivalence oracle). Backed by 34 hand-assembled fixtures plus two
+clang-built objects, three libFuzzer
 harnesses, property-based tests, and golden/snapshot coverage.
 
 ## Quickstart
@@ -30,7 +30,7 @@ cargo build --workspace
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `inspect` | Program header + disassembly | `ebpf-lab inspect program.o` |
+| `inspect` | Program header + disassembly (relocs, BTF summary) | `ebpf-lab inspect program.o` |
 | `disasm` | Raw disassembly only | `ebpf-lab disasm program.bin` |
 | `cfg` | Control-flow graph (block listing) | `ebpf-lab cfg program.bin` |
 | `cfg --dot` | Graphviz DOT output | `ebpf-lab cfg program.bin --dot \| dot -Tsvg -o cfg.svg` |
@@ -101,7 +101,7 @@ range fault — matching the kernel verifier's diagnostic priority.
 
 ## Test fixtures
 
-34 hand-assembled `.bin` programs + 1 clang-built `.o` + 3 raw `.pkt` packets exercising the
+34 hand-assembled `.bin` programs + 2 clang-built `.o` + 3 raw `.pkt` packets exercising the
 happy path *and* canonical rejections. See
 [`tests/fixtures/README.md`](tests/fixtures/README.md) for the full table
 (bytes, assembly, exit code, what each exercises).
@@ -254,7 +254,7 @@ for the SSA pipeline end to end.
 
 1. `git clone` → `cargo build --workspace`
 2. Add fixtures to `tests/fixtures/` (see [the guide](tests/fixtures/README.md))
-3. Run `just verify` — all 313 tests + clippy + doc must be green
+3. Run `just verify` — all 318 tests + clippy + doc must be green
 4. Run `cargo insta review` after disassembler/CFG changes to accept new snapshots
 5. Run `just fuzz-smoke` before touching the decoder or verifier
 

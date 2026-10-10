@@ -99,6 +99,18 @@ pub enum SectionKind {
     Ignored,
 }
 
+/// One BTF debug section: name and byte size (presence-only).
+///
+/// This deliberately carries no parsed content: v1.0 designs the real BTF
+/// API fresh instead of extending a half-type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtfSection {
+    /// Section name (`.BTF` or `.BTF.ext`).
+    pub name: String,
+    /// Section byte length.
+    pub size: usize,
+}
+
 impl SectionKind {
     /// Classifies a section name.
     ///
@@ -522,6 +534,38 @@ pub fn load_bytes(data: &[u8], label: &str) -> Result<Vec<ElfProgram>, ElfError>
     Ok(programs)
 }
 
+/// Lists BTF debug sections in an object file's bytes.
+///
+/// Returns an empty vec when the object holds no BTF (never an error —
+/// absence is the common case). Order follows the object section order.
+/// Only [`SectionKind::Btf`] (`.BTF`, `.BTF.ext`) is reported; relocations
+/// against BTF (`.rel.BTF`) and debug info stay ignored.
+///
+/// # Errors
+///
+/// - [`ElfError::Parse`] when `data` is not a valid object file.
+///
+/// # Examples
+///
+/// ```
+/// // Garbage bytes are not an object file.
+/// assert!(ebpf_elf::btf_sections(&[]).is_err());
+/// ```
+pub fn btf_sections(data: &[u8]) -> Result<Vec<BtfSection>, ElfError> {
+    let obj = object::File::parse(data)?;
+    let mut sections = Vec::new();
+    for section in obj.sections() {
+        let Ok(name) = section.name() else { continue };
+        if !matches!(SectionKind::classify(name), SectionKind::Btf) {
+            continue;
+        }
+
+        let Ok(bytes) = section.data() else { continue };
+        sections.push(BtfSection { name: name.to_string(), size: bytes.len() });
+    }
+    Ok(sections)
+}
+
 /// Loads raw instruction bytes from a flat `.bin` file with no ELF wrapper.
 ///
 /// This is the escape hatch for hand-assembled fixtures and tests. Unlike
@@ -627,6 +671,27 @@ mod tests {
         assert!(matches!(err, ElfError::Io { .. }));
         let err = load_object(Path::new("/nonexistent/ebpf-lab-test.o")).unwrap_err();
         assert!(matches!(err, ElfError::Io { .. }));
+    }
+
+    /// BTF-less objects report no sections; the clang `-g` object reports
+    /// `.BTF` and `.BTF.ext` with nonzero sizes (names pinned, sizes only
+    /// asserted nonzero — clang-version-sensitive).
+    #[test]
+    fn btf_sections_presence() {
+        let plain = include_bytes!("../../../tests/fixtures/reloc_map_lookup.o");
+        assert_eq!(btf_sections(plain).unwrap(), Vec::new());
+
+        let debug = include_bytes!("../../../tests/fixtures/reloc_btf.o");
+        let sections = btf_sections(debug).unwrap();
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].name, ".BTF");
+        assert_eq!(sections[1].name, ".BTF.ext");
+        assert!(sections[0].size > 0 && sections[1].size > 0);
+    }
+
+    #[test]
+    fn btf_sections_rejects_garbage() {
+        assert!(matches!(btf_sections(&[]), Err(ElfError::Parse(_))));
     }
 
     /// One `ld_imm_dw r1, 0` placeholder plus a map-fd reloc.
