@@ -48,7 +48,7 @@ crates/
   ebpf-verifier/   static verifier (Range lattice, worklist, helpers, JSON trace)
   ebpf-ssa/        register SSA + optimizer (build_ssa, optimize, lower, SsaError)
   ebpf-lab-cli/    `ebpf-lab` binary (inspect, disasm, cfg, run, verify, optimize)
-tests/fixtures/    34 hand-assembled .bin programs + 3 raw .pkt packets + maps_example.json (COMMITTED)
+tests/fixtures/    36 hand-assembled .bin programs + 2 clang-built .o objects + 3 raw .pkt packets + maps_example.json + maps_named.json
 fuzz/              own workspace ([workspace] in fuzz/Cargo.toml, own Cargo.lock)
 ```
 
@@ -311,7 +311,7 @@ behaviour without reading the body.
 | Trace snapshots (insta) | `ebpf-verifier/tests/trace_snapshot.rs` (9) | JSON schema incl. widened intervals, `maybe_map_ptr`/`map_ptr`, `xdp_md_ptr`/`packet_ptr`, helper `Top` ranges, `BPF_END` |
 | Fixture accept/reject | `ebpf-verifier/tests/fixtures.rs`, `ebpf-vm/src/exec.rs` | exact `VerifyError`/`VmError` variants, pinned exit codes |
 | Differential oracle | `ebpf-verifier/tests/differential.rs` | fixtures + three 256-case properties (default + maps + packet) |
-| CLI e2e | `ebpf-lab-cli/tests/cli.rs` (38) | every subcommand/flag via `CARGO_BIN_EXE`, incl. `--maps` errors |
+| CLI e2e | `ebpf-lab-cli/tests/cli.rs` (46) | every subcommand/flag via `CARGO_BIN_EXE`, incl. `--maps` errors |
 | Fuzz | `fuzz/fuzz_targets/` (decode_program + verify_pipeline + ssa_pipeline) | totality: errors, never panic/hang/OOM; `ssa_pipeline` asserts run-equivalence |
 
 - Shared verifier-test helpers live in `crates/ebpf-verifier/tests/common/`

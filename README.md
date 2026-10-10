@@ -72,7 +72,7 @@ Input is `.bin` (flat bytecode) or `.o` (ELF); the CLI auto-detects.
 | Crate | Purpose | Key types |
 |-------|---------|-----------|
 | [`ebpf-isa`](crates/ebpf-isa) | Instruction encoding/decoding | `RawInsn`, `Insn`, `Reg`, `MemSize`, `Width`, `encode_program`, `AluOp::apply` |
-| [`ebpf-elf`](crates/ebpf-elf) | ELF `.o` parsing, section extraction | `ElfProgram`, `ProgType`, `SectionKind` |
+| [`ebpf-elf`](crates/ebpf-elf) | ELF `.o` parsing, section extraction, reloc linking, BTF presence | `ElfProgram`, `ProgType`, `SectionKind`, `BtfSection`, `resolve_map_relocs` |
 | [`ebpf-disasm`](crates/ebpf-disasm) | Bytecode → human-readable text | `disassemble`, `Display for Insn` |
 | [`ebpf-cfg`](crates/ebpf-cfg) | Control-flow graph construction | `BasicBlock`, `Cfg`, `Pc`, `Slot`, `to_dot` |
 | [`ebpf-vm`](crates/ebpf-vm) | Interpreter + memory + map/XDP simulator | `Vm`, `ExecInsn`, `MemoryView`, `MemError`, `MapStore`, `MapDesc`, `XdpAction`, `run_xdp` |
@@ -136,6 +136,10 @@ Highlights:
 | `join_uninit.bin` | Merge-point rejection (fixed-point regression test) |
 | `misaligned.bin` | `Misaligned` rejection (unaligned access path) |
 | `illegal.bin` | Unknown opcode → `IllegalInstruction` |
+| `reloc_map_lookup.o` | Clang-built XDP prog: map-fd reloc links via `--maps` names, exit 1 |
+| `reloc_btf.o` | Same probe with debug info: `inspect` shows the BTF block |
+| `loop_unbounded.bin` | Accepted-but-unbounded gap pin: verifies, exhausts every step budget |
+| `loop_over_budget.bin` | Accepted-but-over-budget gap pin: 10M-bound loop vs the 1M CLI budget |
 
 Fuzz seeds are staged from these via `fuzz/build.rs` (protobuf-style: refreshed only when
 fixtures change, never committed in the corpus dir).
@@ -248,6 +252,7 @@ for the SSA pipeline end to end.
 - [x] **v0.8** — Nullable, bounded map values (`MaybeMapPtr`, `value_size` bounds, `NullMapPtrAccess`/`MapValueOutOfBounds`)
 - [x] **v0.9** — Performance audit (RPO worklist, state shrink, CFG optimization, Display impls, idiomatic Rust)
 - [x] **v0.10** — Packet/XDP simulator (Part A: `xdp` subcommand, `xdp_md` staging, `PacketPtr` verifier, 5 fixtures + 3 packets), SSA construction + optimization passes (Part B: `ebpf-ssa` crate, `optimize` subcommand, run-equivalence oracle, 4 fixtures), SSA pipeline −34% instructions (liveness bundle, DCE early-out, `ConstTable`, `BlockMeta`)
+- [x] **v0.11** — Real `.o` linking (map-fd reloc resolution, `MapDesc.name`, `inspect` reloc + BTF blocks, 2 clang-built objects) + bounded-loop contract (termination-budget pins, accepted-but-over-budget gap fixtures) + SSA miscompile fixes
 - **v1.0** — Real-world compatibility (BTF, relocs, bounded loops)
 
 ## Contributing

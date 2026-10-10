@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-10
+
 ### Added
 
 - `ebpf-elf`: map-fd relocation resolution. `load_bytes` fills each
@@ -657,3 +659,4 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 [0.8.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.8.0
 [0.9.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.9.0
 [0.10.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.10.0
+[0.11.0]: https://github.com/kraytos17/ebpf-lab/releases/tag/v0.11.0
