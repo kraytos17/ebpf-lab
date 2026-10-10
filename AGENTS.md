@@ -3,7 +3,7 @@
 An eBPF laboratory in Rust: decode → disassemble → CFG → VM → verify → optimize.
 Eight workspace crates, zero `unsafe`, interval-lattice verifier with
 threshold widening + typed/map/packet helpers, SSA optimizer with
-run-equivalence oracle, 318 tests, ~90% line coverage.
+run-equivalence oracle, 322 tests, ~90% line coverage.
 
 ## 1. Gates (run these, in this order)
 

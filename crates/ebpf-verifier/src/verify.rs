@@ -10,6 +10,16 @@
 //! Trace collection is an entry-point choice, not configuration:
 //! [`verify_traced`] renders the per-PC trace, [`verify_with_config`] and
 //! [`verify`] do not, so the verdict-only paths never allocate trace strings.
+//!
+//! Bounded-loop contract: widening forces the *analysis* to terminate
+//! (finite ascent toward Top), which is not a promise that the *program*
+//! terminates. Acceptance is memory-safety: an exitless loop verifies
+//! (there is no fault to find) and the interpreter stops it with its own
+//! step budget instead. Every accepted fixture terminates inside the
+//! stated test budgets except the `loop_unbounded` / `loop_over_budget`
+//! pair, which pin exactly this gap (see
+//! `crates/ebpf-verifier/tests/bounded.rs`). Iteration-bound enforcement
+//! belongs to a later stage.
 
 use ebpf_cfg::{Cfg, EdgeKind};
 use ebpf_isa::insn::{AluOp, Insn, JumpOp, MemSize, Operand, Reg, Width};
@@ -32,7 +42,10 @@ use crate::{VerifiedProgram, VerifyError};
 pub struct VerifyConfig {
     /// Maximum join-only iterations at a block before widening fires.
     /// After this many re-joins, [`VerifierState::widen`] replaces
-    /// [`VerifierState::join`] to force convergence on loops.
+    /// [`VerifierState::join`] to force convergence on loops. This bounds
+    /// the analysis, not the program: an accepted loop may still exceed
+    /// the interpreter's step budget (see the module-level
+    /// bounded-loop contract).
     pub widening_threshold: usize,
     /// Map descriptors (from `--maps` JSON). Empty means no maps: any
     /// map-helper call rejects with [`VerifyError::BadMapFd`].

@@ -10,7 +10,7 @@ staged *from* these files by `fuzz/build.rs`; fixtures are its upstream
 (`*.bin` only — the `.o` is excluded, it needs the ELF loader rather than
 the raw decoder).
 
-## The thirty-six programs
+## The thirty-eight programs
 
 | File | Slots | Program | Exit | Exercises |
 |---|---|---|---|---|
@@ -22,6 +22,8 @@ the raw decoder).
 | `ldimm.bin` | 3 slots (2 insns) | `r2 = 0x5566778811223344; exit` | 0 | Wide `ld_imm_dw` (occupies slots 0–1, hence PC 0 → 2) |
 | `loop.bin` | 6 | `r0 = 0; r1 = 0; add r0, 1; add r1, 1; jlt r1, 10, -3; exit` | 10 | Bounded loop; verifier converges via widening (v0.6) |
 | `loop_1000_iters.bin` | 6 | `r0 = 0; r1 = 0; add r0, 1; add r1, 1; jlt r1, 1000, -3; exit` | 1000 | Long loop; widening fires after threshold (v0.6) |
+| `loop_unbounded.bin` | 1 | `ja -1` (self-loop, no exit) | ❌ `StepsExceeded` at run (verifier: accepted) | Accepted-but-unbounded gap pin (v0.11 bounded loops): widening converges, the VM exhausts every budget |
+| `loop_over_budget.bin` | 6 | Same counter shape with bound 10M | ❌ `StepsExceeded` under the 1M CLI budget (verifier: accepted) | Accepted-but-over-budget gap pin (v0.11): ~30M steps, safe but not runnable under the default budget |
 | `helper_prandom.bin` | 4 | `call 43; stxdw [r10-8], r0; ldxdw r0, [r10-8]; exit` | nondet | Typed helper `bpf_get_prandom_u32` + stack roundtrip (v0.6) |
 | `helper_ktime.bin` | 2 | `call 5; exit` | nondet | Typed helper `bpf_ktime_get_ns` (v0.6) |
 | `helper_printk.bin` | 3 | `call 6; mov r0, 0; exit` | 0 | `bpf_trace_printk` returns `Top`, exit pinned (v0.7) |
@@ -75,12 +77,12 @@ stack:     mov r1, 42 / *(dw *)(r10 + -8) = r1 / r0 = *(dw *)(r10 + -8) / exit
 - `ebpf-disasm` golden snapshots (11): `mov_exit`, `arith`, `branch`, `branch_untaken`, `diamond`, `ldimm`, `loop` (jump rendering), `stack` (memory ops), `endian` (`BPF_END`), `helper_prandom` (`call`), `xdp_ethertype_pass` (packet loads)
 - `ebpf-cfg` golden DOT snapshots (6): `branch`, `diamond` (merge shape), `arith`, `ldimm`, `loop` (back edge), `xdp_ethertype_pass` (multi-branch guard chain)
 - `ebpf-verifier` trace snapshots (9): `mov_exit`, `diamond`, `stack`, `loop` (widened intervals), `map_hash_lookup` (`maybe_map_ptr`), `map_guarded_value_access` (`maybe_map_ptr` → `map_ptr` across the null guard), `xdp_ethertype_pass` (`xdp_md_ptr`, `packet_ptr` with refined offsets), `helper_prandom` (effectful-helper `Top` range), `endian` (`BPF_END` transfer)
-- `ebpf-vm` exec tests: all thirty-four fixtures trap-free at load (`all_fixtures_trap_free`), exit codes pinned (`fixture_exit_codes`), rejections pinned at load (`invalid_fixtures_trap_at_load`) and runtime (`rejection_fixtures_fail_at_runtime`); `branch`/`loop`/`diamond` target resolution + CFG differential pin
+- `ebpf-vm` exec tests: listed fixtures trap-free at load (`all_fixtures_trap_free`), exit codes pinned (`fixture_exit_codes`), rejections pinned at load (`invalid_fixtures_trap_at_load`) and runtime (`rejection_fixtures_fail_at_runtime`); `branch`/`loop`/`diamond` target resolution + CFG differential pin
 - `ebpf-verifier` fixture tests: valid fixtures verify (incl. loops via widening + typed helpers + guarded map access + XDP bounded access with `--packet-len`), rejections pin exact `VerifyError` variants (incl. `NullMapPtrAccess`, `MapValueOutOfBounds`, `PacketOutOfBounds`, strict no-context `UninitRegister`)
 - `ebpf-verifier` differential tests: accepted map fixtures run `MemError`-free with pinned exit codes; rejected map-value fixtures fault in the VM with the matching `MemError` variant; XDP fixtures verify + run clean under a shared concrete length, rejections agree with VM faults
 - `ebpf-ssa` equivalence oracle: all fixtures (incl. verifier-rejected ones — passes preserve faults) run identically before/after `optimize`; `opt_*` pins sizes (6→2, 5→2) and branch preservation
 - `ebpf-lab-cli` e2e: `optimize` subcommand (size lines, run-both-compare, idempotence, error paths)
-- Fuzz seeds: all thirty-four programs, via `fuzz/build.rs`
+- Fuzz seeds: all thirty-six `.bin` programs, via `fuzz/build.rs`
 - `maps_example.json`: `--maps` demo (fd 1 hash + fd 2 array with initial values)
 - `maps_named.json`: `--maps` link demo (fd 1 hash named `my_map`, empty) for `reloc_map_lookup.o`
 

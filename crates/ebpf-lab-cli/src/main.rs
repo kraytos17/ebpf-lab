@@ -102,6 +102,8 @@ enum Command {
         #[arg(long)]
         trace: bool,
         /// Widening threshold: max loop-header re-joins before widening fires.
+        /// Bounds the analysis, not the program (see the bounded-loop
+        /// contract in `ebpf-verifier` docs).
         #[arg(long, default_value_t = 16)]
         max_iterations: usize,
         /// Path to a `--maps` JSON file (map descriptors with initial values).
@@ -131,7 +133,8 @@ enum Command {
         /// Path to a `--maps` JSON file (map descriptors with initial values).
         #[arg(long)]
         maps: Option<PathBuf>,
-        /// Widening threshold for the pre-run verification.
+        /// Widening threshold for the pre-run verification (bounds the
+        /// analysis, not the program).
         #[arg(long, default_value_t = 16)]
         max_iterations: usize,
     },

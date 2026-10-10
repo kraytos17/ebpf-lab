@@ -35,6 +35,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `.BTF` and 112 B `.BTF.ext`), with `inspect` presence/absence pins and
   `verify` accept / `run` exit 1 pins proving debug sections disturb
   nothing.
+- `ebpf-verifier`: bounded-loop contract (widening bounds the analysis,
+  not the program) stated in `verify.rs` docs and echoed in CLI help.
+  New `bounded` test target: accepted loops terminate with stated step
+  arithmetic (`loop` in 34 steps, `loop_1000_iters` in 3004),
+  `loop_1000_iters` accepts at widening thresholds 0/1/16/32, and the
+  `loop_unbounded` / `loop_over_budget` fixture pair pins the accepted-
+  but-over-budget gap (`StepsExceeded` at run, a `VmError` rather than
+  a `MemError`, so the differential oracle holds).
 
 ### Fixed
 

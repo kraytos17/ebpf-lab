@@ -22,6 +22,12 @@ const ACCEPT_FIXTURES: &[&str] = &[
     "stack",
     "loop",
     "loop_1000_iters",
+    // Accepted-but-unbounded: widening converges (memory-safe), the VM
+    // exhausts every budget. `StepsExceeded` is a `VmError`, not a
+    // `MemError`, so MemError-freedom holds — see the bounded-loops
+    // contract (`crates/ebpf-verifier/tests/bounded.rs`).
+    "loop_unbounded",
+    "loop_over_budget",
     "helper_prandom",
     "helper_ktime",
     "helper_printk",
